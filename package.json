@@ -1,0 +1,46 @@
+{
+  "name": "live_receptionist",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "prisma:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:local": "bash scripts/start-local-postgres.sh",
+    "db:init": "prisma generate && prisma db push",
+    "db:backfill-bookings": "node scripts/backfill-bookings.js",
+    "db:migrate-sqlite": "bash -c 'source scripts/use-node-22.sh && node scripts/migrate-sqlite-to-postgres.js \"$@\"' --",
+    "test:booking": "node scripts/test-booking-stack.js",
+    "test:telnyx": "node scripts/test-telnyx-suite.js",
+    "test:telnyx-media": "node scripts/test-telnyx-media-bridge.js",
+    "test:onboarding-media": "node scripts/test-onboarding-media-bridge.js"
+  },
+  "keywords": [
+    "gemini",
+    "live-api",
+    "receptionist",
+    "prisma",
+    "postgresql"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^2.8.0",
+    "@prisma/client": "6.19.3",
+    "csv-parse": "^7.0.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "lucide": "^1.21.0",
+    "luxon": "^3.7.2",
+    "multer": "^2.2.0",
+    "nodemailer": "^9.0.1",
+    "read-excel-file": "^9.2.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "prisma": "6.19.3"
+  }
+}

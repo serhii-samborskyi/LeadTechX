@@ -1,0 +1,15 @@
+node_modules/
+.env
+.DS_Store
+logs/
+pids/
+certs/
+dev.db
+dev.db-journal
+prisma/dev.db
+prisma/dev.db-journal
+prisma/*.db
+prisma/*.db-journal
+prisma/*.sqlite
+prisma/*.sqlite3
+prisma/*.sqlite.backup.db

@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Receptionist on Gemini Live</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <section class="auth-screen" id="authScreen">
+      <form class="auth-card" id="loginForm">
+        <p class="eyebrow"><i data-lucide="shield-check"></i> Business portal</p>
+        <h1>Sign in</h1>
+        <p>Manage your receptionist, business knowledge, and appointments.</p>
+        <label>Email<input id="loginEmail" type="email" autocomplete="username" required /></label>
+        <label>Password<input id="loginPassword" type="password" autocomplete="current-password" required /></label>
+        <p class="form-error" id="loginError"></p>
+        <button class="primary" type="submit"><i data-lucide="log-in"></i> Sign in</button>
+      </form>
+    </section>
+    <main class="shell auth-content" id="appShell" hidden>
+      <section class="topbar" id="callScreen">
+        <div>
+          <p class="eyebrow"><i data-lucide="sparkles"></i> Gemini Live receptionist</p>
+          <h1 id="title">Virtual assistant for "Business Name"</h1>
+          <p class="header-copy">Live calls, business knowledge, and appointments in one place.</p>
+        </div>
+        <div class="topbar-actions">
+          <div class="status" id="status"><i data-lucide="circle"></i> Idle</div>
+          <button id="logoutButton" class="icon-button" type="button" title="Sign out"><i data-lucide="log-out"></i></button>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel controls" aria-label="Call controls">
+          <label>
+            Business name
+            <input id="businessName" placeholder="Business Name" autocomplete="organization" />
+          </label>
+          <label>
+            Website optional
+            <input id="website" placeholder="https://example.com" autocomplete="url" />
+          </label>
+          <div class="number-status missing" id="numberStatus">
+            <span class="number-dot" aria-hidden="true"></span>
+            <div>
+              <strong id="numberStatusTitle">Phone number not checked</strong>
+              <span id="numberStatusDetail">Open business setup to check assignment.</span>
+            </div>
+          </div>
+
+          <button id="talkButton" class="primary call-action" type="button"><i data-lucide="phone-call"></i><span>Talk with agent</span></button>
+          <button id="stopButton" type="button" disabled><i data-lucide="phone-off"></i><span>Stop call</span></button>
+          <button id="testSpeakerButton" type="button"><i data-lucide="volume-2"></i><span>Test speaker</span></button>
+          <button id="refreshButton" type="button"><i data-lucide="refresh-cw"></i><span>Refresh research</span></button>
+
+          <button id="openAdminButton" type="button"><i data-lucide="sliders-horizontal"></i><span>Business setup</span></button>
+        </aside>
+
+        <section class="panel call">
+          <div class="meter-wrap">
+            <div class="voice-visualizer" id="orb" aria-hidden="true">
+              <canvas id="voiceVisualizer"></canvas>
+              <i data-lucide="audio-lines"></i>
+            </div>
+            <div>
+              <h2 id="callHeading">Ready to research the business</h2>
+              <p id="callSubheading">Start a call to build the cached business profile and connect to Gemini Live.</p>
+              <p class="diagnostics" id="diagnostics">Mic chunks: 0 | Gemini audio chunks: 0 | Audio seconds: 0.0</p>
+            </div>
+          </div>
+
+          <div class="transcript" id="transcript" aria-live="polite"></div>
+
+          <form id="textForm" class="text-row">
+            <input id="textInput" placeholder="Type a message to the live agent" />
+            <button type="submit">Send</button>
+          </form>
+        </section>
+
+        <aside class="panel profile" id="profileScreen">
+          <h2>Cached business profile</h2>
+          <dl id="profileFields">
+            <dt>Name</dt>
+            <dd id="profileName">Not loaded</dd>
+            <dt>Hours</dt>
+            <dd id="profileHours">Not loaded</dd>
+            <dt>Services</dt>
+            <dd id="profileServices">Not loaded</dd>
+            <dt>Service area</dt>
+            <dd id="profileArea">Not loaded</dd>
+          </dl>
+          <h2>Demo records</h2>
+          <div class="records" id="records">No records yet</div>
+        </aside>
+      </section>
+
+      <section class="panel admin-panel" id="businessAdmin">
+        <div class="admin-header">
+          <div>
+            <p class="eyebrow">Per-business configuration</p>
+            <h2>Business setup</h2>
+          </div>
+          <div class="admin-status" id="adminStatus">Loading</div>
+        </div>
+
+        <nav class="admin-tabs" role="tablist" aria-label="Business setup">
+          <button class="admin-tab active" data-tab="business-info" role="tab" aria-selected="true" type="button">Business</button>
+          <button class="admin-tab" data-tab="agent" role="tab" aria-selected="false" type="button">Agent</button>
+          <button class="admin-tab" data-tab="questions" role="tab" aria-selected="false" type="button">What to ask</button>
+          <button class="admin-tab" data-tab="knowledge" role="tab" aria-selected="false" type="button">Knowledge</button>
+          <button class="admin-tab" data-tab="prices" role="tab" aria-selected="false" type="button">Prices</button>
+          <button class="admin-tab" data-tab="instructions" role="tab" aria-selected="false" type="button">Instructions</button>
+          <button class="admin-tab" data-tab="appointments" role="tab" aria-selected="false" type="button">Appointments</button>
+          <button class="admin-tab" data-tab="crm" role="tab" aria-selected="false" type="button">CRM</button>
+        </nav>
+
+        <div class="admin-content">
+          <section class="admin-view active" data-view="business-info">
+            <div class="form-grid business-info-grid">
+              <label>Business name<input id="profileBusinessName" /></label>
+              <label>Website<input id="profileWebsite" type="url" /></label>
+              <label class="wide-field">Summary<textarea id="profileSummary" rows="4"></textarea></label>
+              <label>Hours<textarea id="profileHoursInput" rows="3"></textarea></label>
+              <label>Service area<textarea id="profileServiceArea" rows="3"></textarea></label>
+              <label class="wide-field">Services<textarea id="profileServicesInput" rows="4"></textarea></label>
+              <label>Phone<input id="profilePhone" type="tel" /></label>
+              <label>Email<input id="profileEmail" type="email" /></label>
+              <label class="wide-field">Address<input id="profileAddress" /></label>
+              <label>Pricing<textarea id="profilePricing" rows="3"></textarea></label>
+              <label>Booking policy<textarea id="profileBookingPolicy" rows="3"></textarea></label>
+              <label class="wide-field">FAQ (JSON)<textarea id="profileFaq" rows="6"></textarea></label>
+            </div>
+            <button id="saveBusinessProfileButton" class="primary action-button" type="button">Save business information</button>
+          </section>
+
+          <section class="admin-view" data-view="agent">
+            <div class="form-grid">
+              <label>Research model<input id="researchModel" list="researchModels" /></label>
+              <datalist id="researchModels">
+                <option value="gemini-3.1-pro-preview"></option>
+                <option value="gemini-3.5-flash"></option>
+                <option value="gemini-2.5-pro"></option>
+              </datalist>
+              <label>Live model<input id="liveModel" list="liveModels" /></label>
+              <datalist id="liveModels">
+                <option value="models/gemini-3.1-flash-live-preview"></option>
+                <option value="models/gemini-2.5-flash-native-audio-preview-09-2025"></option>
+              </datalist>
+              <label>Voice<select id="voiceName"><option>Puck</option><option>Charon</option><option>Kore</option><option>Fenrir</option><option>Aoede</option></select></label>
+              <label>Language<select id="language"><option>English</option><option>Spanish</option><option>French</option><option>German</option><option>Italian</option><option>Portuguese</option><option>Polish</option><option>Ukrainian</option><option>Russian</option><option>Arabic</option><option>Hindi</option><option>Japanese</option><option>Korean</option><option>Chinese</option></select></label>
+              <label>Agent name<input id="agentName" placeholder="Alex" autocomplete="off" /></label>
+            </div>
+            <button id="saveSettingsButton" class="primary action-button" type="button">Save agent settings</button>
+          </section>
+
+          <section class="admin-view" data-view="questions">
+            <div class="inline-editor intake-editor">
+              <input id="intakeLabel" placeholder="Field label" />
+              <input id="intakeKey" placeholder="field_key" />
+              <select id="intakeType"><option value="text">Text</option><option value="phone">Phone</option><option value="email">Email</option><option value="date">Date</option><option value="time">Time</option><option value="select">Dropdown</option></select>
+              <input id="intakeOptions" placeholder="Dropdown options, comma separated" />
+              <label class="check-label"><input id="intakeRequired" type="checkbox" /> Required</label>
+              <button id="addIntakeButton" type="button">Add field</button>
+            </div>
+            <div class="data-list" id="intakeList"></div>
+          </section>
+
+          <section class="admin-view" data-view="knowledge">
+            <div class="import-row">
+              <input id="knowledgeFile" type="file" accept=".csv,.xlsx" />
+              <button id="importKnowledgeButton" type="button">Import CSV/XLSX</button>
+              <span>Columns: question, answer, category</span>
+            </div>
+            <div class="inline-editor knowledge-editor">
+              <input id="knowledgeQuestion" placeholder="Question" />
+              <input id="knowledgeAnswer" placeholder="Answer" />
+              <input id="knowledgeCategory" placeholder="Category" />
+              <button id="addKnowledgeButton" type="button">Add answer</button>
+            </div>
+            <div class="data-list" id="knowledgeList"></div>
+          </section>
+
+          <section class="admin-view" data-view="prices">
+            <div class="import-row">
+              <input id="pricesFile" type="file" accept=".csv,.xlsx" />
+              <button id="importPricesButton" type="button">Import CSV/XLSX</button>
+              <span>Columns: item, description, price, price_type, currency, category</span>
+            </div>
+            <div class="inline-editor price-editor">
+              <input id="priceItem" placeholder="Service or item" />
+              <input id="priceDescription" placeholder="Description" />
+              <select id="priceType"><option value="fixed">Fixed</option><option value="range">Range</option><option value="starting_at">Starting at</option><option value="call_for_quote">Call for quote</option></select>
+              <input id="priceMin" type="number" step="0.01" placeholder="Amount / minimum" />
+              <input id="priceMax" type="number" step="0.01" placeholder="Maximum" />
+              <input id="priceCurrency" value="USD" placeholder="Currency" />
+              <input id="priceCategory" placeholder="Category" />
+              <button id="addPriceButton" type="button">Add price</button>
+            </div>
+            <div class="data-list" id="pricesList"></div>
+          </section>
+
+          <section class="admin-view" data-view="instructions">
+            <label>Extra instructions<textarea id="extraInstructions" rows="10" placeholder="One instruction per line"></textarea></label>
+            <div class="qualification-settings">
+              <label><input id="qualificationEnabled" type="checkbox" /> Enable outbound qualification agent</label>
+              <label>Launch mode<select id="qualificationLaunchMode"><option value="approval">After approval</option><option value="immediate">Immediately for new leads</option></select></label>
+              <label>Qualification instructions<textarea id="qualificationInstructions" rows="8" placeholder="What the outbound agent should ask, how to qualify leads, and what outcomes to use"></textarea></label>
+              <div class="form-grid">
+                <label>Natural delay min seconds<input id="qualificationDelayMinSeconds" type="number" min="0" step="1" /></label>
+                <label>Natural delay max seconds<input id="qualificationDelayMaxSeconds" type="number" min="0" step="1" /></label>
+                <label>Max attempts<input id="qualificationMaxAttempts" type="number" min="1" step="1" /></label>
+                <label>Retry delay minutes<input id="qualificationRetryDelayMinutes" type="number" min="1" step="15" /></label>
+              </div>
+            </div>
+            <button id="saveInstructionsButton" class="primary action-button" type="button">Save instructions</button>
+          </section>
+
+          <section class="admin-view" data-view="appointments">
+            <div class="form-grid calendar-settings">
+              <label>Booking mode<select id="appointmentMode"><option value="instant">Book immediately</option><option value="request">Pending request</option></select></label>
+              <label>Slot duration (minutes)<input id="slotDuration" type="number" min="5" step="5" /></label>
+              <label>Buffer (minutes)<input id="bufferMinutes" type="number" min="0" step="5" /></label>
+              <label>Timezone<input id="calendarTimezone" value="America/Chicago" /></label>
+            </div>
+            <div class="availability-list" id="availabilityRules"></div>
+            <div class="calendar-actions">
+              <button id="saveCalendarButton" class="primary" type="button">Save calendar settings</button>
+              <button id="refreshCalendarButton" type="button">Refresh calendar</button>
+            </div>
+            <div class="calendar-board">
+              <div>
+                <div class="schedule-heading">
+                  <h3>Schedule</h3>
+                  <div class="schedule-legend" aria-label="Schedule colors">
+                    <span><i class="legend-dot available"></i>Available</span>
+                    <span><i class="legend-dot booked"></i>Booked</span>
+                    <span><i class="legend-dot requested"></i>Requested</span>
+                  </div>
+                </div>
+                <div class="slot-grid" id="availableSlots"></div>
+              </div>
+              <div><h3>Booked and requested</h3><div class="data-list" id="bookedAppointments"></div></div>
+            </div>
+          </section>
+
+          <section class="admin-view" data-view="crm">
+            <div class="section-heading crm-heading">
+              <div>
+                <h3>CRM</h3>
+                <p>Incoming calls, captured leads, transcripts, recordings, and follow-up status.</p>
+              </div>
+              <button id="refreshCrmButton" type="button">Refresh CRM</button>
+            </div>
+            <div class="crm-webhook-card">
+              <div>
+                <h4>Lead webhook</h4>
+                <p>Post new website, ad, or form leads to this URL. Rotating the URL disables the old one.</p>
+              </div>
+              <div class="crm-webhook-controls">
+                <input id="crmWebhookUrl" readonly placeholder="Loading webhook URL" />
+                <button id="copyCrmWebhookButton" type="button">Copy</button>
+                <button id="rotateCrmWebhookButton" type="button">Rotate URL</button>
+              </div>
+              <small id="crmWebhookHelp">Accepted fields: name, phone, email, service, source, notes.</small>
+            </div>
+            <div class="inline-editor crm-editor">
+              <input id="crmName" placeholder="Name" />
+              <input id="crmPhone" placeholder="Phone" />
+              <input id="crmEmail" placeholder="Email" />
+              <input id="crmNeed" placeholder="Need / service" />
+              <select id="crmStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="unqualified">Unqualified</option><option value="callback">Callback</option><option value="appointment">Appointment</option><option value="transferred">Transferred</option><option value="unreachable">Unreachable</option></select>
+              <button id="addCrmLeadButton" type="button">Add lead</button>
+            </div>
+            <div class="crm-board" id="crmList"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <nav class="mobile-nav" aria-label="App navigation">
+      <button class="mobile-nav-item active" data-mobile-target="call" type="button"><i data-lucide="phone"></i><span>Call</span></button>
+      <button class="mobile-nav-item" data-mobile-target="business" type="button"><i data-lucide="building-2"></i><span>Business</span></button>
+      <button class="mobile-nav-item" data-mobile-target="calendar" type="button"><i data-lucide="calendar-days"></i><span>Calendar</span></button>
+      <button class="mobile-nav-item" data-mobile-target="setup" type="button"><i data-lucide="settings-2"></i><span>Setup</span></button>
+    </nav>
+
+    <script src="/vendor/lucide/lucide.min.js"></script>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

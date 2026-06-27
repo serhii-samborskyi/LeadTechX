@@ -1,0 +1,194 @@
+# AI Receptionist on Gemini Live
+
+Simple Node.js demo for a real-time voice receptionist backed by Gemini Live, Prisma, and PostgreSQL.
+
+## Run
+
+```bash
+./install.sh
+./restart.sh 3000
+```
+
+Open:
+
+```text
+http://localhost:3000/
+```
+
+Create an instant researched trial agent:
+
+```text
+http://localhost:3000/fastagent/?business_name=Chicago%20Locksmiths&website=https%3A%2F%2Fwww.chicagolocksmiths.net
+```
+
+The business portal requires a business account created by an administrator.
+
+Open the system administration panel at:
+
+```text
+http://localhost:3000/admin.html
+```
+
+The initial administrator is created from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Use the admin panel to configure AI models and encrypted API credentials, then create business logins. Each business login is restricted to its assigned profile and records.
+
+## What It Does
+
+- Researches the business with Gemini using Google Search and optional URL Context.
+- Caches the structured business profile and generated system prompt in PostgreSQL.
+- Starts a server-side WebSocket bridge to Gemini Live.
+- Streams browser microphone audio as 16 kHz PCM.
+- Plays Gemini Live audio responses as 24 kHz PCM.
+- Provides tool calls for appointment requests, lead capture, and transfer/escalation messages.
+- Stores demo appointments, leads, and transfer messages in PostgreSQL.
+- Provides separate administrator and business portals with database-backed sessions.
+- Stores provider credentials encrypted and never returns their values to the browser.
+- Lets administrators choose global AI models and businesses configure their own voice, language, knowledge, pricing, and calendar.
+- Creates seven-day fast-agent trials with configurable credits, secure email claim links, and immediate browser voice.
+- Supports shared Telnyx demo-number pools with per-trial caller-number routing.
+- Lets owners edit all researched business information and regenerates the live system prompt when saved.
+
+## Fast Agent Onboarding
+
+`/fastagent` accepts `business_name` and optional `website` query parameters. It automatically researches an unclaimed business, creates a trial, and opens the browser-call experience. Businesses with an active trial or account cannot be opened anonymously.
+
+Configure trial length, claim-link validity, token value, starting credits, low-balance threshold, demo-number capacity, caller limits, and SMTP under Admin > System. SMTP credentials are encrypted in PostgreSQL.
+
+Under Admin > Phone numbers, classify one or more Telnyx numbers as `Demo`. A demo number can serve the configured number of concurrent trials. Each trial may bind up to the configured number of caller phone numbers; unknown callers are rejected when no waiting trial can claim them.
+
+## Environment
+
+Create `.env`:
+
+```bash
+GEMINI_API_KEY="your-key"
+ADMIN_EMAIL="admin@example.com"
+ADMIN_PASSWORD="use-a-long-unique-password"
+APP_ENCRYPTION_KEY="use-a-separate-long-random-secret"
+DATABASE_URL="postgres://postgres:postgres@localhost:51214/template1?sslmode=disable&pgbouncer=true"
+SHADOW_DATABASE_URL="postgres://postgres:postgres@localhost:51215/template1?sslmode=disable&pgbouncer=true"
+PORT=3000
+```
+
+Provider keys can remain in `.env` or be saved through the admin panel. Database values are encrypted with `APP_ENCRYPTION_KEY`. Do not change that encryption key after saving credentials unless you replace the saved credentials too.
+
+## Scripts
+
+```bash
+./install.sh
+```
+
+Installs/checks Node.js 22+, npm, SQLite (for legacy data import), project dependencies, starts the named local Prisma Postgres instance, and initializes the schema. It supports macOS with Homebrew and common Linux package managers: apt, dnf, yum, and pacman.
+
+```bash
+npm run db:local
+```
+
+Starts the named `live-receptionist` Prisma Postgres instance when `DATABASE_URL` uses the managed local port `51214`. The command is idempotent, and `restart.sh` runs it automatically. It skips local database startup when a production `DATABASE_URL` is configured.
+
+To import the legacy SQLite database once:
+
+```bash
+npm run db:migrate-sqlite -- --reset
+```
+
+The reset option is restricted to the managed localhost database. The original SQLite file is retained at `prisma/dev.sqlite.backup.db`.
+
+```bash
+./restart.sh 3000
+```
+
+Stops any process using port `3000`, prepares the database, and starts the app in the foreground.
+
+```bash
+./restart.sh 3000 --background
+```
+
+Starts the app in the background and writes logs to `logs/app-3000.log` and the PID to `pids/app-3000.pid`.
+
+```bash
+npm run test:booking
+```
+
+Runs an end-to-end calendar diagnostic: finds a free slot, writes a temporary appointment, verifies it by confirmation code, rejects a duplicate booking, and removes the temporary record.
+
+```bash
+npm run test:telnyx
+```
+
+Validates the encrypted Telnyx credentials, Ed25519 public key, Voice API application, and owned phone-number status without printing credentials.
+
+```bash
+npm run test:onboarding-media
+```
+
+Exercises an onboarding-number call through the Telnyx media bridge and verifies that Gemini receives caller audio and returns agent audio.
+
+## Telnyx Inbound Calling
+
+Configure the Telnyx Voice API Application with webhook API version V2 and this webhook URL:
+
+```text
+https://YOUR-PUBLIC-DOMAIN/webhooks/telnyx
+```
+
+The server answers inbound calls with a token-protected bidirectional media stream at `/telnyx-media`, converts Telnyx PCMU audio to Gemini PCM, and converts Gemini PCM back to PCMU for the caller.
+
+In `/admin.html`:
+
+1. Save the Telnyx API key, public key, connection ID, and public HTTPS base URL under System.
+2. Open Phone numbers and select Sync inventory.
+3. Assign the purchased number to a business.
+
+Calls to unassigned numbers are rejected. Number purchases require an explicit confirmation after current Telnyx pricing is displayed.
+
+## Phone Onboarding
+
+Phone onboarding is administered under Admin > Onboarding:
+
+1. Set the caller lookup URL. Use `{{phone}}` where the E.164 caller number belongs, for example `https://crm.example/api/business?phone={{phone}}`. The endpoint must return JSON with `business_name` and optional `website` fields.
+2. Edit the onboarding agent instructions and choose whether calls are recorded and transcribed.
+3. Configure BlueBubbles or Sent.dm as the primary setup-link provider and optionally select the other as failover.
+4. Under Admin > Phone numbers, change a number type to `Onboarding`, enter its campaign label, and select Save.
+
+The onboarding agent looks up or collects business details, creates the trial agent, can switch its Gemini persona so the caller can test the new receptionist during the same call, and sends a unique password-setup link.
+
+For BlueBubbles, enter the server base URL, password, and the send endpoint used by your server version. The default is `/api/v1/chat/new`.
+
+For Sent.dm, create and approve a message template before enabling the provider. Configure its template ID or name and optional profile ID. The app sends `business_name` and `setup_url` as template parameters.
+
+## LAN Microphone Access
+
+Browsers allow microphone access on `http://localhost`, but not on plain HTTP LAN IPs like `http://10.0.0.211:3000`. Use HTTPS for phone or LAN testing.
+
+```bash
+scripts/generate-local-cert.sh 10.0.0.211
+./restart.sh 3000 --foreground --https
+```
+
+Then open:
+
+```text
+https://10.0.0.211:3000/?business_name=Chicago%20Locksmiths&website=https%3A%2F%2Fwww.chicagolocksmiths.net
+```
+
+The browser will show a certificate warning because this is a local self-signed certificate. Accept the warning for local demo testing.
+
+Plain HTTP on a LAN IP will not get microphone permission:
+
+```text
+http://10.0.0.211:3000
+```
+
+For a quick desktop Chrome-only dev workaround, open:
+
+```text
+chrome://flags/#unsafely-treat-insecure-origin-as-secure
+```
+
+Enable it, add:
+
+```text
+http://10.0.0.211:3000
+```
+
+Then relaunch Chrome. This is only for local development. Mobile Safari/Chrome generally need trusted HTTPS or a public HTTPS tunnel.

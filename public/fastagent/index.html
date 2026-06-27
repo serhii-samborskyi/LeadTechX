@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Your AI Receptionist</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="fast-body">
+    <main class="fast-shell">
+      <header class="fast-header">
+        <div><p class="eyebrow"><i data-lucide="sparkles"></i> Fast agent</p><strong>AI Receptionist</strong></div>
+        <span class="fast-trial" id="trialBadge">Preparing trial</span>
+      </header>
+
+      <section class="fast-loading" id="loadingScreen">
+        <div class="fast-loader" aria-hidden="true"></div>
+        <h1 id="loadingTitle">Building your receptionist</h1>
+        <p id="loadingMessage">Researching the business and preparing Gemini Live.</p>
+      </section>
+
+      <section class="fast-entry" id="entryScreen" hidden>
+        <div class="fast-entry-icon"><i data-lucide="audio-lines"></i></div>
+        <p class="eyebrow">Your business, live in minutes</p>
+        <h1>Test your AI receptionist</h1>
+        <p>Enter the business details to prepare a live agent.</p>
+        <form action="/fastagent/" method="get" class="fast-entry-form">
+          <label>Business name<input name="business_name" autocomplete="organization" placeholder="Chicago Locksmiths" required /></label>
+          <label>Website <span>optional</span><input name="website" type="url" autocomplete="url" placeholder="https://example.com" /></label>
+          <button class="primary" type="submit"><i data-lucide="sparkles"></i> Test agent</button>
+        </form>
+      </section>
+
+      <section id="agentScreen" hidden>
+        <div class="fast-agent-stage">
+          <div class="fast-orb" id="orb" aria-hidden="true">
+            <canvas id="voiceVisualizer"></canvas>
+            <i data-lucide="audio-lines"></i>
+          </div>
+          <p class="fast-status" id="callStatus">Ready</p>
+          <h1 id="agentTitle">Virtual assistant</h1>
+          <p id="agentSummary"></p>
+          <div class="fast-call-actions">
+            <button id="talkButton" class="primary" type="button"><i data-lucide="phone-call"></i> Talk with agent</button>
+            <button id="stopButton" type="button" disabled title="End call"><i data-lucide="phone-off"></i></button>
+          </div>
+        </div>
+
+        <section class="fast-section">
+          <div class="fast-section-heading"><h2>Business profile</h2><span id="credits"></span></div>
+          <div class="fast-profile-grid">
+            <div><span>Hours</span><p id="profileHours"></p></div>
+            <div><span>Service area</span><p id="profileArea"></p></div>
+            <div class="wide"><span>Services</span><p id="profileServices"></p></div>
+          </div>
+        </section>
+
+        <section class="fast-section" id="phoneSection">
+          <div class="fast-section-heading"><h2>Test by phone</h2><span id="phoneLimit"></span></div>
+          <a class="fast-phone-number" id="demoPhone"></a>
+          <form class="fast-inline-form" id="callerForm">
+            <input id="callerPhone" type="tel" placeholder="+13125550100" autocomplete="tel" required />
+            <button type="submit" title="Allow this caller number"><i data-lucide="plus"></i></button>
+          </form>
+          <div class="fast-chips" id="callerPhones"></div>
+          <p class="form-message" id="callerMessage"></p>
+        </section>
+
+        <section class="fast-section fast-claim">
+          <div><h2>Keep this receptionist</h2><p>Set your password from the secure link sent to your email.</p></div>
+          <form class="fast-inline-form" id="claimForm">
+            <input id="claimEmail" type="email" placeholder="you@business.com" autocomplete="email" required />
+            <button class="primary" type="submit"><i data-lucide="mail"></i><span>Send link</span></button>
+          </form>
+          <p class="form-message" id="claimMessage"></p>
+        </section>
+
+        <details class="fast-transcript-wrap">
+          <summary>Call transcript</summary>
+          <div class="transcript" id="transcript" aria-live="polite"></div>
+        </details>
+      </section>
+
+      <section class="fast-error" id="errorScreen" hidden>
+        <i data-lucide="circle-alert"></i>
+        <h1>Agent unavailable</h1>
+        <p id="errorMessage"></p>
+        <a class="button-link" href="/">Business sign in</a>
+      </section>
+    </main>
+    <script src="/vendor/lucide/lucide.min.js"></script>
+    <script src="/fastagent/fastagent.js" type="module"></script>
+  </body>
+</html>

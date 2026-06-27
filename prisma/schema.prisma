@@ -1,0 +1,432 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+model BusinessProfile {
+  id                 Int                    @id @default(autoincrement())
+  cacheKey           String                 @unique
+  businessName       String
+  website            String?
+  normalized         String
+  summary            String
+  hours              String?
+  services           String?
+  serviceArea        String?
+  contact            String?
+  rawData            Json
+  systemPrompt       String
+  researchModel      String
+  sourceUrls         Json?
+  accountStatus      String                 @default("unclaimed")
+  trialStartedAt     DateTime?
+  trialEndsAt        DateTime?
+  creditBalance      Int                    @default(0)
+  leadWebhookToken   String?                @unique
+  leadWebhookEnabled Boolean                @default(true)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  config             BusinessConfig?
+  users              User[]
+  voiceNumbers       VoiceNumber[]
+  voiceCalls         VoiceCall[]
+  leads              Lead[]
+  fastAgentSessions  FastAgentSession[]
+  claimTokens        AccountClaimToken[]
+  demoAssignments    DemoNumberAssignment[]
+  onboardingSessions OnboardingSession[]
+}
+
+model BusinessConfig {
+  id                  Int                @id @default(autoincrement())
+  businessProfileId   Int                @unique
+  businessProfile     BusinessProfile    @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  extraInstructions   String             @default("")
+  qualificationInstructions String        @default("You are an outbound lead qualification agent. Confirm you are speaking with the lead, ask if now is a good time, confirm what they need, urgency, location or service area, budget or price expectations when relevant, and whether they want an appointment or callback. Keep the call brief, professional, and honest.")
+  qualificationEnabled Boolean            @default(true)
+  qualificationLaunchMode String          @default("approval")
+  qualificationDelayMinSeconds Int        @default(30)
+  qualificationDelayMaxSeconds Int        @default(100)
+  qualificationMaxAttempts Int            @default(3)
+  qualificationRetryDelayMinutes Int       @default(120)
+  appointmentMode     String             @default("instant")
+  slotDurationMinutes Int                @default(30)
+  bufferMinutes       Int                @default(0)
+  timezone            String             @default("America/Chicago")
+  calendarProvider    String             @default("internal")
+  providerConfig      Json?
+  voiceName           String             @default("Puck")
+  language            String             @default("English")
+  agentName           String             @default("Alex")
+  intakeFields        IntakeField[]
+  knowledgeEntries    KnowledgeEntry[]
+  priceEntries        PriceEntry[]
+  availabilityRules   AvailabilityRule[]
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+}
+
+model IntakeField {
+  id               Int            @id @default(autoincrement())
+  businessConfigId Int
+  businessConfig   BusinessConfig @relation(fields: [businessConfigId], references: [id], onDelete: Cascade)
+  fieldKey         String
+  label            String
+  fieldType        String         @default("text")
+  required         Boolean        @default(false)
+  options          Json?
+  sortOrder        Int            @default(0)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@unique([businessConfigId, fieldKey])
+}
+
+model KnowledgeEntry {
+  id               Int            @id @default(autoincrement())
+  businessConfigId Int
+  businessConfig   BusinessConfig @relation(fields: [businessConfigId], references: [id], onDelete: Cascade)
+  question         String
+  answer           String
+  category         String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+}
+
+model PriceEntry {
+  id               Int            @id @default(autoincrement())
+  businessConfigId Int
+  businessConfig   BusinessConfig @relation(fields: [businessConfigId], references: [id], onDelete: Cascade)
+  item             String
+  description      String?
+  priceType        String         @default("fixed")
+  amountMin        Float?
+  amountMax        Float?
+  currency         String         @default("USD")
+  category         String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+}
+
+model AvailabilityRule {
+  id               Int            @id @default(autoincrement())
+  businessConfigId Int
+  businessConfig   BusinessConfig @relation(fields: [businessConfigId], references: [id], onDelete: Cascade)
+  dayOfWeek        Int
+  startTime        String         @default("09:00")
+  endTime          String         @default("17:00")
+  enabled          Boolean        @default(true)
+
+  @@unique([businessConfigId, dayOfWeek])
+}
+
+model Appointment {
+  id               Int       @id @default(autoincrement())
+  businessName     String
+  website          String?
+  customerName     String
+  phone            String?
+  email            String?
+  requestedAt      String
+  scheduledStart   DateTime?
+  scheduledEnd     DateTime?
+  durationMinutes  Int?
+  timezone         String?
+  intakeData       Json?
+  calendarProvider String    @default("internal")
+  bookingKey       String?   @unique
+  externalId       String?
+  reason           String?
+  status           String    @default("requested")
+  createdAt        DateTime  @default(now())
+}
+
+model Lead {
+  id                Int              @id @default(autoincrement())
+  businessName      String
+  website           String?
+  businessProfileId Int?
+  businessProfile   BusinessProfile? @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  voiceCallId       Int?             @unique
+  voiceCall         VoiceCall?       @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  name              String
+  phone             String?
+  email             String?
+  need              String?
+  status            String           @default("new")
+  source            String           @default("agent")
+  summary           String?
+  transcript        String?
+  notes             String?
+  extractedFields   Json?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  qualificationCalls OutboundQualificationCall[]
+
+  @@index([businessProfileId, createdAt])
+  @@index([phone, createdAt])
+  @@index([status, createdAt])
+}
+
+model TransferMessage {
+  id           Int      @id @default(autoincrement())
+  businessName String
+  website      String?
+  name         String?
+  phone        String?
+  email        String?
+  message      String
+  urgency      String?
+  createdAt    DateTime @default(now())
+}
+
+model AppSettings {
+  id                      Int      @id @default(1)
+  researchModel           String   @default("gemini-3.1-pro-preview")
+  liveModel               String   @default("models/gemini-3.1-flash-live-preview")
+  voiceName               String   @default("Puck")
+  language                String   @default("English")
+  agentName               String   @default("Alex")
+  publicBaseUrl           String   @default("")
+  trialDays               Int      @default(7)
+  claimLinkDays           Int      @default(30)
+  trialCredits            Int      @default(900)
+  tokenUsd                Float    @default(0.01)
+  lowBalanceTokens        Int      @default(100)
+  recordingRetentionDays  Int      @default(30)
+  demoNumberCapacity      Int      @default(10)
+  demoCallerLimit         Int      @default(3)
+  smtpHost                String   @default("")
+  smtpPort                Int      @default(587)
+  smtpSecure              Boolean  @default(false)
+  smtpFromEmail           String   @default("")
+  smtpFromName            String   @default("AI Receptionist")
+  onboardingLookupUrl     String   @default("")
+  onboardingVoiceName     String   @default("Puck")
+  onboardingInstructions  String   @default("You are the AI Receptionist platform onboarding specialist. Explain the value clearly, confirm the caller's business details, build their receptionist, offer a live test by switching personas, and send the secure account setup link when they are ready.")
+  onboardingRecordCalls   Boolean  @default(false)
+  onboardingTranscription Boolean  @default(true)
+  messagePrimaryProvider  String   @default("bluebubbles")
+  messageFailoverProvider String   @default("sentdm")
+  blueBubblesBaseUrl      String   @default("")
+  blueBubblesSendPath     String   @default("/api/v1/chat/new")
+  sentDmTemplateId        String   @default("")
+  sentDmTemplateName      String   @default("")
+  sentDmProfileId         String   @default("")
+  updatedAt               DateTime @updatedAt
+}
+
+model User {
+  id                Int              @id @default(autoincrement())
+  email             String           @unique
+  passwordHash      String
+  name              String?
+  role              String           @default("business")
+  businessProfileId Int?
+  businessProfile   BusinessProfile? @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  active            Boolean          @default(true)
+  sessions          Session[]
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+}
+
+model Session {
+  id        Int      @id @default(autoincrement())
+  tokenHash String   @unique
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model SystemSecret {
+  id        Int      @id @default(autoincrement())
+  secretKey String   @unique
+  encrypted String
+  hint      String?
+  updatedAt DateTime @updatedAt
+}
+
+model VoiceNumber {
+  id                Int                    @id @default(autoincrement())
+  provider          String                 @default("telnyx")
+  providerNumberId  String                 @unique
+  phoneNumber       String                 @unique
+  status            String                 @default("active")
+  numberType        String                 @default("regular")
+  label             String?
+  connectionId      String?
+  businessProfileId Int?
+  businessProfile   BusinessProfile?       @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  demoAssignments   DemoNumberAssignment[]
+  metadata          Json?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+}
+
+model FastAgentSession {
+  id                Int             @id @default(autoincrement())
+  tokenHash         String          @unique
+  businessProfileId Int
+  businessProfile   BusinessProfile @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  expiresAt         DateTime
+  lastUsedAt        DateTime        @default(now())
+  createdAt         DateTime        @default(now())
+}
+
+model AccountClaimToken {
+  id                Int             @id @default(autoincrement())
+  tokenHash         String          @unique
+  email             String
+  businessProfileId Int
+  businessProfile   BusinessProfile @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  expiresAt         DateTime
+  usedAt            DateTime?
+  createdAt         DateTime        @default(now())
+
+  @@index([email])
+}
+
+model DemoNumberAssignment {
+  id                Int                 @id @default(autoincrement())
+  voiceNumberId     Int
+  voiceNumber       VoiceNumber         @relation(fields: [voiceNumberId], references: [id], onDelete: Cascade)
+  businessProfileId Int                 @unique
+  businessProfile   BusinessProfile     @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  status            String              @default("waiting")
+  expiresAt         DateTime
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  callerBindings    DemoCallerBinding[]
+
+  @@index([voiceNumberId, status, expiresAt])
+}
+
+model DemoCallerBinding {
+  id                     Int                  @id @default(autoincrement())
+  demoNumberAssignmentId Int
+  demoNumberAssignment   DemoNumberAssignment @relation(fields: [demoNumberAssignmentId], references: [id], onDelete: Cascade)
+  callerPhone            String               @unique
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  @@unique([demoNumberAssignmentId, callerPhone])
+}
+
+model VoiceCall {
+  id                Int                @id @default(autoincrement())
+  provider          String             @default("telnyx")
+  callControlId     String             @unique
+  callSessionId     String?
+  fromNumber        String?
+  toNumber          String?
+  status            String             @default("initiated")
+  hangupCause       String?
+  lastError         String?
+  callMode          String             @default("business")
+  recordingUrl      String?
+  transcript        String?
+  businessProfileId Int?
+  businessProfile   BusinessProfile?   @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  startedAt         DateTime           @default(now())
+  answeredAt        DateTime?
+  endedAt           DateTime?
+  updatedAt         DateTime           @updatedAt
+  events            VoiceCallEvent[]
+  onboardingSession OnboardingSession?
+  lead              Lead?
+  outboundQualificationCall OutboundQualificationCall?
+}
+
+model OutboundQualificationCall {
+  id                Int              @id @default(autoincrement())
+  leadId            Int
+  lead              Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  voiceCallId       Int?             @unique
+  voiceCall         VoiceCall?       @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  attemptNumber     Int              @default(1)
+  status            String           @default("queued")
+  resultStatus      String?
+  fromNumber        String?
+  toNumber          String
+  summary           String?
+  transcript        String?
+  notes             String?
+  extractedFields   Json?
+  lastError         String?
+  scheduledFor      DateTime?
+  startedAt         DateTime?
+  answeredAt        DateTime?
+  endedAt           DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([leadId, createdAt])
+  @@index([status, createdAt])
+}
+
+model OnboardingSession {
+  id                   Int              @id @default(autoincrement())
+  voiceCallId          Int              @unique
+  voiceCall            VoiceCall        @relation(fields: [voiceCallId], references: [id], onDelete: Cascade)
+  callerPhone          String
+  campaignLabel        String?
+  status               String           @default("started")
+  businessName         String?
+  website              String?
+  email                String?
+  lookupData           Json?
+  businessProfileId    Int?
+  businessProfile      BusinessProfile? @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  personaSwitchedAt    DateTime?
+  claimLinkSentAt      DateTime?
+  messageProvider      String?
+  recordingEnabled     Boolean          @default(false)
+  transcriptionEnabled Boolean          @default(true)
+  transcript           String?
+  summary              String?
+  lastError            String?
+  completedAt          DateTime?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  @@index([callerPhone, createdAt])
+  @@index([campaignLabel, createdAt])
+}
+
+model MessageDelivery {
+  id                Int      @id @default(autoincrement())
+  provider          String
+  purpose           String
+  toPhone           String
+  status            String   @default("queued")
+  providerMessageId String?
+  detail            Json?
+  error             String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([toPhone, createdAt])
+}
+
+model VoiceCallEvent {
+  id          Int       @id @default(autoincrement())
+  voiceCallId Int
+  voiceCall   VoiceCall @relation(fields: [voiceCallId], references: [id], onDelete: Cascade)
+  eventType   String
+  detail      Json?
+  createdAt   DateTime  @default(now())
+}
+
+model TelnyxWebhookEvent {
+  id         Int      @id @default(autoincrement())
+  webhookId  String   @unique
+  eventType  String
+  payload    Json?
+  receivedAt DateTime @default(now())
+}

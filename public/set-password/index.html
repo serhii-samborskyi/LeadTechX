@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Finish account setup</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="fast-body">
+    <main class="password-shell">
+      <section class="password-panel">
+        <p class="eyebrow"><i data-lucide="shield-check"></i> Account setup</p>
+        <h1 id="setupTitle">Checking your link</h1>
+        <p id="setupDetail"></p>
+        <form id="passwordForm" hidden>
+          <label>Your name<input id="ownerName" autocomplete="name" /></label>
+          <label>Password<input id="newPassword" type="password" minlength="10" autocomplete="new-password" required /></label>
+          <label>Confirm password<input id="confirmPassword" type="password" minlength="10" autocomplete="new-password" required /></label>
+          <button class="primary" type="submit"><i data-lucide="check"></i> Finish setup</button>
+        </form>
+        <p class="form-message" id="setupMessage"></p>
+      </section>
+    </main>
+    <script src="/vendor/lucide/lucide.min.js"></script>
+    <script src="/set-password/set-password.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Receptionist Admin</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <section class="auth-screen" id="adminAuth">
+      <form class="auth-card" id="adminLoginForm">
+        <p class="eyebrow"><i data-lucide="shield-check"></i> System administration</p>
+        <h1>Admin sign in</h1>
+        <label>Email<input id="adminEmail" type="email" autocomplete="username" required /></label>
+        <label>Password<input id="adminPassword" type="password" autocomplete="current-password" required /></label>
+        <p class="form-error" id="adminLoginError"></p>
+        <button class="primary" type="submit"><i data-lucide="log-in"></i> Sign in</button>
+      </form>
+    </section>
+
+    <main class="admin-shell" id="adminApp" hidden>
+      <header class="admin-topbar">
+        <div>
+          <p class="eyebrow">Platform control</p>
+          <h1>Receptionist admin</h1>
+        </div>
+        <button id="adminLogout" class="icon-button" type="button" title="Sign out"><i data-lucide="log-out"></i></button>
+      </header>
+
+      <nav class="admin-page-tabs" aria-label="Admin sections">
+        <button class="active" data-admin-tab="system" type="button"><i data-lucide="cpu"></i> System</button>
+        <button data-admin-tab="accounts" type="button"><i data-lucide="building-2"></i> Business accounts</button>
+        <button data-admin-tab="numbers" type="button"><i data-lucide="phone"></i> Phone numbers</button>
+        <button data-admin-tab="onboarding" type="button"><i data-lucide="bot"></i> Onboarding</button>
+        <button data-admin-tab="calls" type="button"><i data-lucide="list"></i> Call logs</button>
+      </nav>
+
+      <section class="admin-page-view active" data-admin-view="system">
+        <div class="section-heading">
+          <div><h2>AI and providers</h2><p>Global models and encrypted provider credentials.</p></div>
+          <span class="admin-status" id="systemStatus"></span>
+        </div>
+        <form id="systemForm" class="settings-form">
+          <div class="form-grid">
+            <label>Research model<input id="systemResearchModel" required /></label>
+            <label>Gemini Live model<input id="systemLiveModel" required /></label>
+          </div>
+          <h3>Credentials</h3>
+          <div class="form-grid secret-grid">
+            <label>Gemini API key<input id="geminiApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="geminiApiKeyState"></small></label>
+            <label>Telnyx API key<input id="telnyxApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxApiKeyState"></small></label>
+            <label>Telnyx public key<input id="telnyxPublicKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxPublicKeyState"></small></label>
+            <label>Telnyx connection ID<input id="telnyxConnectionId" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxConnectionIdState"></small></label>
+            <label>Public base URL<input id="publicBaseUrl" type="url" placeholder="https://example.ngrok-free.app" /><small>Used for provider webhooks and secure media sockets.</small></label>
+          </div>
+          <h3>Trials and credits</h3>
+          <div class="form-grid">
+            <label>Trial length (days)<input id="trialDays" type="number" min="1" required /></label>
+            <label>Claim link validity (days)<input id="claimLinkDays" type="number" min="1" required /></label>
+            <label>Trial credits<input id="trialCredits" type="number" min="0" required /></label>
+            <label>USD per token<input id="tokenUsd" type="number" min="0.000001" step="0.000001" required /></label>
+            <label>Low balance warning (tokens)<input id="lowBalanceTokens" type="number" min="0" required /></label>
+            <label>Recording retention (days)<input id="recordingRetentionDays" type="number" min="1" required /></label>
+            <label>Businesses per demo number<input id="demoNumberCapacity" type="number" min="1" required /></label>
+            <label>Caller numbers per trial<input id="demoCallerLimit" type="number" min="1" required /></label>
+          </div>
+          <h3>Email delivery</h3>
+          <div class="form-grid secret-grid">
+            <label>SMTP host<input id="smtpHost" placeholder="smtp.example.com" /></label>
+            <label>SMTP port<input id="smtpPort" type="number" min="1" /></label>
+            <label>SMTP username<input id="smtpUsername" autocomplete="off" placeholder="Leave blank to keep current" /><small id="smtpUsernameState"></small></label>
+            <label>SMTP password<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="smtpPasswordState"></small></label>
+            <label>From email<input id="smtpFromEmail" type="email" placeholder="receptionist@example.com" /></label>
+            <label>From name<input id="smtpFromName" placeholder="AI Receptionist" /></label>
+            <label class="check-label"><input id="smtpSecure" type="checkbox" /> Use implicit TLS (usually port 465)</label>
+          </div>
+          <button class="primary action-button" type="submit"><i data-lucide="save"></i> Save system settings</button>
+        </form>
+      </section>
+
+      <section class="admin-page-view" data-admin-view="accounts">
+        <div class="section-heading"><div><h2>Business accounts</h2><p>Create credentials and assign each user to one business.</p></div></div>
+        <form id="createAccountForm" class="account-create-form" novalidate>
+          <label>Business name<input id="accountBusinessName" required /></label>
+          <label>Website <span>optional</span><input id="accountWebsite" type="url" /></label>
+          <label>Contact name <span>optional</span><input id="accountName" /></label>
+          <label>Login email<input id="accountEmail" type="email" required /></label>
+          <label>Temporary password<input id="accountPassword" type="password" minlength="10" required /><small>At least 10 characters</small></label>
+          <button id="createAccountButton" class="primary" type="submit"><i data-lucide="user-plus"></i> Create account</button>
+        </form>
+        <p class="form-message" id="accountMessage"></p>
+        <h3>Login accounts</h3>
+        <div class="account-list" id="accountList"></div>
+        <h3>Business profiles</h3>
+        <div class="business-list" id="businessList"></div>
+      </section>
+
+      <section class="admin-page-view" data-admin-view="numbers">
+        <div class="section-heading">
+          <div><h2>Telnyx phone numbers</h2><p>Search, reserve, purchase, and assign numbers to businesses.</p></div>
+          <button id="syncNumbers" type="button"><i data-lucide="refresh-cw"></i> Sync inventory</button>
+        </div>
+        <form id="numberSearchForm" class="number-search-form">
+          <input id="numberCountry" value="US" maxlength="2" aria-label="Country code" />
+          <input id="numberAreaCode" inputmode="numeric" placeholder="Area code" aria-label="Area code" />
+          <input id="numberLocality" placeholder="City (optional)" aria-label="City" />
+          <button class="primary" type="submit"><i data-lucide="search"></i> Search</button>
+        </form>
+        <p class="form-error" id="numberError"></p>
+        <div class="number-results" id="numberResults"></div>
+        <h3>Purchased numbers</h3>
+        <div class="number-results" id="ownedNumbers"></div>
+      </section>
+
+      <section class="admin-page-view" data-admin-view="onboarding">
+        <div class="section-heading">
+          <div><h2>Phone onboarding agent</h2><p>Caller lookup, sales persona, agent creation, and account-link delivery.</p></div>
+          <span class="admin-status" id="onboardingStatus"></span>
+        </div>
+        <form id="onboardingForm" class="settings-form">
+          <h3>Agent behavior</h3>
+          <div class="form-grid">
+            <label class="wide-field">Caller lookup URL<input id="onboardingLookupUrl" placeholder="https://domain.com/api?phone={{phone}}" /><small>GET request returning business_name and website as JSON.</small></label>
+            <label>Onboarding voice<select id="onboardingVoiceName"><option>Puck</option><option>Charon</option><option>Kore</option><option>Fenrir</option><option>Aoede</option><option>Leda</option><option>Orus</option><option>Zephyr</option></select></label>
+            <label class="wide-field">Onboarding instructions<textarea id="onboardingInstructions" rows="8"></textarea></label>
+            <label class="check-label"><input id="onboardingRecordCalls" type="checkbox" /> Record onboarding calls</label>
+            <label class="check-label"><input id="onboardingTranscription" type="checkbox" /> Store call transcripts</label>
+          </div>
+          <h3>Text delivery</h3>
+          <div class="form-grid secret-grid">
+            <label>Primary provider<select id="messagePrimaryProvider"><option value="bluebubbles">BlueBubbles</option><option value="sentdm">Sent.dm</option><option value="none">None</option></select></label>
+            <label>Failover provider<select id="messageFailoverProvider"><option value="sentdm">Sent.dm</option><option value="bluebubbles">BlueBubbles</option><option value="none">None</option></select></label>
+            <label>BlueBubbles server URL<input id="blueBubblesBaseUrl" type="url" placeholder="https://your-bluebubbles-server" /></label>
+            <label>BlueBubbles send path<input id="blueBubblesSendPath" placeholder="/api/v1/chat/new" /></label>
+            <label>BlueBubbles password<input id="blueBubblesPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="blueBubblesPasswordState"></small></label>
+            <label>Sent.dm API key<input id="sentDmApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="sentDmApiKeyState"></small></label>
+            <label>Sent.dm template ID<input id="sentDmTemplateId" /></label>
+            <label>Sent.dm template name<input id="sentDmTemplateName" /></label>
+            <label>Sent.dm profile ID<input id="sentDmProfileId" /></label>
+          </div>
+          <button class="primary action-button" type="submit"><i data-lucide="save"></i> Save onboarding settings</button>
+        </form>
+        <div class="section-heading onboarding-history-heading">
+          <div><h3>Onboarding calls</h3><p>Campaign, lookup, agent creation, persona test, and link delivery status.</p></div>
+          <button id="refreshOnboarding" type="button"><i data-lucide="refresh-cw"></i> Refresh</button>
+        </div>
+        <div class="call-log-list" id="onboardingList"></div>
+      </section>
+
+      <section class="admin-page-view" data-admin-view="calls">
+        <div class="section-heading">
+          <div><h2>Telnyx call logs</h2><p>Webhook delivery, media streaming, Gemini startup, and errors.</p></div>
+          <button id="refreshCalls" type="button"><i data-lucide="refresh-cw"></i> Refresh</button>
+        </div>
+        <div class="diagnostic-panel">
+          <h3>Audio diagnostics</h3>
+          <p>Start a live phone call, refresh logs, then run Telnyx native speak on that active call.</p>
+          <div class="form-grid">
+            <label class="wide-field">Test phrase<textarea id="diagnosticPhrase" rows="3">Telnyx diagnostic test. If you can hear this sentence clearly, Telnyx native audio is working on this phone call.</textarea></label>
+            <label>Voice<input id="diagnosticVoice" value="female" /><small>Use female/male for basic Telnyx TTS, or a provider voice like Telnyx.KokoroTTS.af.</small></label>
+            <label>Target leg<select id="diagnosticTargetLegs"><option value="self">self</option><option value="opposite">opposite</option><option value="both">both</option></select></label>
+            <label class="check-label"><input id="diagnosticStopStream" type="checkbox" checked /> Stop AI media stream before speaking</label>
+          </div>
+          <p class="form-message" id="diagnosticStatus"></p>
+        </div>
+        <div class="call-log-list" id="callLogList"></div>
+      </section>
+    </main>
+    <script src="/vendor/lucide/lucide.min.js"></script>
+    <script src="/admin.js" type="module"></script>
+  </body>
+</html>
