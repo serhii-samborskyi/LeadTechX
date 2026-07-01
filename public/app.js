@@ -9,6 +9,7 @@ const state = {
   processor: null,
   source: null,
   silentGain: null,
+  outputSources: new Set(),
   nextPlayTime: 0,
   canSendMic: false,
   micChunks: 0,
@@ -330,6 +331,23 @@ async function playSpeakerTest() {
   source.start();
 }
 
+function clearAgentAudio() {
+  for (const source of state.outputSources) {
+    try {
+      source.stop();
+    } catch {
+      // Source may have already ended.
+    }
+  }
+  state.outputSources.clear();
+  if (state.outputContext) {
+    state.nextPlayTime = state.outputContext.currentTime;
+  }
+  state.agentSpeakingUntil = 0;
+  state.agentLevel = 0;
+  updateDiagnostics();
+}
+
 async function playPcmAudio(base64, mimeType) {
   await initOutputAudio();
 
@@ -347,6 +365,8 @@ async function playPcmAudio(base64, mimeType) {
   const source = state.outputContext.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(state.outputContext.destination);
+  source.onended = () => state.outputSources.delete(source);
+  state.outputSources.add(source);
   state.nextPlayTime = Math.max(state.nextPlayTime, state.outputContext.currentTime + 0.02);
   source.start(state.nextPlayTime);
   state.nextPlayTime += audioBuffer.duration;
@@ -1274,6 +1294,9 @@ async function startCall() {
       state.canSendMic = true;
       appendTranscript("system", "Microphone is now live. Speak into your microphone.");
     }
+    if (message.type === "interrupted") {
+      clearAgentAudio();
+    }
     if (message.type === "transcript") appendTranscript(message.speaker, message.text);
     if (message.type === "audio") {
       try {
@@ -1312,6 +1335,7 @@ async function startCall() {
 function stopCall(closeSocket = true) {
   if (closeSocket && state.ws) state.ws.close();
   stopMicrophone();
+  clearAgentAudio();
   if (state.outputContext) state.outputContext.close();
   state.outputContext = null;
   state.nextPlayTime = 0;

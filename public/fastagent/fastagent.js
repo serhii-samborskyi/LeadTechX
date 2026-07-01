@@ -13,6 +13,7 @@ const state = {
   processor: null,
   source: null,
   silentGain: null,
+  outputSources: new Set(),
   nextPlayTime: 0,
   canSendMic: false,
   micLevel: 0,
@@ -183,6 +184,20 @@ async function initOutputAudio() {
   if (state.outputContext.state === "suspended") await state.outputContext.resume();
 }
 
+function clearAgentAudio() {
+  for (const source of state.outputSources) {
+    try {
+      source.stop();
+    } catch {
+      // Source may have already ended.
+    }
+  }
+  state.outputSources.clear();
+  if (state.outputContext) state.nextPlayTime = state.outputContext.currentTime;
+  state.agentSpeakingUntil = 0;
+  state.agentLevel = 0;
+}
+
 async function playPcmAudio(base64, mimeType) {
   await initOutputAudio();
   const rate = Number(String(mimeType || "").match(/rate=(\d+)/)?.[1] || 24000);
@@ -195,6 +210,8 @@ async function playPcmAudio(base64, mimeType) {
   const source = state.outputContext.createBufferSource();
   source.buffer = buffer;
   source.connect(state.outputContext.destination);
+  source.onended = () => state.outputSources.delete(source);
+  state.outputSources.add(source);
   state.nextPlayTime = Math.max(state.nextPlayTime, state.outputContext.currentTime + 0.02);
   source.start(state.nextPlayTime);
   state.nextPlayTime += buffer.duration;
@@ -241,6 +258,7 @@ function stopMicrophone() {
 function stopCall(closeSocket = true) {
   if (closeSocket && state.ws) state.ws.close();
   stopMicrophone();
+  clearAgentAudio();
   state.outputContext?.close();
   state.outputContext = null;
   state.ws = null;
@@ -272,6 +290,7 @@ async function startCall() {
         setCallStatus("Listening", true);
       }
       if (message.type === "transcript") appendTranscript(message.speaker, message.text);
+      if (message.type === "interrupted") clearAgentAudio();
       if (message.type === "audio") await playPcmAudio(message.data, message.mimeType);
       if (message.type === "error") {
         appendTranscript("system", message.error);

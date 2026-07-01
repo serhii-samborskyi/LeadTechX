@@ -4097,6 +4097,9 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       }).catch(() => {});
     }
     telnyxWs.send(JSON.stringify({ event: "media", media: { payload } }));
+    if (outboundFramesSent === 1) {
+      enableCallerInput("agent_audio_started");
+    }
     return true;
   };
 
@@ -4602,11 +4605,7 @@ Live session identity and language:
             summary: summarizeAudioPayload(message.media?.payload, telnyxEncoding, telnyxSampleRate),
           });
         }
-        const suppressionReason = !callerInputForwardingEnabled
-          ? "initial_greeting"
-          : agentOutputActive()
-            ? "agent_speaking"
-            : "";
+        const suppressionReason = !callerInputForwardingEnabled ? "initial_greeting" : "";
         if (suppressionReason) {
           suppressedInputChunks += 1;
           if (!loggedSuppressedInputReasons.has(suppressionReason)) {
@@ -4833,9 +4832,18 @@ Live session identity and language:
             if (serverContent.outputTranscription?.text) {
               sendClient({ type: "transcript", speaker: "agent", text: serverContent.outputTranscription.text });
             }
+            if (serverContent.interrupted) {
+              sendClient({ type: "interrupted" });
+              sendClient({ type: "debug", message: "Agent playback interrupted by caller speech." });
+            }
             for (const part of serverContent.modelTurn?.parts || []) {
               if (part.inlineData?.data) {
                 outputAudioChunks += 1;
+                if (setupComplete && greeted && !micForwardingEnabled) {
+                  micForwardingEnabled = true;
+                  sendClient({ type: "mic_ready" });
+                  sendClient({ type: "debug", message: "Agent greeting started. Microphone forwarding enabled." });
+                }
                 if (outputAudioChunks === 1 || outputAudioChunks % 10 === 0) {
                   sendClient({
                     type: "debug",
