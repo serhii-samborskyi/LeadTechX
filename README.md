@@ -155,7 +155,7 @@ Current phone codec settings:
 - Gemini input from the bridge: PCM16 little-endian at 16 kHz.
 - Gemini output to the bridge: PCM16 little-endian at 24 kHz.
 - Current local phone model override: `TELNYX_LIVE_MODEL=models/gemini-2.5-flash-native-audio-preview-09-2025`.
-- Bridge audio diagnostics are enabled by default for the first 30 seconds. Set `BRIDGE_AUDIO_CAPTURE=0` to disable or `BRIDGE_AUDIO_CAPTURE_MS=60000` to capture a longer window. Files are written under `logs/audio-dumps/` and are ignored by git.
+- Bridge audio diagnostics are disabled by default. Set `BRIDGE_AUDIO_CAPTURE=1` for a debug run, and optionally set `BRIDGE_AUDIO_CAPTURE_MS=60000` to capture a longer window. Files are written under `logs/audio-dumps/` and are ignored by git.
 
 The browser call path is separate from Telnyx: the browser streams microphone audio to the app as 16 kHz PCM, Gemini returns 24 kHz PCM, and the browser plays it directly through Web Audio. Browser clients also clear queued playback when Gemini reports an interruption.
 

@@ -308,7 +308,9 @@ const TELNYX_PHONE_OUTPUT_MODE = "media_stream";
 const TELNYX_LIVE_MODEL = String(process.env.TELNYX_LIVE_MODEL || "").trim();
 const TELNYX_SPEAK_VOICE = "female";
 const TELNYX_SPEAK_LANGUAGE = "en-US";
-const BRIDGE_AUDIO_CAPTURE_ENABLED = process.env.BRIDGE_AUDIO_CAPTURE !== "0";
+const BRIDGE_AUDIO_CAPTURE_ENABLED = ["1", "true", "yes", "on"].includes(
+  String(process.env.BRIDGE_AUDIO_CAPTURE || "").trim().toLowerCase(),
+);
 const BRIDGE_AUDIO_CAPTURE_MS = Number(process.env.BRIDGE_AUDIO_CAPTURE_MS || 30000);
 const BRIDGE_AUDIO_CAPTURE_DIR = path.join(__dirname, "logs/audio-dumps");
 
