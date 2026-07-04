@@ -13,7 +13,9 @@ import { GoogleGenAI } from "@google/genai";
 import multer from "multer";
 import nodemailer from "nodemailer";
 import { PrismaClient } from "@prisma/client";
+import { DateTime } from "luxon";
 import readXlsxFile from "read-excel-file/node";
+import Stripe from "stripe";
 import { WebSocket, WebSocketServer } from "ws";
 
 import { bookCalendarAppointment, listCalendarSlots } from "./calendar/index.js";
@@ -81,6 +83,12 @@ let prismaReconnectPromise = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function safeBackground(label, task) {
+  Promise.resolve()
+    .then(task)
+    .catch((error) => console.warn(`[background] ${label} failed: ${error.message}`));
 }
 
 function isTransientPrismaConnectionError(error) {
@@ -245,6 +253,36 @@ async function saveSystemSecret(secretKey, value) {
     create: { secretKey, encrypted: encryptSecret(normalized), hint: normalized.slice(-4) },
     update: { encrypted: encryptSecret(normalized), hint: normalized.slice(-4) },
   });
+}
+
+async function stripeClient() {
+  const secretKey = await systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY");
+  if (!secretKey) throw new Error("Stripe secret key is not configured");
+  return new Stripe(secretKey);
+}
+
+async function stripeWebhookSecret() {
+  return systemSecret("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET");
+}
+
+function jsonSafe(value) {
+  if (value === undefined) return null;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function stripeId(value) {
+  if (!value) return null;
+  return typeof value === "string" ? value : value.id || null;
+}
+
+function stripeTimestamp(value) {
+  return value ? new Date(Number(value) * 1000) : null;
+}
+
+function accountStatusForStripeSubscription(status) {
+  if (["active", "trialing", "past_due"].includes(status)) return "paid";
+  if (["canceled", "unpaid", "incomplete_expired"].includes(status)) return "expired";
+  return undefined;
 }
 
 async function publicBaseUrl() {
@@ -673,21 +711,769 @@ function shortCallSummary({ fromNumber, toNumber, status, transcript }) {
   return `Incoming call from ${fromNumber || "unknown caller"} to ${toNumber || "business number"}${status ? ` (${status})` : ""}.`;
 }
 
+function keywordMatch(text, words) {
+  const normalized = String(text || "").toLowerCase();
+  return words.some((word) => normalized.includes(word));
+}
+
 function extractLeadFieldsFromTranscript(transcript, fallback = {}) {
   const text = String(transcript || "");
   const phone = fallback.phone || text.match(/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/)?.[0] || null;
   const email = fallback.email || text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || null;
+  const appointmentIntent = keywordMatch(text, ["appointment", "book", "schedule", "reservation", "consultation", "callback"]);
+  const complaintIntent = keywordMatch(text, ["complaint", "not happy", "unhappy", "bad service", "problem", "issue", "manager"]);
+  const satisfaction =
+    keywordMatch(text, ["happy", "great service", "excellent", "perfect", "satisfied", "thank you"]) && !complaintIntent
+      ? "happy"
+      : complaintIntent
+        ? "unhappy"
+        : "unknown";
+  const urgency = keywordMatch(text, ["emergency", "urgent", "as soon as possible", "asap", "today", "right away"])
+    ? "urgent"
+    : keywordMatch(text, ["tomorrow", "this week", "soon"])
+      ? "soon"
+      : "normal";
+  const outcome = appointmentIntent
+    ? "appointment_intent"
+    : complaintIntent
+      ? "complaint"
+      : keywordMatch(text, ["price", "quote", "estimate"])
+        ? "quote_requested"
+        : keywordMatch(text, ["message", "call me back", "follow up"])
+          ? "follow_up"
+          : "conversation";
   return {
     phone,
     email,
+    urgency,
+    outcome,
+    appointmentIntent,
+    satisfaction,
+    nextStep:
+      outcome === "complaint"
+        ? "Management follow-up"
+        : appointmentIntent
+          ? "Confirm appointment or callback details"
+          : "Review transcript and follow up if needed",
     transcriptCharacters: text.length,
     lastUpdatedAt: new Date().toISOString(),
   };
 }
 
+function compactTranscriptForAi(transcript, limit = 14000) {
+  const text = String(transcript || "").trim();
+  if (text.length <= limit) return text;
+  const head = text.slice(0, Math.floor(limit * 0.35));
+  const tail = text.slice(-Math.floor(limit * 0.6));
+  return `${head}\n[... transcript truncated ...]\n${tail}`;
+}
+
+function normalizeKnownValue(value, allowed, fallback = "unknown") {
+  const normalized = String(value || fallback).trim().toLowerCase().replace(/\s+/g, "_");
+  return allowed.includes(normalized) ? normalized : fallback;
+}
+
+function fallbackCallCrmInsight(voiceCall, fallback = {}) {
+  const fields = extractLeadFieldsFromTranscript(voiceCall?.transcript, fallback);
+  return {
+    summary: shortCallSummary(voiceCall || {}),
+    callerName: fallback.name || null,
+    callerPhone: fields.phone || fallback.phone || voiceCall?.fromNumber || null,
+    callerEmail: fields.email || fallback.email || null,
+    need: fallback.need || null,
+    urgency: fields.urgency || "unknown",
+    outcome: fields.outcome || "conversation",
+    appointmentIntent: Boolean(fields.appointmentIntent),
+    appointmentResult: "unknown",
+    satisfaction: fields.satisfaction || "unknown",
+    nextStep: fields.nextStep || "Review transcript and follow up if needed",
+    extractedFields: fields,
+    source: "deterministic",
+  };
+}
+
+function sanitizeCallCrmInsight(value, fallback) {
+  const raw = value && typeof value === "object" ? value : {};
+  const extractedFields = raw.extractedFields && typeof raw.extractedFields === "object" ? raw.extractedFields : {};
+  return {
+    summary: String(raw.summary || fallback.summary || "").trim().slice(0, 1600) || fallback.summary,
+    callerName: String(raw.callerName || fallback.callerName || "").trim() || null,
+    callerPhone: normalizeE164Phone(raw.callerPhone || fallback.callerPhone || "") || fallback.callerPhone || null,
+    callerEmail: String(raw.callerEmail || fallback.callerEmail || "").trim() || null,
+    need: String(raw.need || fallback.need || "").trim().slice(0, 500) || null,
+    urgency: normalizeKnownValue(raw.urgency || fallback.urgency, ["urgent", "soon", "normal", "low", "unknown"], "unknown"),
+    outcome: normalizeKnownValue(
+      raw.outcome || fallback.outcome,
+      [
+        "conversation",
+        "captured_lead",
+        "qualified_lead",
+        "appointment_intent",
+        "appointment_requested",
+        "appointment_booked",
+        "quote_requested",
+        "complaint",
+        "transferred",
+        "resolved",
+        "missed_call",
+        "unknown",
+      ],
+      "conversation",
+    ),
+    appointmentIntent: Boolean(raw.appointmentIntent ?? fallback.appointmentIntent),
+    appointmentResult: normalizeKnownValue(
+      raw.appointmentResult || fallback.appointmentResult,
+      ["none", "requested", "booked", "callback", "unknown"],
+      "unknown",
+    ),
+    satisfaction: normalizeSentiment(raw.satisfaction || fallback.satisfaction),
+    nextStep: String(raw.nextStep || fallback.nextStep || "Review transcript and follow up if needed").trim().slice(0, 700),
+    extractedFields: { ...fallback.extractedFields, ...extractedFields },
+    source: raw.source || "ai",
+  };
+}
+
+function leadStatusFromCallInsight(existingStatus, insight) {
+  if (existingStatus && !["new", "callback"].includes(existingStatus)) return existingStatus;
+  if (insight.outcome === "complaint" || insight.outcome === "transferred" || insight.satisfaction === "unhappy") return "transferred";
+  if (insight.appointmentResult === "booked" || insight.outcome === "appointment_booked") return "appointment";
+  if (insight.outcome === "qualified_lead" || insight.outcome === "captured_lead") return "qualified";
+  if (insight.appointmentIntent || ["appointment_intent", "appointment_requested", "quote_requested"].includes(insight.outcome)) return "callback";
+  return existingStatus || "new";
+}
+
+function buildCallCrmExtractionPrompt({ profile, voiceCall, fallback }) {
+  return `
+You extract CRM facts from an AI receptionist phone transcript. Return only valid JSON.
+
+Business:
+- Name: ${profile.businessName}
+- Services: ${profile.services || "unknown"}
+- Area: ${profile.serviceArea || "unknown"}
+
+Call:
+- From: ${voiceCall.fromNumber || "unknown"}
+- To: ${voiceCall.toNumber || "unknown"}
+- Started: ${voiceCall.startedAt || "unknown"}
+- Ended: ${voiceCall.endedAt || "unknown"}
+
+Transcript:
+${compactTranscriptForAi(voiceCall.transcript)}
+
+Return this exact JSON shape:
+{
+  "summary": "2-4 factual sentences about what happened and outcome",
+  "callerName": "caller name or null",
+  "callerPhone": "E.164 phone if known, otherwise null",
+  "callerEmail": "email if known, otherwise null",
+  "need": "service/request/problem in one short phrase or null",
+  "urgency": "urgent|soon|normal|low|unknown",
+  "outcome": "conversation|captured_lead|qualified_lead|appointment_intent|appointment_requested|appointment_booked|quote_requested|complaint|transferred|resolved|missed_call|unknown",
+  "appointmentIntent": false,
+  "appointmentResult": "none|requested|booked|callback|unknown",
+  "satisfaction": "happy|unhappy|neutral|unknown",
+  "nextStep": "short operational next action",
+  "extractedFields": {
+    "caller_need": "string or null",
+    "urgency_reason": "string or null",
+    "appointment_time": "string or null",
+    "service_address": "string or null",
+    "budget_or_price": "string or null",
+    "complaint_details": "string or null"
+  }
+}
+
+If the transcript does not support a field, use null or "unknown". Do not invent details.
+Deterministic fallback context: ${JSON.stringify(fallback)}
+`.trim();
+}
+
+async function generateCallCrmInsight({ voiceCall, profile, fallback }) {
+  const transcript = String(voiceCall?.transcript || "").trim();
+  if (transcript.length < 20) return null;
+  const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY");
+  if (!geminiApiKey) return null;
+  const settings = await getSettings();
+  const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+  const response = await Promise.race([
+    ai.models.generateContent({
+      model: settings.researchModel,
+      contents: [buildCallCrmExtractionPrompt({ profile, voiceCall, fallback })],
+      config: { temperature: 0.1 },
+    }),
+    sleep(15000).then(() => {
+      throw new Error("Gemini post-call CRM extraction timed out");
+    }),
+  ]);
+  const parsed = JSON.parse(stripJsonFence(response.text || ""));
+  return { ...sanitizeCallCrmInsight(parsed, fallback), source: "gemini", model: settings.researchModel };
+}
+
+function leadStatusFromExtractedFields(existingStatus, fields) {
+  if (existingStatus && existingStatus !== "new") return existingStatus;
+  if (fields?.outcome === "complaint") return "transferred";
+  if (fields?.appointmentIntent) return "callback";
+  return existingStatus || "new";
+}
+
+function normalizeSentiment(value) {
+  const sentiment = String(value || "unknown").trim().toLowerCase();
+  if (["happy", "satisfied", "positive", "yes"].includes(sentiment)) return "happy";
+  if (["unhappy", "negative", "no", "complaint", "dissatisfied"].includes(sentiment)) return "unhappy";
+  if (["neutral", "mixed"].includes(sentiment)) return "neutral";
+  return "unknown";
+}
+
+function feedbackStatusForSentiment(sentiment, requestedStatus = "") {
+  const status = String(requestedStatus || "").trim().toLowerCase();
+  if (status) return status;
+  if (sentiment === "unhappy") return "complaint_pending";
+  return "captured";
+}
+
+function normalizeFeedbackRating(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const rating = Number(value);
+  return Number.isFinite(rating) ? Math.max(1, Math.min(5, Math.round(rating))) : null;
+}
+
+async function updateLeadFeedbackState({ lead, feedback, sentiment, extraFields = {} }) {
+  if (!lead?.id || !feedback?.id) return null;
+  const existingFields = lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {};
+  const status = sentiment === "unhappy" ? "transferred" : lead.status;
+  return prisma.lead.update({
+    where: { id: lead.id },
+    data: {
+      status,
+      extractedFields: {
+        ...existingFields,
+        latestFeedback: {
+          sentiment,
+          feedbackId: feedback.id,
+          status: feedback.status,
+          updatedAt: new Date().toISOString(),
+          ...extraFields,
+        },
+      },
+    },
+  });
+}
+
+async function upsertCustomerFeedback({
+  profile,
+  lead = null,
+  voiceCallId = null,
+  appointmentId = null,
+  customerName = null,
+  phone = null,
+  email = null,
+  sentiment = "unknown",
+  rating = null,
+  feedbackText = "",
+  status = "",
+  reviewLink = "",
+  metadata = {},
+}) {
+  const normalizedSentiment = normalizeSentiment(sentiment);
+  const normalizedPhone = phone ? normalizeE164Phone(phone) || String(phone).trim() : null;
+  const normalizedStatus = feedbackStatusForSentiment(normalizedSentiment, status);
+  const where = {
+    businessProfileId: profile.id,
+    ...(lead?.id
+      ? { leadId: lead.id }
+      : voiceCallId
+        ? { voiceCallId }
+        : appointmentId
+          ? { appointmentId }
+          : normalizedPhone
+            ? { phone: normalizedPhone }
+            : {}),
+    sentiment: normalizedSentiment,
+  };
+  const existing = await prisma.customerFeedback.findFirst({
+    where,
+    orderBy: { updatedAt: "desc" },
+  });
+  const data = {
+    businessProfileId: profile.id,
+    leadId: lead?.id || null,
+    voiceCallId: voiceCallId || lead?.voiceCallId || null,
+    appointmentId,
+    customerName: customerName || lead?.name || null,
+    phone: normalizedPhone || lead?.phone || null,
+    email: email || lead?.email || null,
+    sentiment: normalizedSentiment,
+    rating: normalizeFeedbackRating(rating),
+    feedbackText: feedbackText ? String(feedbackText).trim() : existing?.feedbackText || null,
+    status: normalizedStatus,
+    reviewLink: reviewLink || existing?.reviewLink || null,
+    metadata: {
+      ...(existing?.metadata && typeof existing.metadata === "object" ? existing.metadata : {}),
+      ...metadata,
+      lastUpdatedAt: new Date().toISOString(),
+    },
+  };
+  const feedback = existing
+    ? await prisma.customerFeedback.update({ where: { id: existing.id }, data })
+    : await prisma.customerFeedback.create({ data });
+  await updateLeadFeedbackState({ lead, feedback, sentiment: normalizedSentiment });
+  return feedback;
+}
+
+function templateText(template, values = {}) {
+  return String(template || "").replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, key) => {
+    const value = values[key];
+    return value === undefined || value === null ? "" : String(value);
+  });
+}
+
+function configuredMessageProviders(settings) {
+  return [settings.messagePrimaryProvider, settings.messageFailoverProvider].filter(
+    (provider, index, list) => provider && provider !== "none" && list.indexOf(provider) === index,
+  );
+}
+
+function messageProviderList(settings, providerOverride = "") {
+  const provider = String(providerOverride || "").trim().toLowerCase();
+  if (["bluebubbles", "sentdm"].includes(provider)) return [provider];
+  return configuredMessageProviders(settings);
+}
+
+function appointmentConfirmationLabel(appointment) {
+  return appointment?.id ? appointmentConfirmationCode(appointment.id) : "";
+}
+
+function formatAppointmentTime(appointment, timezone = "America/Chicago") {
+  if (!appointment?.scheduledStart) return appointment?.requestedAt || "";
+  return DateTime.fromJSDate(appointment.scheduledStart, { zone: "utc" })
+    .setZone(appointment.timezone || timezone || "America/Chicago")
+    .toFormat("ccc, LLL d 'at' h:mm a ZZZZ");
+}
+
+function complaintEscalationMessage({ config, profile, customerName = "", customerPhone = "", complaint = "" }) {
+  return templateText(config.complaintEscalationTemplate, {
+    business_name: profile.businessName,
+    customer_name: customerName || "Unknown customer",
+    customer_phone: customerPhone || "",
+    complaint,
+  }).trim();
+}
+
+function requireSentDmConfig(settings, apiKey) {
+  if (!apiKey) throw new Error("Sent.dm API key is not configured");
+  if (!settings.sentDmTemplateId && !settings.sentDmTemplateName) {
+    throw new Error("Sent.dm requires an approved template ID or template name; API key/profile ID alone cannot send messages");
+  }
+}
+
+function sentDmHeaders({ apiKey, profileId, idempotencyKey }) {
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "x-api-key": apiKey,
+  };
+  if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+  if (profileId) headers["x-profile-id"] = profileId;
+  return headers;
+}
+
+function sentDmErrorMessage(data, status) {
+  const error = data?.error;
+  if (!error) return `Sent.dm returned HTTP ${status}`;
+  const details = error.details ? ` ${JSON.stringify(error.details)}` : "";
+  return `${error.code ? `${error.code}: ` : ""}${error.message || `Sent.dm returned HTTP ${status}`}${details}`;
+}
+
+function sentDmTemplateFromSettings(settings, parameters) {
+  const template = { parameters };
+  if (settings.sentDmTemplateId) template.id = settings.sentDmTemplateId;
+  if (settings.sentDmTemplateName) template.name = settings.sentDmTemplateName;
+  return template;
+}
+
+function sentDmMessageParameters({ businessName = "", message = "", setupUrl = "", reviewLink = "" }) {
+  const body = message || setupUrl || reviewLink || businessName;
+  return {
+    business_name: businessName,
+    message: body,
+    body,
+    text: body,
+    setup_url: setupUrl,
+    review_link: reviewLink,
+    var_1: body,
+    var_2: businessName,
+    var_3: setupUrl || reviewLink,
+    var_4: reviewLink,
+  };
+}
+
+async function sentDmApiGet(pathname, apiKey, profileId = "") {
+  const response = await fetch(`https://api.sent.dm${pathname}`, {
+    headers: sentDmHeaders({ apiKey, profileId }),
+    signal: AbortSignal.timeout(12000),
+  });
+  const data = await response.json().catch(() => ({}));
+  return { httpStatus: response.status, ok: response.ok && data.success !== false, data };
+}
+
+function summarizeSentDmApiResult(result) {
+  return {
+    httpStatus: result.httpStatus,
+    ok: result.ok,
+    error: result.data?.error
+      ? {
+          code: result.data.error.code || null,
+          message: result.data.error.message || null,
+          details: result.data.error.details || null,
+        }
+      : null,
+  };
+}
+
+async function recordUsageEvent({
+  businessProfileId,
+  leadId = null,
+  voiceCallId = null,
+  messageDeliveryId = null,
+  category,
+  provider = null,
+  quantity = 1,
+  unit = "event",
+  credits = 0,
+  note = "",
+  metadata = {},
+}) {
+  if (!businessProfileId || !category) return null;
+  const creditAmount = Math.max(0, Math.round(Number(credits || 0)));
+  return prisma.$transaction(async (tx) => {
+    const usage = await tx.usageEvent.create({
+      data: {
+        businessProfileId,
+        leadId,
+        voiceCallId,
+        messageDeliveryId,
+        category,
+        provider,
+        quantity,
+        unit,
+        credits: creditAmount,
+        metadata,
+      },
+    });
+    if (!creditAmount) return usage;
+    const profile = await tx.businessProfile.update({
+      where: { id: businessProfileId },
+      data: { creditBalance: { decrement: creditAmount } },
+      select: { creditBalance: true },
+    });
+    await tx.creditTransaction.create({
+      data: {
+        businessProfileId,
+        usageEventId: usage.id,
+        type: "usage",
+        amount: -creditAmount,
+        balanceAfter: profile.creditBalance,
+        note: note || category,
+        metadata,
+      },
+    });
+    return usage;
+  });
+}
+
+async function recordCreditGrant({ businessProfileId, amount, balanceAfter = amount, note = "credit grant", metadata = {} }) {
+  const creditAmount = Math.max(0, Math.round(Number(amount || 0)));
+  if (!businessProfileId || !creditAmount) return null;
+  return prisma.creditTransaction.create({
+    data: {
+      businessProfileId,
+      type: "grant",
+      amount: creditAmount,
+      balanceAfter: Math.round(Number(balanceAfter ?? creditAmount)),
+      note,
+      metadata,
+    },
+  });
+}
+
+async function grantBusinessCredits({ businessProfileId, amount, type = "grant", note = "Credit grant", metadata = {} }) {
+  const creditAmount = Math.max(0, Math.round(Number(amount || 0)));
+  if (!businessProfileId || !creditAmount) return null;
+  return prisma.$transaction(async (tx) => {
+    const profile = await tx.businessProfile.update({
+      where: { id: businessProfileId },
+      data: { creditBalance: { increment: creditAmount } },
+      select: { creditBalance: true },
+    });
+    return tx.creditTransaction.create({
+      data: {
+        businessProfileId,
+        type,
+        amount: creditAmount,
+        balanceAfter: profile.creditBalance,
+        note,
+        metadata,
+      },
+    });
+  });
+}
+
+async function recordUsageEventOnce(args, unique = {}) {
+  const category = args?.category;
+  const where = { category };
+  if (!category) return null;
+  if (unique.voiceCallId || args.voiceCallId) where.voiceCallId = unique.voiceCallId || args.voiceCallId;
+  if (unique.messageDeliveryId || args.messageDeliveryId) where.messageDeliveryId = unique.messageDeliveryId || args.messageDeliveryId;
+  if (unique.leadId) where.leadId = unique.leadId;
+  if (unique.businessProfileId || args.businessProfileId) where.businessProfileId = unique.businessProfileId || args.businessProfileId;
+  const hasUniqueScope = Boolean(where.voiceCallId || where.messageDeliveryId || (where.businessProfileId && where.leadId));
+  if (hasUniqueScope) {
+    const existing = await prisma.usageEvent.findFirst({ where, select: { id: true } });
+    if (existing) return existing;
+  }
+  return recordUsageEvent(args);
+}
+
+function callDurationSeconds(call) {
+  const started = call?.answeredAt || call?.startedAt;
+  const ended = call?.endedAt || new Date();
+  if (!started || !ended) return 0;
+  return Math.max(0, Math.ceil((new Date(ended).getTime() - new Date(started).getTime()) / 1000));
+}
+
+function billedMinutesFromSeconds(seconds) {
+  return Math.max(1, Math.ceil(Math.max(0, Number(seconds || 0)) / 60));
+}
+
+async function recordCallUsageOnce(call) {
+  if (!call?.businessProfileId || !call.id || call.callMode === "onboarding") return;
+  const legacyUsage = await prisma.usageEvent.findFirst({
+    where: { voiceCallId: call.id, category: "telnyx_voice_minutes" },
+    select: { id: true },
+  });
+  if (legacyUsage) return;
+  const settings = await getSettings();
+  const seconds = callDurationSeconds(call);
+  const minutes = billedMinutesFromSeconds(seconds);
+  const leadId = call.lead?.id || call.outboundQualificationCall?.leadId || null;
+  const callMetadata = { seconds, billedMinutes: minutes, callMode: call.callMode };
+  await recordUsageEventOnce({
+    businessProfileId: call.businessProfileId,
+    voiceCallId: call.id,
+    leadId,
+    category: "telnyx_call_seconds",
+    provider: "telnyx",
+    quantity: seconds,
+    unit: "second",
+    credits: Math.max(0, Number(settings.voiceMinuteCredits || 0)) * minutes,
+    note: `${call.callMode} Telnyx call ${seconds}s`,
+    metadata: callMetadata,
+  }).catch((error) => console.warn(`[usage] Telnyx call usage skipped: ${error.message}`));
+  await recordUsageEventOnce({
+    businessProfileId: call.businessProfileId,
+    voiceCallId: call.id,
+    leadId,
+    category: "gemini_live_seconds",
+    provider: "gemini",
+    quantity: seconds,
+    unit: "second",
+    credits: Math.max(0, Number(settings.geminiMinuteCredits ?? settings.voiceMinuteCredits ?? 0)) * minutes,
+    note: `${call.callMode} Gemini Live session ${seconds}s`,
+    metadata: callMetadata,
+  }).catch((error) => console.warn(`[usage] Gemini call usage skipped: ${error.message}`));
+  if (call.callMode === "qualification") {
+    await recordUsageEventOnce({
+      businessProfileId: call.businessProfileId,
+      voiceCallId: call.id,
+      leadId,
+      category: "outbound_qualification_call",
+      provider: "telnyx",
+      quantity: 1,
+      unit: "call",
+      credits: Math.max(0, Number(settings.outboundCallCredits || 0)),
+      note: "Outbound qualification call",
+      metadata: callMetadata,
+    }).catch((error) => console.warn(`[usage] outbound call usage skipped: ${error.message}`));
+  }
+}
+
+async function recordBrowserLiveUsage({ profile, startedAt, endedAt = new Date(), inputAudioChunks = 0, outputAudioChunks = 0 }) {
+  if (!profile?.id || !startedAt) return null;
+  const seconds = Math.max(0, Math.ceil((new Date(endedAt).getTime() - new Date(startedAt).getTime()) / 1000));
+  if (!seconds && !inputAudioChunks && !outputAudioChunks) return null;
+  const settings = await getSettings();
+  const minutes = billedMinutesFromSeconds(seconds);
+  return recordUsageEvent({
+    businessProfileId: profile.id,
+    category: "gemini_browser_live_seconds",
+    provider: "gemini",
+    quantity: seconds,
+    unit: "second",
+    credits: Math.max(0, Number(settings.geminiMinuteCredits ?? settings.voiceMinuteCredits ?? 0)) * minutes,
+    note: `Browser Gemini Live session ${seconds}s`,
+    metadata: { seconds, billedMinutes: minutes, inputAudioChunks, outputAudioChunks },
+  }).catch((error) => console.warn(`[usage] call usage skipped: ${error.message}`));
+}
+
+function callHealthFlagsFromEvents(call) {
+  const eventTypes = new Set((call?.events || []).map((event) => event.eventType));
+  return {
+    noCallerAudio: !eventTypes.has("caller.audio.packet"),
+    noGeminiAudio: !eventTypes.has("gemini.audio.started") && !eventTypes.has("gemini.text.turn_complete"),
+    mediaDisconnected: eventTypes.has("media.closed") || eventTypes.has("media.stopped"),
+    dbIssue: (call?.events || []).some((event) => event.eventType === "error" && event.detail?.stage === "db"),
+    geminiIssue: (call?.events || []).some((event) => event.eventType === "error" && event.detail?.stage === "gemini"),
+    telnyxIssue: (call?.events || []).some((event) => event.eventType === "error" && event.detail?.stage === "telnyx"),
+  };
+}
+
+async function finalizeBusinessCall(voiceCall) {
+  if (!voiceCall?.businessProfile || voiceCall.callMode !== "business") return null;
+  const fields = extractLeadFieldsFromTranscript(voiceCall.transcript, { phone: voiceCall.fromNumber });
+  const fallbackInsight = fallbackCallCrmInsight(voiceCall, { phone: voiceCall.fromNumber });
+  const healthFlags = callHealthFlagsFromEvents(voiceCall);
+  const metrics = {
+    durationSeconds: callDurationSeconds(voiceCall),
+    eventCount: voiceCall.events?.length || 0,
+    transcriptCharacters: String(voiceCall.transcript || "").length,
+  };
+  await prisma.voiceCall.update({
+    where: { id: voiceCall.id },
+    data: { healthFlags, metrics },
+  });
+  const lead = await ensureCallLead({ voiceCall, profile: voiceCall.businessProfile, source: "incoming_call" });
+  if (lead) {
+    const previous = lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {};
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: {
+        status: leadStatusFromCallInsight(lead.status, fallbackInsight),
+        phone: lead.phone || fields.phone || voiceCall.fromNumber || null,
+        email: lead.email || fields.email || null,
+        summary: fallbackInsight.summary,
+        transcript: voiceCall.transcript || lead.transcript,
+        extractedFields: {
+          ...previous,
+          callSummary: {
+            ...fields,
+            fallbackInsight,
+            healthFlags,
+            metrics,
+            recordingUrl: voiceCall.recordingUrl || null,
+            finalizedAt: new Date().toISOString(),
+          },
+        },
+      },
+    });
+  }
+  await recordCallUsageOnce({ ...voiceCall, lead });
+  return lead;
+}
+
+async function enrichBusinessCallCrm(voiceCallId) {
+  const voiceCall = await prisma.voiceCall.findUnique({
+    where: { id: voiceCallId },
+    include: {
+      businessProfile: true,
+      lead: true,
+      events: { orderBy: { createdAt: "asc" } },
+    },
+  });
+  if (!voiceCall?.businessProfile || voiceCall.callMode !== "business" || !voiceCall.lead) return null;
+  const existingFields =
+    voiceCall.lead.extractedFields && typeof voiceCall.lead.extractedFields === "object" ? voiceCall.lead.extractedFields : {};
+  if (existingFields.postCallAi?.enrichedAt) return voiceCall.lead;
+
+  const fallback = fallbackCallCrmInsight(voiceCall, {
+    name: voiceCall.lead.name,
+    phone: voiceCall.lead.phone || voiceCall.fromNumber,
+    email: voiceCall.lead.email,
+    need: voiceCall.lead.need,
+  });
+  let insight = fallback;
+  try {
+    insight = (await generateCallCrmInsight({ voiceCall, profile: voiceCall.businessProfile, fallback })) || fallback;
+  } catch (error) {
+    await logVoiceCallEvent(voiceCall.callControlId, "crm.enrichment_failed", { message: error.message });
+    insight = { ...fallback, enrichmentError: error.message };
+  }
+
+  const unknownName = !voiceCall.lead.name || /^caller\s+\+?\d+/i.test(voiceCall.lead.name) || voiceCall.lead.name === "Unknown caller";
+  const nextFields = {
+    ...existingFields,
+    postCallAi: {
+      ...insight,
+      enrichedAt: new Date().toISOString(),
+      recordingUrl: voiceCall.recordingUrl || null,
+    },
+  };
+  const updated = await prisma.lead.update({
+    where: { id: voiceCall.lead.id },
+    data: {
+      name: unknownName && insight.callerName ? insight.callerName : undefined,
+      phone: voiceCall.lead.phone || insight.callerPhone || voiceCall.fromNumber || null,
+      email: voiceCall.lead.email || insight.callerEmail || null,
+      need: voiceCall.lead.need || insight.need || null,
+      status: leadStatusFromCallInsight(voiceCall.lead.status, insight),
+      summary: insight.summary || voiceCall.lead.summary,
+      transcript: voiceCall.transcript || voiceCall.lead.transcript,
+      extractedFields: nextFields,
+    },
+  });
+  await prisma.voiceCall.update({
+    where: { id: voiceCall.id },
+    data: {
+      metrics: {
+        ...(voiceCall.metrics && typeof voiceCall.metrics === "object" ? voiceCall.metrics : {}),
+        crmEnrichedAt: new Date().toISOString(),
+        crmExtractionSource: insight.source || "deterministic",
+      },
+    },
+  });
+  await logVoiceCallEvent(voiceCall.callControlId, "crm.enrichment_completed", {
+    source: insight.source || "deterministic",
+    leadId: updated.id,
+    status: updated.status,
+  });
+  return updated;
+}
+
+async function maybeSendMissedCallFollowup({ profile, config, lead, voiceCall }) {
+  if (!profile?.id || !voiceCall?.id || voiceCall.callMode !== "business") return null;
+  const flags = voiceCall.healthFlags && typeof voiceCall.healthFlags === "object" ? voiceCall.healthFlags : {};
+  if (!flags.noCallerAudio) return null;
+  const phone = lead?.phone || voiceCall.fromNumber;
+  if (!phone) return null;
+  const template = String(config.missedCallFollowupTemplate || "").trim();
+  if (!template) return null;
+  const existing = await prisma.messageDelivery.findFirst({
+    where: { voiceCallId: voiceCall.id, purpose: "missed_call_followup" },
+    select: { id: true, status: true },
+  });
+  if (existing) return existing;
+  const settings = await getSettings();
+  const message = templateText(template, {
+    business_name: profile.businessName,
+    customer_name: lead?.name || "there",
+    customer_phone: phone,
+  }).trim();
+  if (!message) return null;
+  return deliverBusinessMessage({
+    settings,
+    profile,
+    toPhone: phone,
+    message,
+    purpose: "missed_call_followup",
+    leadId: lead?.id || null,
+    voiceCallId: voiceCall.id,
+    metadata: { source: "business_call_hangup", healthFlags: flags },
+  });
+}
+
 async function ensureCallLead({ voiceCall, profile, source = "incoming_call" }) {
   if (!voiceCall || !profile) return null;
   const existing = await prisma.lead.findUnique({ where: { voiceCallId: voiceCall.id } }).catch(() => null);
+  const extracted = extractLeadFieldsFromTranscript(voiceCall.transcript, { phone: voiceCall.fromNumber || existing?.phone });
   const data = {
     businessName: profile.businessName,
     website: profile.website,
@@ -695,10 +1481,13 @@ async function ensureCallLead({ voiceCall, profile, source = "incoming_call" }) 
     name: existing?.name || (voiceCall.fromNumber ? `Caller ${voiceCall.fromNumber}` : "Unknown caller"),
     phone: existing?.phone || voiceCall.fromNumber || null,
     source,
-    status: existing?.status || "new",
+    status: leadStatusFromExtractedFields(existing?.status, extracted),
     summary: shortCallSummary(voiceCall),
     transcript: voiceCall.transcript || existing?.transcript || null,
-    extractedFields: extractLeadFieldsFromTranscript(voiceCall.transcript, { phone: voiceCall.fromNumber || existing?.phone }),
+    extractedFields: {
+      ...(existing?.extractedFields && typeof existing.extractedFields === "object" ? existing.extractedFields : {}),
+      callTranscript: extracted,
+    },
   };
   return prisma.lead.upsert({
     where: { voiceCallId: voiceCall.id },
@@ -1191,6 +1980,13 @@ async function provisionTrialBusiness({ businessName, website, settings }) {
         creditBalance: settings.trialCredits,
       },
     });
+    await recordCreditGrant({
+      businessProfileId: profile.id,
+      amount: settings.trialCredits,
+      balanceAfter: profile.creditBalance,
+      note: "Trial credits granted",
+      metadata: { source: "phone_onboarding", trialStartedAt: trialStartedAt.toISOString(), trialDays: settings.trialDays },
+    }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
   }
   await ensureBusinessConfig(profile);
   const access = issueToken();
@@ -1227,16 +2023,16 @@ async function lookupOnboardingBusiness(callerPhone, settings) {
 async function sendBlueBubblesMessage({ settings, toPhone, message }) {
   const password = await systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD");
   if (!settings.blueBubblesBaseUrl || !password) throw new Error("BlueBubbles is not configured");
-  const url = new URL(settings.blueBubblesSendPath || "/api/v1/chat/new", settings.blueBubblesBaseUrl);
+  const url = new URL(settings.blueBubblesSendPath || "/api/v1/message/text", settings.blueBubblesBaseUrl);
   url.searchParams.set("password", password);
-  const isNewChat = url.pathname.includes("/chat/new");
+  const isMessageText = url.pathname.includes("/message/text");
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(
-      isNewChat
-        ? { addresses: [toPhone], message }
-        : { chatGuid: `iMessage;-;${toPhone}`, message, tempGuid: crypto.randomUUID(), method: "apple-script" },
+      isMessageText
+        ? { chatGuid: `iMessage;-;${toPhone}`, message, tempGuid: `temp-${crypto.randomUUID()}`, method: "private-api" }
+        : { addresses: [toPhone], message },
     ),
     signal: AbortSignal.timeout(12000),
   });
@@ -1249,61 +2045,183 @@ async function sendBlueBubblesMessage({ settings, toPhone, message }) {
 
 async function sendSentDmMessage({ settings, toPhone, setupUrl, businessName }) {
   const apiKey = await systemSecret("sentdm_api_key", "SENTDM_API_KEY");
-  if (!apiKey || (!settings.sentDmTemplateId && !settings.sentDmTemplateName)) {
-    throw new Error("Sent.dm API key and template are not configured");
-  }
-  const headers = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    "x-api-key": apiKey,
-    "Idempotency-Key": `onboarding-${crypto.randomUUID()}`,
-  };
-  if (settings.sentDmProfileId) headers["x-profile-id"] = settings.sentDmProfileId;
-  const template = {
-    parameters: { business_name: businessName, setup_url: setupUrl },
-  };
-  if (settings.sentDmTemplateId) template.id = settings.sentDmTemplateId;
-  if (settings.sentDmTemplateName) template.name = settings.sentDmTemplateName;
+  requireSentDmConfig(settings, apiKey);
   const response = await fetch("https://api.sent.dm/v3/messages", {
     method: "POST",
-    headers,
-    body: JSON.stringify({ to: [toPhone], channel: ["sent"], template, sandbox: false }),
+    headers: sentDmHeaders({
+      apiKey,
+      profileId: settings.sentDmProfileId,
+      idempotencyKey: `onboarding-${crypto.randomUUID()}`,
+    }),
+    body: JSON.stringify({
+      to: [toPhone],
+      channel: ["sent"],
+      template: sentDmTemplateFromSettings(
+        settings,
+        sentDmMessageParameters({
+          businessName,
+          message: `Your AI receptionist for ${businessName} is ready: ${setupUrl}`,
+          setupUrl,
+        }),
+      ),
+      sandbox: false,
+    }),
     signal: AbortSignal.timeout(12000),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok || data.success === false) throw new Error(data.error?.message || `Sent.dm returned HTTP ${response.status}`);
+  if (!response.ok || data.success === false) throw new Error(sentDmErrorMessage(data, response.status));
   return { providerMessageId: data.data?.recipients?.[0]?.message_id || null, detail: data };
 }
 
-async function deliverSetupLink({ settings, toPhone, setupUrl, businessName }) {
-  const providers = [settings.messagePrimaryProvider, settings.messageFailoverProvider].filter(
-    (provider, index, list) => provider && provider !== "none" && list.indexOf(provider) === index,
-  );
+async function sendSentDmGenericMessage({ settings, toPhone, message, businessName, reviewLink = "", setupUrl = "" }) {
+  const apiKey = await systemSecret("sentdm_api_key", "SENTDM_API_KEY");
+  requireSentDmConfig(settings, apiKey);
+  const response = await fetch("https://api.sent.dm/v3/messages", {
+    method: "POST",
+    headers: sentDmHeaders({
+      apiKey,
+      profileId: settings.sentDmProfileId,
+      idempotencyKey: `message-${crypto.randomUUID()}`,
+    }),
+    body: JSON.stringify({
+      to: [toPhone],
+      channel: ["sent"],
+      template: sentDmTemplateFromSettings(
+        settings,
+        sentDmMessageParameters({
+          businessName,
+          message,
+          setupUrl,
+          reviewLink,
+        }),
+      ),
+      sandbox: false,
+    }),
+    signal: AbortSignal.timeout(12000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.success === false) throw new Error(sentDmErrorMessage(data, response.status));
+  return { providerMessageId: data.data?.recipients?.[0]?.message_id || null, detail: data };
+}
+
+async function deliverBusinessMessage({
+  settings,
+  profile,
+  toPhone,
+  message,
+  purpose,
+  leadId = null,
+  voiceCallId = null,
+  appointmentId = null,
+  customerFeedbackId = null,
+  reviewLink = "",
+  setupUrl = "",
+  providerOverride = "",
+  metadata = {},
+}) {
+  const target = normalizeE164Phone(toPhone);
+  const providerForFailure = String(providerOverride || settings.messagePrimaryProvider || "none").trim().toLowerCase() || "none";
+  const baseDeliveryData = {
+    purpose,
+    toPhone: target || String(toPhone || "").trim() || "invalid",
+    businessProfileId: profile?.id || null,
+    leadId,
+    voiceCallId,
+    appointmentId,
+    customerFeedbackId,
+    detail: { metadata, message },
+  };
+  if (!/^\+[1-9]\d{7,14}$/.test(target)) {
+    await prisma.messageDelivery.create({
+      data: {
+        ...baseDeliveryData,
+        provider: providerForFailure,
+        status: "failed",
+        error: "A valid E.164 destination phone is required",
+      },
+    });
+    throw new Error("A valid E.164 destination phone is required");
+  }
+  const providers = messageProviderList(settings, providerOverride);
+  if (!providers.length) {
+    await prisma.messageDelivery.create({
+      data: {
+        ...baseDeliveryData,
+        toPhone: target,
+        provider: "none",
+        status: "failed",
+        error: "No messaging provider is configured",
+      },
+    });
+    throw new Error("No messaging provider is configured");
+  }
   const errors = [];
   for (const provider of providers) {
     const delivery = await prisma.messageDelivery.create({
-      data: { provider, purpose: "onboarding_claim", toPhone, status: "sending" },
+      data: {
+        ...baseDeliveryData,
+        provider,
+        toPhone: target,
+        status: "sending",
+      },
     });
     try {
       const result =
         provider === "bluebubbles"
-          ? await sendBlueBubblesMessage({ settings, toPhone, message: `Your AI receptionist for ${businessName} is ready: ${setupUrl}` })
+          ? await sendBlueBubblesMessage({ settings, toPhone: target, message })
           : provider === "sentdm"
-            ? await sendSentDmMessage({ settings, toPhone, setupUrl, businessName })
+            ? await sendSentDmGenericMessage({
+                settings,
+                toPhone: target,
+                message,
+                businessName: profile?.businessName || "the business",
+                reviewLink,
+                setupUrl,
+              })
             : (() => {
                 throw new Error(`Unsupported messaging provider: ${provider}`);
               })();
-      await prisma.messageDelivery.update({
+      const updated = await prisma.messageDelivery.update({
         where: { id: delivery.id },
-        data: { status: "sent", providerMessageId: result.providerMessageId, detail: result.detail },
+        data: { status: "sent", providerMessageId: result.providerMessageId, detail: { ...result.detail, metadata, message } },
       });
-      return { provider, ...result };
+      const messageCredits = Math.max(0, Number(settings.messageCredits || 0));
+      await recordUsageEventOnce({
+        businessProfileId: profile?.id,
+        leadId,
+        voiceCallId,
+        messageDeliveryId: updated.id,
+        category: "message_send",
+        provider,
+        quantity: 1,
+        unit: "message",
+        credits: messageCredits,
+        note: `${purpose} message`,
+        metadata: { purpose, toPhone: target },
+      }).catch((error) => console.warn(`[usage] message usage skipped: ${error.message}`));
+      return { provider, delivery: updated, ...result };
     } catch (error) {
       errors.push(`${provider}: ${error.message}`);
-      await prisma.messageDelivery.update({ where: { id: delivery.id }, data: { status: "failed", error: error.message } });
+      await prisma.messageDelivery.update({
+        where: { id: delivery.id },
+        data: { status: "failed", error: error.message, detail: { metadata, message } },
+      });
     }
   }
   throw new Error(errors.join("; ") || "No messaging provider is configured");
+}
+
+async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, profile = null }) {
+  const message = `Your AI receptionist for ${businessName} is ready: ${setupUrl}`;
+  return deliverBusinessMessage({
+    settings,
+    profile,
+    toPhone,
+    message,
+    purpose: "onboarding_claim",
+    setupUrl,
+    metadata: { setupUrl },
+  });
 }
 
 async function createPhoneClaimLink({ profile, email, settings }) {
@@ -1438,8 +2356,13 @@ Business-managed receptionist configuration:
 - Knowledge base: ${JSON.stringify(knowledge)}
 - Prices: ${JSON.stringify(prices)}
 - Extra instructions: ${config.extraInstructions || "none"}
+- Smart review/recovery: ${
+    config.reviewRequestsEnabled
+      ? `enabled. ${config.reviewPromptInstructions || ""} Review link configured: ${config.reviewLink ? "yes" : "no"}. Complaint recovery instructions: ${config.complaintRecoveryInstructions || "none"}.`
+      : "disabled"
+  }
 
-Use get_available_slots before offering or scheduling a time. Collect every required appointment field before calling schedule_appointment. After schedule_appointment succeeds, call verify_appointment with its confirmationCode before telling the caller the outcome. Only call it booked when verification returns verified=true and status="confirmed". For status="requested", say it is pending confirmation. Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
+Use get_available_slots before offering or scheduling a time. Collect every required appointment field before calling schedule_appointment. After schedule_appointment succeeds, call verify_appointment with its confirmationCode before telling the caller the outcome. Only call it booked when verification returns verified=true and status="confirmed". For status="requested", say it is pending confirmation. If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint. Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
 
 function cellText(value) {
@@ -1567,6 +2490,56 @@ function toolDeclarations(config) {
       },
     },
     {
+      name: "record_customer_feedback",
+      description:
+        "Record whether the customer is happy, neutral, or unhappy after a completed service, appointment, or follow-up conversation.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          sentiment: { type: "STRING", description: "happy, unhappy, neutral, or unknown." },
+          rating: { type: "INTEGER", description: "Optional 1-5 satisfaction rating." },
+          feedback: { type: "STRING", description: "What the customer said about the service." },
+          name: { type: "STRING" },
+          phone: { type: "STRING" },
+          email: { type: "STRING" },
+        },
+        required: ["sentiment"],
+      },
+    },
+    {
+      name: "send_review_request",
+      description:
+        "Text the configured review link to a happy customer after recording their positive satisfaction feedback.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          name: { type: "STRING" },
+          phone: { type: "STRING" },
+          email: { type: "STRING" },
+          feedback: { type: "STRING" },
+          rating: { type: "INTEGER" },
+        },
+        required: ["phone"],
+      },
+    },
+    {
+      name: "escalate_complaint",
+      description:
+        "Record an unhappy customer complaint and notify management using the configured manager notification phone.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          name: { type: "STRING" },
+          phone: { type: "STRING" },
+          email: { type: "STRING" },
+          complaint: { type: "STRING" },
+          requestedResolution: { type: "STRING" },
+          urgency: { type: "STRING" },
+        },
+        required: ["complaint"],
+      },
+    },
+    {
       name: "end_call",
       description: "End the live call after the caller asks to hang up, says goodbye, or the conversation is complete.",
       parameters: {
@@ -1654,6 +2627,9 @@ function qualificationToolDeclarations(config) {
 
 async function runToolCall(profile, config, functionCall, context = {}) {
   const args = functionCall.args || {};
+  const contextLead = context.voiceCallId
+    ? await prisma.lead.findUnique({ where: { voiceCallId: context.voiceCallId } }).catch(() => null)
+    : null;
   if (functionCall.name === "get_available_slots") {
     const availability = await listCalendarSlots({
       prisma,
@@ -1781,6 +2757,151 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       },
     });
     return { ok: true, messageId: message.id };
+  }
+
+  if (functionCall.name === "record_customer_feedback") {
+    const sentiment = normalizeSentiment(args.sentiment);
+    const phone = args.phone ? String(args.phone) : context.fromNumber || contextLead?.phone || null;
+    const feedbackLead = contextLead || (context.qualificationLeadId ? await prisma.lead.findUnique({ where: { id: context.qualificationLeadId } }) : null);
+    const feedback = await upsertCustomerFeedback({
+      profile,
+      lead: feedbackLead,
+      voiceCallId: context.voiceCallId || null,
+      customerName: args.name ? String(args.name) : contextLead?.name || null,
+      phone,
+      email: args.email ? String(args.email) : contextLead?.email || null,
+      sentiment,
+      rating: args.rating,
+      feedbackText: args.feedback ? String(args.feedback) : "",
+      status: sentiment === "unhappy" ? "complaint_pending" : "captured",
+      reviewLink: config.reviewLink || null,
+      metadata: {
+        source: "agent_tool",
+        tool: functionCall.name,
+        createdDuringCall: Boolean(context.voiceCallId),
+      },
+    });
+    return { ok: true, feedbackId: feedback.id, sentiment, status: feedback.status };
+  }
+
+  if (functionCall.name === "send_review_request") {
+    if (!config.reviewRequestsEnabled) throw new Error("Review requests are disabled for this business");
+    if (!String(config.reviewLink || "").trim()) throw new Error("Review link is not configured");
+    const phone = args.phone ? String(args.phone) : context.fromNumber || contextLead?.phone || null;
+    const feedbackLead = contextLead || (context.qualificationLeadId ? await prisma.lead.findUnique({ where: { id: context.qualificationLeadId } }) : null);
+    const feedback = await upsertCustomerFeedback({
+      profile,
+      lead: feedbackLead,
+      voiceCallId: context.voiceCallId || null,
+      customerName: args.name ? String(args.name) : contextLead?.name || null,
+      phone,
+      email: args.email ? String(args.email) : contextLead?.email || null,
+      sentiment: "happy",
+      rating: args.rating,
+      feedbackText: args.feedback ? String(args.feedback) : "",
+      status: "review_pending",
+      reviewLink: config.reviewLink,
+      metadata: { source: "agent_tool", tool: functionCall.name },
+    });
+    const settings = await getSettings();
+    const message = templateText(config.reviewRequestTemplate, {
+      business_name: profile.businessName,
+      customer_name: args.name || contextLead?.name || "there",
+      review_link: config.reviewLink,
+    }).trim();
+    const delivery = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone: phone,
+      message,
+      purpose: "review_request",
+      leadId: contextLead?.id || context.qualificationLeadId || null,
+      voiceCallId: context.voiceCallId || null,
+      customerFeedbackId: feedback.id,
+      reviewLink: config.reviewLink,
+      metadata: { source: "agent_tool" },
+    });
+    const sentFeedback = await prisma.customerFeedback.update({
+      where: { id: feedback.id },
+      data: { status: "review_sent", reviewRequestedAt: new Date() },
+    });
+    await updateLeadFeedbackState({ lead: feedbackLead, feedback: sentFeedback, sentiment: "happy", extraFields: { reviewRequestedAt: sentFeedback.reviewRequestedAt } });
+    return { ok: true, feedbackId: sentFeedback.id, messageDeliveryId: delivery.delivery.id, provider: delivery.provider };
+  }
+
+  if (functionCall.name === "escalate_complaint") {
+    const phone = args.phone ? String(args.phone) : context.fromNumber || contextLead?.phone || null;
+    const complaintText = [args.complaint, args.requestedResolution ? `Requested resolution: ${args.requestedResolution}` : ""]
+      .filter(Boolean)
+      .join("\n");
+    const feedbackLead = contextLead || (context.qualificationLeadId ? await prisma.lead.findUnique({ where: { id: context.qualificationLeadId } }) : null);
+    const feedback = await upsertCustomerFeedback({
+      profile,
+      lead: feedbackLead,
+      voiceCallId: context.voiceCallId || null,
+      customerName: args.name ? String(args.name) : contextLead?.name || null,
+      phone,
+      email: args.email ? String(args.email) : contextLead?.email || null,
+      sentiment: "unhappy",
+      feedbackText: complaintText,
+      status: "complaint_escalated",
+      metadata: { source: "agent_tool", tool: functionCall.name, urgency: args.urgency || null },
+    });
+    await prisma.customerFeedback.update({ where: { id: feedback.id }, data: { complaintEscalatedAt: new Date() } });
+    const transfer = await prisma.transferMessage.create({
+      data: {
+        businessName: profile.businessName,
+        website: profile.website,
+        name: args.name ? String(args.name) : contextLead?.name || null,
+        phone,
+        email: args.email ? String(args.email) : contextLead?.email || null,
+        message: complaintText,
+        urgency: args.urgency ? String(args.urgency) : "complaint",
+      },
+    });
+    if (feedbackLead?.id) {
+      await prisma.lead.update({
+        where: { id: feedbackLead.id },
+        data: {
+          status: "transferred",
+          notes: [feedbackLead.notes, `Complaint escalated: ${complaintText}`].filter(Boolean).join("\n\n") || null,
+          extractedFields: {
+            ...(feedbackLead.extractedFields && typeof feedbackLead.extractedFields === "object" ? feedbackLead.extractedFields : {}),
+            latestFeedback: { sentiment: "unhappy", feedbackId: feedback.id, transferMessageId: transfer.id },
+          },
+        },
+      });
+    }
+    if (!config.managerNotificationPhone) {
+      return { ok: true, feedbackId: feedback.id, transferMessageId: transfer.id, notified: false, error: "Manager phone is not configured" };
+    }
+    const settings = await getSettings();
+    const managerMessage = complaintEscalationMessage({
+      config,
+      profile,
+      customerName: args.name ? String(args.name) : contextLead?.name || "",
+      customerPhone: phone,
+      complaint: complaintText,
+    });
+    const delivery = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone: config.managerNotificationPhone,
+      message: managerMessage,
+      purpose: "complaint_escalation",
+      leadId: contextLead?.id || context.qualificationLeadId || null,
+      voiceCallId: context.voiceCallId || null,
+      customerFeedbackId: feedback.id,
+      metadata: { transferMessageId: transfer.id },
+    });
+    return {
+      ok: true,
+      feedbackId: feedback.id,
+      transferMessageId: transfer.id,
+      notified: true,
+      messageDeliveryId: delivery.delivery.id,
+      provider: delivery.provider,
+    };
   }
 
   if (functionCall.name === "end_call") {
@@ -1931,6 +3052,13 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
           creditBalance: settings.trialCredits,
         },
       });
+      await recordCreditGrant({
+        businessProfileId: profile.id,
+        amount: settings.trialCredits,
+        balanceAfter: profile.creditBalance,
+        note: "Trial credits granted",
+        metadata: { source: "browser_demo", trialStartedAt: trialStartedAt.toISOString(), trialDays: settings.trialDays },
+      }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
     }
     await ensureBusinessConfig(profile);
     await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
@@ -2292,31 +3420,49 @@ app.post("/webhooks/telnyx", async (req, res) => {
       });
       const endedCall = await prisma.voiceCall.findUnique({
         where: { callControlId: payload.call_control_id },
-        include: { businessProfile: true, outboundQualificationCall: { include: { lead: true } } },
+        include: {
+          businessProfile: true,
+          lead: true,
+          events: true,
+          outboundQualificationCall: { include: { lead: true } },
+        },
       });
       if (endedCall?.businessProfile && endedCall.callMode === "business") {
-        await ensureCallLead({ voiceCall: endedCall, profile: endedCall.businessProfile });
+        const lead = await finalizeBusinessCall(endedCall);
+        const config = await ensureBusinessConfig(endedCall.businessProfile);
+        safeBackground("missed-call follow-up", async () => {
+          try {
+            const finalizedCall = await prisma.voiceCall.findUnique({ where: { id: endedCall.id } });
+            const delivery = await maybeSendMissedCallFollowup({
+              profile: endedCall.businessProfile,
+              config,
+              lead,
+              voiceCall: finalizedCall || endedCall,
+            });
+            if (delivery?.delivery?.id || delivery?.id) {
+              await logVoiceCallEvent(payload.call_control_id, "missed_call.followup_sent", {
+                messageDeliveryId: delivery.delivery?.id || delivery.id,
+                provider: delivery.provider || delivery.providerMessageId || null,
+              });
+            }
+          } catch (error) {
+            await logVoiceCallEvent(payload.call_control_id, "missed_call.followup_failed", { message: error.message });
+            throw error;
+          }
+        });
+        if (lead?.id) safeBackground("post-call crm enrichment", () => enrichBusinessCallCrm(endedCall.id));
       }
       if (endedCall?.outboundQualificationCall) {
-        const attempt = endedCall.outboundQualificationCall;
-        const answered = Boolean(attempt.answeredAt || endedCall.answeredAt);
-        const finalStatus = attempt.resultStatus ? "completed" : answered ? "completed" : "unreachable";
-        await prisma.outboundQualificationCall.update({
-          where: { id: attempt.id },
-          data: {
-            status: finalStatus,
-            endedAt: new Date(),
-            transcript: endedCall.transcript || attempt.transcript,
-            summary: attempt.summary || shortCallSummary(endedCall),
-          },
+        const finalization = await finalizeQualificationAttemptFromCall({
+          attempt: endedCall.outboundQualificationCall,
+          call: endedCall,
+          hangupCause: payload.hangup_cause || null,
         });
-        if (!answered && !attempt.resultStatus) {
-          await prisma.lead.update({
-            where: { id: attempt.leadId },
-            data: {
-              status: "unreachable",
-              summary: `Outbound qualification call was not answered or ended before qualification. ${payload.hangup_cause || ""}`.trim(),
-            },
+        if (finalization.retry) {
+          await logVoiceCallEvent(payload.call_control_id, "qualification.retry_scheduled", {
+            attemptId: finalization.retry.id,
+            attemptNumber: finalization.retry.attemptNumber,
+            scheduledFor: finalization.retry.scheduledFor,
           });
         }
       }
@@ -2334,13 +3480,17 @@ app.post("/webhooks/telnyx", async (req, res) => {
       await prisma.voiceCall.updateMany({ where: { callControlId: payload.call_control_id }, data: { recordingUrl } });
       const recordedCall = await prisma.voiceCall.findUnique({
         where: { callControlId: payload.call_control_id },
-        include: { businessProfile: true, lead: true },
+        include: { businessProfile: true, lead: true, events: true },
       });
       if (recordedCall?.lead) {
         await prisma.lead.update({
           where: { id: recordedCall.lead.id },
           data: { summary: shortCallSummary({ ...recordedCall, recordingUrl }) },
         });
+      }
+      if (recordedCall?.businessProfile && recordedCall.callMode === "business") {
+        const lead = await finalizeBusinessCall({ ...recordedCall, recordingUrl });
+        if (lead?.id) safeBackground("post-recording crm enrichment", () => enrichBusinessCallCrm(recordedCall.id));
       }
       await logVoiceCallEvent(payload.call_control_id, "recording.saved", { recordingUrl });
     } else if (eventType?.startsWith("streaming.")) {
@@ -2357,6 +3507,66 @@ app.post("/webhooks/telnyx", async (req, res) => {
   } catch (error) {
     console.error("[telnyx] webhook error", error.message);
     res.status(500).json({ error: "Unable to process Telnyx webhook" });
+  }
+});
+
+app.post("/webhooks/stripe", async (req, res) => {
+  let event = null;
+  try {
+    const signature = req.headers["stripe-signature"];
+    if (!signature) return res.status(400).json({ error: "Missing Stripe signature" });
+    const webhookSecret = await stripeWebhookSecret();
+    if (!webhookSecret) return res.status(400).json({ error: "Stripe webhook secret is not configured" });
+    const stripe = await stripeClient();
+    event = stripe.webhooks.constructEvent(req.rawBody, signature, webhookSecret);
+
+    const existing = await prisma.stripeWebhookEvent.findUnique({ where: { stripeEventId: event.id } });
+    if (existing?.processedAt && !existing.error) return res.json({ received: true, duplicate: true });
+
+    await prisma.stripeWebhookEvent.upsert({
+      where: { stripeEventId: event.id },
+      create: {
+        stripeEventId: event.id,
+        eventType: event.type,
+        payload: jsonSafe(event),
+      },
+      update: {
+        eventType: event.type,
+        payload: jsonSafe(event),
+        error: null,
+      },
+    });
+
+    if (["checkout.session.completed", "checkout.session.async_payment_succeeded"].includes(event.type)) {
+      await processStripeCheckoutSession(event.data.object);
+    } else if (["customer.subscription.updated", "customer.subscription.deleted"].includes(event.type)) {
+      await processStripeSubscription(event.data.object);
+    } else if (["invoice.paid", "invoice.payment_succeeded"].includes(event.type)) {
+      await processStripeInvoicePaid(event.data.object);
+    }
+
+    await prisma.stripeWebhookEvent.update({
+      where: { stripeEventId: event.id },
+      data: { processedAt: new Date(), error: null },
+    });
+    res.json({ received: true });
+  } catch (error) {
+    if (event?.id) {
+      await prisma.stripeWebhookEvent
+        .upsert({
+          where: { stripeEventId: event.id },
+          create: {
+            stripeEventId: event.id,
+            eventType: event.type || "unknown",
+            payload: jsonSafe(event),
+            error: error.message,
+          },
+          update: { error: error.message },
+        })
+        .catch(() => {});
+    }
+    console.error("[stripe] webhook error", error.message);
+    res.status(400).json({ error: error.message });
   }
 });
 
@@ -2382,6 +3592,8 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
       smtpPassword: secretState("smtp_password", "SMTP_PASSWORD"),
       sentDmApiKey: secretState("sentdm_api_key", "SENTDM_API_KEY"),
       blueBubblesPassword: secretState("bluebubbles_password", "BLUEBUBBLES_PASSWORD"),
+      stripeSecretKey: secretState("stripe_secret_key", "STRIPE_SECRET_KEY"),
+      stripeWebhookSecret: secretState("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
     },
     publicBaseUrl: settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "",
   });
@@ -2404,6 +3616,13 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         trialCredits: Math.max(0, Number(req.body.trialCredits || 900)),
         tokenUsd: Math.max(0.000001, Number(req.body.tokenUsd || 0.01)),
         lowBalanceTokens: Math.max(0, Number(req.body.lowBalanceTokens || 100)),
+        voiceMinuteCredits: Math.max(0, Number(req.body.voiceMinuteCredits || 10)),
+        geminiMinuteCredits: Math.max(0, Number(req.body.geminiMinuteCredits || 10)),
+        outboundCallCredits: Math.max(0, Number(req.body.outboundCallCredits || 20)),
+        messageCredits: Math.max(0, Number(req.body.messageCredits || 5)),
+        stripeCreditPackCredits: Math.max(1, Number(req.body.stripeCreditPackCredits || 1000)),
+        stripeSubscriptionCredits: Math.max(0, Number(req.body.stripeSubscriptionCredits || 5000)),
+        stripeSubscriptionPriceId: String(req.body.stripeSubscriptionPriceId || "").trim(),
         recordingRetentionDays: Math.max(1, Number(req.body.recordingRetentionDays || 30)),
         demoNumberCapacity: Math.max(1, Number(req.body.demoNumberCapacity || 10)),
         demoCallerLimit: Math.max(1, Number(req.body.demoCallerLimit || 3)),
@@ -2420,7 +3639,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         messagePrimaryProvider: String(req.body.messagePrimaryProvider || "bluebubbles"),
         messageFailoverProvider: String(req.body.messageFailoverProvider || "sentdm"),
         blueBubblesBaseUrl: String(req.body.blueBubblesBaseUrl || "").trim().replace(/\/$/, ""),
-        blueBubblesSendPath: String(req.body.blueBubblesSendPath || "/api/v1/chat/new").trim(),
+        blueBubblesSendPath: String(req.body.blueBubblesSendPath || "/api/v1/message/text").trim(),
         sentDmTemplateId: String(req.body.sentDmTemplateId || "").trim(),
         sentDmTemplateName: String(req.body.sentDmTemplateName || "").trim(),
         sentDmProfileId: String(req.body.sentDmProfileId || "").trim(),
@@ -2434,6 +3653,19 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         trialCredits: req.body.trialCredits === undefined ? undefined : Math.max(0, Number(req.body.trialCredits)),
         tokenUsd: req.body.tokenUsd === undefined ? undefined : Math.max(0.000001, Number(req.body.tokenUsd)),
         lowBalanceTokens: req.body.lowBalanceTokens === undefined ? undefined : Math.max(0, Number(req.body.lowBalanceTokens)),
+        voiceMinuteCredits:
+          req.body.voiceMinuteCredits === undefined ? undefined : Math.max(0, Number(req.body.voiceMinuteCredits)),
+        geminiMinuteCredits:
+          req.body.geminiMinuteCredits === undefined ? undefined : Math.max(0, Number(req.body.geminiMinuteCredits)),
+        outboundCallCredits:
+          req.body.outboundCallCredits === undefined ? undefined : Math.max(0, Number(req.body.outboundCallCredits)),
+        messageCredits: req.body.messageCredits === undefined ? undefined : Math.max(0, Number(req.body.messageCredits)),
+        stripeCreditPackCredits:
+          req.body.stripeCreditPackCredits === undefined ? undefined : Math.max(1, Number(req.body.stripeCreditPackCredits)),
+        stripeSubscriptionCredits:
+          req.body.stripeSubscriptionCredits === undefined ? undefined : Math.max(0, Number(req.body.stripeSubscriptionCredits)),
+        stripeSubscriptionPriceId:
+          typeof req.body.stripeSubscriptionPriceId === "string" ? req.body.stripeSubscriptionPriceId.trim() : undefined,
         recordingRetentionDays:
           req.body.recordingRetentionDays === undefined ? undefined : Math.max(1, Number(req.body.recordingRetentionDays)),
         demoNumberCapacity:
@@ -2477,10 +3709,99 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
       saveSystemSecret("smtp_password", req.body.smtpPassword),
       saveSystemSecret("sentdm_api_key", req.body.sentDmApiKey),
       saveSystemSecret("bluebubbles_password", req.body.blueBubblesPassword),
+      saveSystemSecret("stripe_secret_key", req.body.stripeSecretKey),
+      saveSystemSecret("stripe_webhook_secret", req.body.stripeWebhookSecret),
     ]);
     res.json({ ok: true, settings });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/sentdm/diagnostics", requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const settings = await getSettings();
+    const apiKey = await systemSecret("sentdm_api_key", "SENTDM_API_KEY");
+    if (!apiKey) {
+      return res.json({
+        configured: false,
+        message: "Sent.dm API key is not configured",
+        saved: {
+          profileId: settings.sentDmProfileId || "",
+          templateId: settings.sentDmTemplateId || "",
+          templateName: settings.sentDmTemplateName || "",
+        },
+      });
+    }
+
+    const [account, templates, profiles] = await Promise.all([
+      sentDmApiGet("/v3/me", apiKey, settings.sentDmProfileId),
+      sentDmApiGet("/v3/templates?page=1&page_size=20", apiKey, settings.sentDmProfileId),
+      sentDmApiGet("/v3/profiles", apiKey),
+    ]);
+    const templateRows = [
+      ...new Map(
+        (Array.isArray(templates.data?.data?.templates) ? templates.data.data.templates : []).map((template) => [
+          template.id || template.name,
+          template,
+        ]),
+      ).values(),
+    ];
+    const profileRows = [
+      ...new Map(
+        (Array.isArray(profiles.data?.data?.profiles) ? profiles.data.data.profiles : []).map((profile) => [
+          profile.id || profile.name,
+          profile,
+        ]),
+      ).values(),
+    ];
+    const savedTemplate = templateRows.find(
+      (template) =>
+        (settings.sentDmTemplateId && template.id === settings.sentDmTemplateId) ||
+        (settings.sentDmTemplateName && template.name === settings.sentDmTemplateName),
+    );
+    res.json({
+      configured: Boolean(settings.sentDmTemplateId || settings.sentDmTemplateName),
+      saved: {
+        profileId: settings.sentDmProfileId || "",
+        templateId: settings.sentDmTemplateId || "",
+        templateName: settings.sentDmTemplateName || "",
+        templateFound: Boolean(savedTemplate),
+      },
+      account: {
+        ...summarizeSentDmApiResult(account),
+        type: account.data?.data?.type || null,
+        id: account.data?.data?.id || null,
+        status: account.data?.data?.status || null,
+        channels: account.data?.data?.channels || null,
+      },
+      profiles: {
+        ...summarizeSentDmApiResult(profiles),
+        items: profileRows.map((profile) => ({
+          id: profile.id,
+          name: profile.name,
+          short_name: profile.short_name,
+          status: profile.status,
+          inherit_templates: profile.inherit_templates,
+          allow_template_sharing: profile.allow_template_sharing,
+        })),
+      },
+      templates: {
+        ...summarizeSentDmApiResult(templates),
+        items: templateRows.map((template) => ({
+          id: template.id,
+          name: template.name,
+          category: template.category,
+          language: template.language,
+          status: template.status,
+          channels: template.channels,
+          variables: template.variables,
+          is_published: template.is_published,
+        })),
+      },
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
   }
 });
 
@@ -2939,6 +4260,30 @@ app.put("/api/business-admin/config", async (req, res) => {
           1,
           Number(req.body.qualificationRetryDelayMinutes || config.qualificationRetryDelayMinutes || 120),
         ),
+        leadWebhookDedupeWindowHours: Math.max(
+          0,
+          Number(req.body.leadWebhookDedupeWindowHours ?? config.leadWebhookDedupeWindowHours ?? 24),
+        ),
+        reviewRequestsEnabled:
+          req.body.reviewRequestsEnabled === undefined ? config.reviewRequestsEnabled : Boolean(req.body.reviewRequestsEnabled),
+        reviewLink: String(req.body.reviewLink ?? config.reviewLink ?? "").trim(),
+        reviewPromptInstructions: String(
+          req.body.reviewPromptInstructions ?? config.reviewPromptInstructions ?? "",
+        ).trim(),
+        reviewRequestTemplate: String(req.body.reviewRequestTemplate ?? config.reviewRequestTemplate ?? "").trim(),
+        complaintRecoveryInstructions: String(
+          req.body.complaintRecoveryInstructions ?? config.complaintRecoveryInstructions ?? "",
+        ).trim(),
+        complaintEscalationTemplate: String(
+          req.body.complaintEscalationTemplate ?? config.complaintEscalationTemplate ?? "",
+        ).trim(),
+        managerNotificationPhone: String(req.body.managerNotificationPhone ?? config.managerNotificationPhone ?? "").trim(),
+        missedCallFollowupTemplate: String(
+          req.body.missedCallFollowupTemplate ?? config.missedCallFollowupTemplate ?? "",
+        ).trim(),
+        appointmentReminderTemplate: String(
+          req.body.appointmentReminderTemplate ?? config.appointmentReminderTemplate ?? "",
+        ).trim(),
         appointmentMode,
         slotDurationMinutes: Math.max(5, Number(req.body.slotDurationMinutes || 30)),
         bufferMinutes: Math.max(0, Number(req.body.bufferMinutes || 0)),
@@ -3235,6 +4580,315 @@ function leadWebhookUrl(baseUrl, token) {
   return `${baseUrl.replace(/\/$/, "")}/webhooks/leads/${encodeURIComponent(token)}`;
 }
 
+function configuredPublicBaseUrl(settings) {
+  return String(settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+}
+
+function publicUrlDiagnostics(baseUrl) {
+  const url = String(baseUrl || "").trim().replace(/\/$/, "");
+  if (!url) {
+    return { status: "missing", ok: false, url: "", detail: "Public base URL is not configured" };
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { status: "invalid", ok: false, url, detail: "Public base URL is not a valid URL" };
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const localHost =
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".local") ||
+    /^10\./.test(hostname) ||
+    /^192\.168\./.test(hostname) ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+  if (parsed.protocol !== "https:") {
+    return { status: "not_https", ok: false, url, detail: "Public webhooks and Telnyx media require HTTPS" };
+  }
+  if (localHost) {
+    return { status: "local_only", ok: false, url, detail: "Public base URL points to a local/private host" };
+  }
+  return { status: "ready", ok: true, url, detail: "Public HTTPS URL is configured" };
+}
+
+function businessPortalReturnUrl(baseUrl, profile, billingStatus) {
+  const url = new URL("/", `${String(baseUrl || "").replace(/\/$/, "")}/`);
+  url.searchParams.set("business_name", profile.businessName);
+  if (profile.website) url.searchParams.set("website", profile.website);
+  if (billingStatus) url.searchParams.set("billing", billingStatus);
+  return url.toString();
+}
+
+function stripeCheckoutCustomer(session) {
+  return stripeId(session.customer);
+}
+
+function stripeCheckoutSubscription(session) {
+  return stripeId(session.subscription);
+}
+
+async function completeStripeCreditCheckout(session) {
+  const metadata = session.metadata || {};
+  const businessProfileId = Number(metadata.businessProfileId || 0);
+  const checkout = await prisma.stripeCheckoutSession.findUnique({ where: { stripeSessionId: session.id } });
+  const profileId = checkout?.businessProfileId || businessProfileId;
+  const creditAmount = Math.max(0, Math.round(Number(checkout?.creditAmount || metadata.creditAmount || 0)));
+  if (!profileId || !creditAmount) return null;
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.stripeCheckoutSession.findUnique({ where: { stripeSessionId: session.id } });
+    if (current?.status === "completed") return current;
+    const profile = await tx.businessProfile.update({
+      where: { id: profileId },
+      data: {
+        accountStatus: "paid",
+        stripeCustomerId: stripeCheckoutCustomer(session) || undefined,
+        creditBalance: { increment: creditAmount },
+      },
+      select: { creditBalance: true },
+    });
+    await tx.creditTransaction.create({
+      data: {
+        businessProfileId: profileId,
+        type: "stripe_topup",
+        amount: creditAmount,
+        balanceAfter: profile.creditBalance,
+        note: "Stripe credit top-up",
+        metadata: {
+          stripeSessionId: session.id,
+          stripePaymentIntentId: stripeId(session.payment_intent),
+          amountTotal: session.amount_total ?? null,
+          currency: session.currency || null,
+        },
+      },
+    });
+    return tx.stripeCheckoutSession.upsert({
+      where: { stripeSessionId: session.id },
+      create: {
+        businessProfileId: profileId,
+        stripeSessionId: session.id,
+        mode: session.mode || "payment",
+        status: "completed",
+        creditAmount,
+        amountTotal: session.amount_total ?? null,
+        currency: session.currency || null,
+        stripeCustomerId: stripeCheckoutCustomer(session),
+        url: session.url || null,
+        metadata: jsonSafe(metadata),
+        completedAt: new Date(),
+      },
+      update: {
+        status: "completed",
+        amountTotal: session.amount_total ?? current?.amountTotal ?? null,
+        currency: session.currency || current?.currency || null,
+        stripeCustomerId: stripeCheckoutCustomer(session) || current?.stripeCustomerId || null,
+        url: session.url || current?.url || null,
+        metadata: jsonSafe({ ...(current?.metadata || {}), ...metadata }),
+        completedAt: current?.completedAt || new Date(),
+      },
+    });
+  });
+}
+
+async function completeStripeSubscriptionCheckout(session) {
+  const metadata = session.metadata || {};
+  const businessProfileId = Number(metadata.businessProfileId || 0);
+  const checkout = await prisma.stripeCheckoutSession.findUnique({ where: { stripeSessionId: session.id } });
+  const profileId = checkout?.businessProfileId || businessProfileId;
+  if (!profileId) return null;
+  const customerId = stripeCheckoutCustomer(session);
+  const subscriptionId = stripeCheckoutSubscription(session);
+  await prisma.businessProfile.update({
+    where: { id: profileId },
+    data: {
+      accountStatus: "paid",
+      stripeCustomerId: customerId || undefined,
+      stripeSubscriptionId: subscriptionId || undefined,
+      stripeSubscriptionStatus: subscriptionId ? "active" : undefined,
+    },
+  });
+  return prisma.stripeCheckoutSession.upsert({
+    where: { stripeSessionId: session.id },
+    create: {
+      businessProfileId: profileId,
+      stripeSessionId: session.id,
+      mode: session.mode || "subscription",
+      status: "completed",
+      creditAmount: Math.max(0, Math.round(Number(metadata.creditAmount || 0))),
+      amountTotal: session.amount_total ?? null,
+      currency: session.currency || null,
+      stripeCustomerId: customerId,
+      stripeSubscriptionId: subscriptionId,
+      url: session.url || null,
+      metadata: jsonSafe(metadata),
+      completedAt: new Date(),
+    },
+    update: {
+      status: "completed",
+      amountTotal: session.amount_total ?? undefined,
+      currency: session.currency || undefined,
+      stripeCustomerId: customerId || undefined,
+      stripeSubscriptionId: subscriptionId || undefined,
+      metadata: jsonSafe(metadata),
+      completedAt: new Date(),
+    },
+  });
+}
+
+async function processStripeCheckoutSession(session) {
+  const checkoutType = session.metadata?.checkoutType || (session.mode === "subscription" ? "subscription" : "credits");
+  if (checkoutType === "subscription" || session.mode === "subscription") {
+    return completeStripeSubscriptionCheckout(session);
+  }
+  return completeStripeCreditCheckout(session);
+}
+
+async function processStripeSubscription(subscription) {
+  const subscriptionId = subscription.id;
+  if (!subscriptionId) return null;
+  const data = {
+    stripeCustomerId: stripeId(subscription.customer) || undefined,
+    stripeSubscriptionStatus: subscription.status || undefined,
+    subscriptionCurrentPeriodEnd: stripeTimestamp(subscription.current_period_end),
+  };
+  const accountStatus = accountStatusForStripeSubscription(subscription.status);
+  if (accountStatus) data.accountStatus = accountStatus;
+  const updated = await prisma.businessProfile.updateMany({
+    where: { stripeSubscriptionId: subscriptionId },
+    data,
+  });
+  return updated.count;
+}
+
+async function processStripeInvoicePaid(invoice) {
+  const subscriptionId = stripeId(invoice.subscription);
+  const customerId = stripeId(invoice.customer);
+  if (!subscriptionId && !customerId) return null;
+  const settings = await getSettings();
+  const profile =
+    (subscriptionId
+      ? await prisma.businessProfile.findFirst({ where: { stripeSubscriptionId: subscriptionId } })
+      : null) ||
+    (customerId ? await prisma.businessProfile.findFirst({ where: { stripeCustomerId: customerId } }) : null);
+  if (!profile) return null;
+  const creditAmount = Math.max(0, Math.round(Number(invoice.metadata?.creditAmount || settings.stripeSubscriptionCredits || 0)));
+  if (!creditAmount) return profile;
+  const note = `Stripe subscription credits (${invoice.id})`;
+  const existing = await prisma.creditTransaction.findFirst({
+    where: { businessProfileId: profile.id, type: "stripe_subscription", note },
+    select: { id: true },
+  });
+  if (existing) return profile;
+  await grantBusinessCredits({
+    businessProfileId: profile.id,
+    amount: creditAmount,
+    type: "stripe_subscription",
+    note,
+    metadata: {
+      stripeInvoiceId: invoice.id,
+      stripeSubscriptionId: subscriptionId,
+      amountPaid: invoice.amount_paid ?? null,
+      currency: invoice.currency || null,
+    },
+  });
+  return prisma.businessProfile.update({
+    where: { id: profile.id },
+    data: {
+      accountStatus: "paid",
+      stripeCustomerId: customerId || undefined,
+      stripeSubscriptionId: subscriptionId || undefined,
+      stripeSubscriptionStatus: "active",
+    },
+  });
+}
+
+function componentStatus(configured, detail = "") {
+  return { status: configured ? "configured" : "missing", ok: Boolean(configured), detail };
+}
+
+async function databaseHealth() {
+  const started = Date.now();
+  try {
+    await prisma.$queryRaw`select 1`;
+    return { status: "ok", ok: true, latencyMs: Date.now() - started };
+  } catch (error) {
+    return { status: "error", ok: false, detail: error.message, latencyMs: Date.now() - started };
+  }
+}
+
+function callIssueFlags(call) {
+  const flags = call?.healthFlags && typeof call.healthFlags === "object" ? call.healthFlags : {};
+  return Object.entries(flags)
+    .filter(([, active]) => active)
+    .map(([key]) => key);
+}
+
+async function recentCallIssueSummary(where = {}) {
+  const calls = await prisma.voiceCall.findMany({
+    where,
+    orderBy: { startedAt: "desc" },
+    take: 50,
+    select: {
+      id: true,
+      callControlId: true,
+      callMode: true,
+      status: true,
+      lastError: true,
+      healthFlags: true,
+      startedAt: true,
+      endedAt: true,
+    },
+  });
+  const counts = {
+    total: calls.length,
+    flagged: 0,
+    lastError: 0,
+    noCallerAudio: 0,
+    noGeminiAudio: 0,
+    mediaDisconnected: 0,
+    dbIssue: 0,
+    geminiIssue: 0,
+    telnyxIssue: 0,
+  };
+  for (const call of calls) {
+    const flags = callIssueFlags(call);
+    if (flags.length || call.lastError) counts.flagged += 1;
+    if (call.lastError) counts.lastError += 1;
+    for (const flag of flags) {
+      if (counts[flag] !== undefined) counts[flag] += 1;
+    }
+  }
+  return { status: counts.flagged ? "issues" : "ok", ok: counts.flagged === 0, counts };
+}
+
+function webhookReadiness({ profile = null, publicUrl }) {
+  const telnyxWebhookUrl = publicUrl.ok ? `${publicUrl.url}/webhooks/telnyx` : null;
+  const leadWebhookReady = !profile
+    ? null
+    : Boolean(profile.leadWebhookEnabled && profile.leadWebhookToken && publicUrl.ok);
+  return {
+    telnyx: {
+      status: publicUrl.ok ? "ready" : "blocked",
+      ok: publicUrl.ok,
+      url: telnyxWebhookUrl,
+      detail: publicUrl.ok ? "Configure this URL in Telnyx webhooks" : publicUrl.detail,
+    },
+    lead:
+      profile && {
+        status: leadWebhookReady ? "ready" : profile.leadWebhookEnabled ? "missing" : "disabled",
+        ok: leadWebhookReady,
+        enabled: Boolean(profile.leadWebhookEnabled),
+        url: leadWebhookReady ? leadWebhookUrl(publicUrl.url, profile.leadWebhookToken) : null,
+        detail: leadWebhookReady
+          ? "Lead webhook URL is ready"
+          : profile.leadWebhookEnabled
+            ? "Open the CRM webhook panel to generate/copy the business lead webhook"
+            : "Lead webhook is disabled",
+      },
+  };
+}
+
 function firstPayloadValue(payload, keys) {
   for (const key of keys) {
     if (payload[key] !== undefined && payload[key] !== null && String(payload[key]).trim() !== "") {
@@ -3249,8 +4903,9 @@ function normalizeLeadWebhookPayload(payload = {}) {
   const name = firstPayloadValue(body, ["name", "full_name", "fullName", "contact_name", "customer_name", "first_name"]);
   const lastName = firstPayloadValue(body, ["last_name", "lastName"]);
   const fullName = [name, lastName].filter(Boolean).join(" ").trim() || "Webhook lead";
-  const phone = firstPayloadValue(body, ["phone", "phone_number", "phoneNumber", "mobile", "caller_phone", "contact_phone"]);
-  const email = firstPayloadValue(body, ["email", "email_address", "emailAddress", "contact_email"]);
+  const rawPhone = firstPayloadValue(body, ["phone", "phone_number", "phoneNumber", "mobile", "caller_phone", "contact_phone"]);
+  const phone = rawPhone ? normalizeE164Phone(rawPhone) : "";
+  const email = firstPayloadValue(body, ["email", "email_address", "emailAddress", "contact_email"]).toLowerCase();
   const need = firstPayloadValue(body, ["need", "service", "service_needed", "request", "message", "description", "notes", "comments"]);
   const source = firstPayloadValue(body, ["source", "lead_source", "utm_source", "platform", "provider"]) || "webhook";
   const notes = firstPayloadValue(body, ["notes", "message", "comments", "description"]);
@@ -3300,10 +4955,60 @@ function normalizeLeadWebhookPayload(payload = {}) {
     extractedFields: {
       receivedAt: new Date().toISOString(),
       normalized: { name: fullName, phone: phone || null, email: email || null, need: need || null, source },
+      rawPhone: rawPhone || null,
       extra,
       raw: body,
     },
   };
+}
+
+function webhookIntakeError(message, status = "rejected") {
+  const error = new Error(message);
+  error.webhookStatus = status;
+  error.statusCode = status === "rejected" ? 400 : 500;
+  return error;
+}
+
+function validateLeadWebhookPayload(normalized) {
+  const phone = String(normalized.phone || "").trim();
+  const email = String(normalized.email || "").trim();
+  if (!phone && !email) throw webhookIntakeError("Lead webhook requires at least a phone or email");
+  if (phone && !/^\+[1-9]\d{7,14}$/.test(phone)) {
+    throw webhookIntakeError("Lead webhook phone must be E.164 or a 10-digit US number");
+  }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw webhookIntakeError("Lead webhook email is not valid");
+  }
+}
+
+function leadWebhookDedupeKey(profile, normalized) {
+  const parts = [
+    profile.id,
+    normalized.phone || "",
+    String(normalized.email || "").toLowerCase(),
+    String(normalized.source || "").toLowerCase(),
+    String(normalized.need || "").toLowerCase().slice(0, 120),
+  ];
+  return crypto.createHash("sha256").update(parts.join("|")).digest("hex");
+}
+
+async function findRecentDuplicateWebhookLead(profile, dedupeKey, windowHours = 24) {
+  if (!dedupeKey) return null;
+  const hours = Math.max(0, Number(windowHours || 0));
+  if (!hours) return null;
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+  const event = await prisma.leadWebhookEvent.findFirst({
+    where: {
+      businessProfileId: profile.id,
+      dedupeKey,
+      status: "accepted",
+      createdAt: { gte: since },
+      leadId: { not: null },
+    },
+    include: { lead: true },
+    orderBy: { createdAt: "desc" },
+  });
+  return event?.lead || null;
 }
 
 function leadWebhookHelp() {
@@ -3328,20 +5033,142 @@ function leadWebhookHelp() {
   };
 }
 
+async function processLeadWebhookSubmission({ token, payload, profile = null, source = "public_webhook" }) {
+  const cleanToken = String(token || "").trim();
+  let intakeEvent = null;
+  const targetProfile =
+    profile ||
+    (await prisma.businessProfile.findFirst({
+      where: { leadWebhookToken: cleanToken, leadWebhookEnabled: true },
+    }));
+  if (!targetProfile) {
+    await prisma.leadWebhookEvent.create({
+      data: { token: cleanToken, status: "rejected", payload, error: "Lead webhook was not found or is disabled" },
+    });
+    return { statusCode: 404, body: { error: "Lead webhook was not found or is disabled" } };
+  }
+
+  const config = await ensureBusinessConfig(targetProfile);
+  const normalized = normalizeLeadWebhookPayload(payload);
+  const dedupeKey = leadWebhookDedupeKey(targetProfile, normalized);
+  intakeEvent = await prisma.leadWebhookEvent.create({
+    data: {
+      businessProfileId: targetProfile.id,
+      token: cleanToken || targetProfile.leadWebhookToken,
+      status: "received",
+      dedupeKey,
+      normalized,
+      payload,
+      qualification: { source, dedupeWindowHours: config.leadWebhookDedupeWindowHours ?? 24 },
+    },
+  });
+
+  try {
+    validateLeadWebhookPayload(normalized);
+    const duplicateLead = await findRecentDuplicateWebhookLead(targetProfile, dedupeKey, config.leadWebhookDedupeWindowHours ?? 24);
+    if (duplicateLead) {
+      await prisma.leadWebhookEvent.update({
+        where: { id: intakeEvent.id },
+        data: { status: "duplicate", leadId: duplicateLead.id },
+      });
+      return {
+        statusCode: 200,
+        body: {
+          ok: true,
+          duplicate: true,
+          eventId: intakeEvent.id,
+          leadId: duplicateLead.id,
+          status: duplicateLead.status,
+          businessName: targetProfile.businessName,
+        },
+      };
+    }
+
+    const lead = await prisma.lead.create({
+      data: {
+        businessProfileId: targetProfile.id,
+        businessName: targetProfile.businessName,
+        website: targetProfile.website,
+        ...normalized,
+      },
+    });
+    const qualification = await maybeAutoStartQualification({ profile: targetProfile, config, lead });
+    await prisma.leadWebhookEvent.update({
+      where: { id: intakeEvent.id },
+      data: {
+        status: "accepted",
+        leadId: lead.id,
+        qualification: JSON.parse(JSON.stringify({ source, ...(qualification || {}) })),
+      },
+    });
+    return {
+      statusCode: 201,
+      body: {
+        ok: true,
+        duplicate: false,
+        eventId: intakeEvent.id,
+        leadId: lead.id,
+        status: lead.status,
+        businessName: targetProfile.businessName,
+        qualification,
+      },
+    };
+  } catch (error) {
+    const status = error.webhookStatus || "failed";
+    await prisma.leadWebhookEvent.update({
+      where: { id: intakeEvent.id },
+      data: { status, error: error.message },
+    }).catch(() => {});
+    return {
+      statusCode: error.statusCode || 400,
+      body: { ok: false, eventId: intakeEvent.id, status, error: error.message },
+    };
+  }
+}
+
 function qualificationAutoLaunchEnabled(config) {
   return Boolean(config?.qualificationEnabled) && String(config?.qualificationLaunchMode || "approval") === "immediate";
+}
+
+function parseBusinessTime(value, fallback) {
+  const [hour, minute] = String(value || fallback).split(":").map((part) => Number(part));
+  return {
+    hour: Number.isFinite(hour) ? hour : Number(String(fallback).split(":")[0]),
+    minute: Number.isFinite(minute) ? minute : Number(String(fallback).split(":")[1] || 0),
+  };
+}
+
+function nextQualificationTime(config, desiredDate = new Date()) {
+  const zone = config?.timezone || "America/Chicago";
+  const rules = (config?.availabilityRules || []).filter((rule) => rule.enabled);
+  if (!rules.length) return desiredDate;
+  const byDay = new Map(rules.map((rule) => [Number(rule.dayOfWeek), rule]));
+  let cursor = DateTime.fromJSDate(desiredDate).setZone(zone);
+  for (let offset = 0; offset < 14; offset += 1) {
+    const day = cursor.plus({ days: offset });
+    const rule = byDay.get(day.weekday % 7);
+    if (!rule) continue;
+    const start = parseBusinessTime(rule.startTime, "09:00");
+    const end = parseBusinessTime(rule.endTime, "17:00");
+    const windowStart = day.set({ hour: start.hour, minute: start.minute, second: 0, millisecond: 0 });
+    const windowEnd = day.set({ hour: end.hour, minute: end.minute, second: 0, millisecond: 0 });
+    const candidate = offset === 0 ? DateTime.max(cursor, windowStart) : windowStart;
+    if (candidate < windowEnd) return candidate.toJSDate();
+  }
+  return desiredDate;
 }
 
 async function maybeAutoStartQualification({ profile, config, lead }) {
   if (!qualificationAutoLaunchEnabled(config)) return { started: false };
   try {
     const delaySeconds = randomQualificationDelaySeconds(config);
-    const scheduledFor = new Date(Date.now() + delaySeconds * 1000);
+    const requestedFor = new Date(Date.now() + delaySeconds * 1000);
+    const scheduledFor = nextQualificationTime(config, requestedFor);
     const prepared = await prepareQualificationAttempt({
       config,
       lead,
-      status: delaySeconds > 0 ? "scheduled" : "queued",
-      scheduledFor: delaySeconds > 0 ? scheduledFor : null,
+      status: scheduledFor > new Date() ? "scheduled" : "queued",
+      scheduledFor,
     });
     if (prepared.reused) {
       return {
@@ -3351,16 +5178,8 @@ async function maybeAutoStartQualification({ profile, config, lead }) {
         reused: true,
       };
     }
-    if (delaySeconds > 0) {
-      setTimeout(() => {
-        startOutboundQualificationCall({ profile, config, lead, attemptId: prepared.attempt.id }).catch((error) => {
-          console.warn(`[qualification] delayed call failed for lead ${lead.id}: ${error.message}`);
-        });
-      }, delaySeconds * 1000);
-      return { started: false, scheduled: true, delaySeconds, scheduledFor, attempt: prepared.attempt };
-    }
-    const result = await startOutboundQualificationCall({ profile, config, lead, attemptId: prepared.attempt.id });
-    return { started: true, attempt: result.attempt, reused: result.reused };
+    scheduleQualificationWorker(1000);
+    return { started: false, scheduled: true, delaySeconds, scheduledFor, attempt: prepared.attempt };
   } catch (error) {
     return { started: false, error: error.message };
   }
@@ -3377,6 +5196,11 @@ function randomQualificationDelaySeconds(config) {
   if (max <= min) return min;
   return min + Math.floor(Math.random() * (max - min + 1));
 }
+
+const QUALIFICATION_OPEN_STATUSES = ["scheduled", "queued", "dispatching", "calling", "answered"];
+const QUALIFICATION_TERMINAL_STATUSES = ["completed", "failed", "unreachable", "cancelled"];
+const QUALIFICATION_DISPATCH_STALE_MS = 5 * 60 * 1000;
+const QUALIFICATION_CALL_STALE_MS = 2 * 60 * 60 * 1000;
 
 async function assignedOutboundNumber(profile) {
   const number = await prisma.voiceNumber.findFirst({
@@ -3396,7 +5220,7 @@ async function prepareQualificationAttempt({ config, lead, status = "queued", sc
   const toNumber = normalizeE164Phone(lead.phone);
   if (!/^\+[1-9]\d{7,14}$/.test(toNumber)) throw new Error("Lead phone must be in a valid E.164 format");
   const existingOpenAttempt = await prisma.outboundQualificationCall.findFirst({
-    where: { leadId: lead.id, status: { in: ["scheduled", "queued", "calling", "answered"] } },
+    where: { leadId: lead.id, status: { in: QUALIFICATION_OPEN_STATUSES } },
     include: { voiceCall: true },
     orderBy: { createdAt: "desc" },
   });
@@ -3438,16 +5262,30 @@ async function startOutboundQualificationCall({ profile, config, lead, attemptId
     : await prepareQualificationAttempt({ config, lead });
   const attempt = prepared.attempt;
   if (!attempt) throw new Error("Qualification attempt was not found");
+  if (prepared.reused && !attemptId && ["scheduled", "queued"].includes(String(attempt.status || ""))) {
+    await prisma.outboundQualificationCall.updateMany({
+      where: { id: attempt.id, status: { in: ["scheduled", "queued"] } },
+      data: { status: "queued", scheduledFor: new Date(), lastError: null },
+    });
+    return startOutboundQualificationCall({ profile, config, lead, attemptId: attempt.id });
+  }
   if (prepared.reused) return prepared;
+  if (QUALIFICATION_TERMINAL_STATUSES.includes(String(attempt.status || ""))) {
+    return { attempt, reused: true, skipped: true };
+  }
   const toNumber = normalizeE164Phone(lead.phone);
   try {
     const number = await assignedOutboundNumber(profile);
     const connectionId = number.connectionId || (await systemSecret("telnyx_connection_id", "TELNYX_CONNECTION_ID"));
     if (!connectionId) throw new Error("Telnyx connection ID is not configured");
-    await prisma.outboundQualificationCall.update({
-      where: { id: attempt.id },
-      data: { fromNumber: number.phoneNumber, status: "queued" },
+    const reserved = await prisma.outboundQualificationCall.updateMany({
+      where: { id: attempt.id, status: { in: ["scheduled", "queued", "dispatching"] } },
+      data: { fromNumber: number.phoneNumber, status: "dispatching", lastError: null },
     });
+    if (!reserved.count) {
+      const currentAttempt = await prisma.outboundQualificationCall.findUnique({ where: { id: attempt.id }, include: { voiceCall: true } });
+      return { attempt: currentAttempt || attempt, reused: true, skipped: true };
+    }
     const commandId = crypto.randomUUID();
     const clientState = Buffer.from(
       JSON.stringify({
@@ -3498,33 +5336,218 @@ async function startOutboundQualificationCall({ profile, config, lead, attemptId
     await logVoiceCallEvent(callControlId, "qualification.call_requested", { leadId: lead.id, attemptId: attempt.id });
     return { attempt: updatedAttempt, reused: false };
   } catch (error) {
-    await prisma.outboundQualificationCall.update({
-      where: { id: attempt.id },
+    await prisma.outboundQualificationCall.updateMany({
+      where: { id: attempt.id, status: { notIn: QUALIFICATION_TERMINAL_STATUSES } },
       data: { status: "failed", lastError: error.message, endedAt: new Date() },
     });
     throw error;
   }
 }
 
-app.post("/webhooks/leads/:token", async (req, res) => {
-  try {
-    const token = String(req.params.token || "").trim();
-    const profile = await prisma.businessProfile.findFirst({
-      where: { leadWebhookToken: token, leadWebhookEnabled: true },
-    });
-    if (!profile) return res.status(404).json({ error: "Lead webhook was not found or is disabled" });
-    const config = await ensureBusinessConfig(profile);
-    const normalized = normalizeLeadWebhookPayload(req.body);
-    const lead = await prisma.lead.create({
+async function qualificationLeadWithProfile(attempt) {
+  if (!attempt?.leadId) return null;
+  if (attempt.lead?.businessProfile) return attempt.lead;
+  return prisma.lead.findUnique({
+    where: { id: attempt.leadId },
+    include: { businessProfile: true },
+  });
+}
+
+async function finalizeQualificationAttemptFromCall({ attempt, call, hangupCause = null }) {
+  if (!attempt) return { attempt: null, retry: null };
+  const lead = await qualificationLeadWithProfile(attempt);
+  const profile = call?.businessProfile || lead?.businessProfile || null;
+  const answered = Boolean(attempt.answeredAt || call?.answeredAt);
+  const finalStatus = attempt.resultStatus ? "completed" : answered ? "completed" : "unreachable";
+  const endedAt = call?.endedAt || new Date();
+  const updatedAttempt = await prisma.outboundQualificationCall.update({
+    where: { id: attempt.id },
+    data: {
+      status: finalStatus,
+      endedAt,
+      transcript: call?.transcript || attempt.transcript,
+      summary: attempt.summary || (call ? shortCallSummary(call) : null),
+    },
+  });
+  let retry = null;
+  if (!answered && !attempt.resultStatus && lead) {
+    await prisma.lead.update({
+      where: { id: attempt.leadId },
       data: {
-        businessProfileId: profile.id,
-        businessName: profile.businessName,
-        website: profile.website,
-        ...normalized,
+        status: "unreachable",
+        summary: `Outbound qualification call was not answered or ended before qualification. ${hangupCause || ""}`.trim(),
       },
     });
-    const qualification = await maybeAutoStartQualification({ profile, config, lead });
-    res.status(201).json({ ok: true, leadId: lead.id, status: lead.status, businessName: profile.businessName, qualification });
+    retry = await scheduleQualificationRetry({
+      previousAttempt: updatedAttempt,
+      lead,
+      profile,
+    });
+  }
+  if (call) {
+    await recordCallUsageOnce(call).catch((error) => {
+      console.warn(`[usage] qualification call usage skipped for call ${call.id}: ${error.message}`);
+    });
+  }
+  return { attempt: updatedAttempt, retry, finalStatus };
+}
+
+async function recoverStaleQualificationDispatches() {
+  const staleBefore = new Date(Date.now() - QUALIFICATION_DISPATCH_STALE_MS);
+  const result = await prisma.outboundQualificationCall.updateMany({
+    where: { status: "dispatching", updatedAt: { lt: staleBefore } },
+    data: {
+      status: "queued",
+      scheduledFor: new Date(),
+      lastError: "Recovered stale dispatch lock after worker restart",
+    },
+  });
+  if (result.count) console.warn(`[qualification] recovered ${result.count} stale dispatch lock(s)`);
+  return result.count;
+}
+
+async function recoverStaleQualificationCalls() {
+  const staleBefore = new Date(Date.now() - QUALIFICATION_CALL_STALE_MS);
+  const attempts = await prisma.outboundQualificationCall.findMany({
+    where: { status: { in: ["calling", "answered"] }, updatedAt: { lt: staleBefore } },
+    include: {
+      lead: { include: { businessProfile: true } },
+      voiceCall: { include: { businessProfile: true } },
+    },
+    orderBy: { updatedAt: "asc" },
+    take: 25,
+  });
+  let recovered = 0;
+  for (const attempt of attempts) {
+    const callEnded = attempt.voiceCall?.endedAt || attempt.voiceCall?.status === "ended";
+    if (callEnded) {
+      await finalizeQualificationAttemptFromCall({
+        attempt,
+        call: attempt.voiceCall,
+        hangupCause: attempt.voiceCall?.hangupCause || "recovered from stale call state",
+      });
+      recovered += 1;
+      continue;
+    }
+    await prisma.outboundQualificationCall.update({
+      where: { id: attempt.id },
+      data: {
+        status: "failed",
+        endedAt: new Date(),
+        lastError: "Timed out waiting for qualification call completion after worker restart",
+      },
+    });
+    if (!attempt.answeredAt && attempt.lead?.businessProfile) {
+      await scheduleQualificationRetry({
+        previousAttempt: attempt,
+        lead: attempt.lead,
+        profile: attempt.lead.businessProfile,
+      });
+    }
+    recovered += 1;
+  }
+  if (recovered) console.warn(`[qualification] recovered ${recovered} stale active call state(s)`);
+  return recovered;
+}
+
+async function recoverQualificationQueue() {
+  await recoverStaleQualificationDispatches();
+  await recoverStaleQualificationCalls();
+}
+
+let qualificationWorkerTimer = null;
+let qualificationWorkerRunning = false;
+
+function scheduleQualificationWorker(delayMs = 15000) {
+  if (qualificationWorkerTimer) return;
+  qualificationWorkerTimer = setTimeout(() => {
+    qualificationWorkerTimer = null;
+    processQualificationQueue().catch((error) => console.warn(`[qualification] worker failed: ${error.message}`));
+  }, delayMs);
+}
+
+async function processQualificationQueue() {
+  if (qualificationWorkerRunning) return;
+  qualificationWorkerRunning = true;
+  try {
+    await recoverStaleQualificationDispatches();
+    const now = new Date();
+    const attempts = await prisma.outboundQualificationCall.findMany({
+      where: {
+        OR: [
+          { status: "queued" },
+          { status: "scheduled", scheduledFor: { lte: now } },
+        ],
+      },
+      include: { lead: { include: { businessProfile: true } } },
+      orderBy: [{ scheduledFor: "asc" }, { createdAt: "asc" }],
+      take: 10,
+    });
+    for (const attempt of attempts) {
+      const profile = attempt.lead.businessProfile;
+      if (!profile) {
+        await prisma.outboundQualificationCall.update({
+          where: { id: attempt.id },
+          data: { status: "failed", lastError: "Lead has no business profile", endedAt: new Date() },
+        });
+        continue;
+      }
+      const config = await ensureBusinessConfig(profile);
+      const allowedAt = nextQualificationTime(config, attempt.scheduledFor || now);
+      if (allowedAt > new Date(Date.now() + 1000)) {
+        await prisma.outboundQualificationCall.update({
+          where: { id: attempt.id },
+          data: { status: "scheduled", scheduledFor: allowedAt },
+        });
+        continue;
+      }
+      const locked = await prisma.outboundQualificationCall.updateMany({
+        where: { id: attempt.id, status: { in: ["queued", "scheduled"] } },
+        data: { status: "dispatching", lastError: null },
+      });
+      if (!locked.count) continue;
+      await startOutboundQualificationCall({ profile, config, lead: attempt.lead, attemptId: attempt.id }).catch(async (error) => {
+        console.warn(`[qualification] dispatch failed for attempt ${attempt.id}: ${error.message}`);
+        await prisma.outboundQualificationCall.update({
+          where: { id: attempt.id },
+          data: { status: "failed", lastError: error.message, endedAt: new Date() },
+        });
+      });
+    }
+  } finally {
+    qualificationWorkerRunning = false;
+    scheduleQualificationWorker(30000);
+  }
+}
+
+async function scheduleQualificationRetry({ previousAttempt, lead, profile }) {
+  if (!lead || !profile) return null;
+  const config = await ensureBusinessConfig(profile);
+  if (!config.qualificationEnabled) return null;
+  const nextAttemptNumber = (await prisma.outboundQualificationCall.count({ where: { leadId: lead.id } })) + 1;
+  if (nextAttemptNumber > config.qualificationMaxAttempts) return null;
+  const toNumber = normalizeE164Phone(lead.phone || previousAttempt.toNumber);
+  if (!/^\+[1-9]\d{7,14}$/.test(toNumber)) return null;
+  const retryBase = new Date(Date.now() + Math.max(1, Number(config.qualificationRetryDelayMinutes || 120)) * 60000);
+  const scheduledFor = nextQualificationTime(config, retryBase);
+  const retry = await prisma.outboundQualificationCall.create({
+    data: {
+      leadId: lead.id,
+      attemptNumber: nextAttemptNumber,
+      status: "scheduled",
+      toNumber,
+      scheduledFor,
+      notes: `Retry after attempt ${previousAttempt.attemptNumber || previousAttempt.id}`,
+    },
+  });
+  scheduleQualificationWorker(1000);
+  return retry;
+}
+
+app.post("/webhooks/leads/:token", async (req, res) => {
+  try {
+    const result = await processLeadWebhookSubmission({ token: req.params.token, payload: req.body });
+    res.status(result.statusCode).json(result.body);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -3564,13 +5587,45 @@ app.post("/api/business-admin/lead-webhook/rotate", async (req, res) => {
   }
 });
 
+app.post("/api/business-admin/lead-webhook/test", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    const updatedProfile = await ensureLeadWebhook(profile);
+    const payload = req.body.payload && typeof req.body.payload === "object" ? req.body.payload : req.body;
+    const result = await processLeadWebhookSubmission({
+      token: updatedProfile.leadWebhookToken,
+      payload,
+      profile: updatedProfile,
+      source: "admin_test",
+    });
+    res.status(result.statusCode).json(result.body);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.get("/api/business-admin/crm", async (req, res) => {
   try {
     const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
     const status = req.query.status ? normalizeCrmStatus(req.query.status, "new") : null;
+    const search = String(req.query.search || "").trim();
+    const searchWhere = search
+      ? {
+          OR: [
+            { name: { contains: search, mode: "insensitive" } },
+            { phone: { contains: search, mode: "insensitive" } },
+            { email: { contains: search, mode: "insensitive" } },
+            { need: { contains: search, mode: "insensitive" } },
+            { source: { contains: search, mode: "insensitive" } },
+            { summary: { contains: search, mode: "insensitive" } },
+            { notes: { contains: search, mode: "insensitive" } },
+          ],
+        }
+      : {};
     const leads = await prisma.lead.findMany({
       where: {
-        AND: [leadWhereForProfile(profile), status ? { status } : {}],
+        AND: [leadWhereForProfile(profile), status ? { status } : {}, searchWhere],
       },
       include: {
         voiceCall: {
@@ -3583,9 +5638,16 @@ app.get("/api/business-admin/crm", async (req, res) => {
             hangupCause: true,
             recordingUrl: true,
             transcript: true,
+            healthFlags: true,
+            metrics: true,
             startedAt: true,
             answeredAt: true,
             endedAt: true,
+            events: {
+              orderBy: { createdAt: "desc" },
+              take: 20,
+              select: { eventType: true, detail: true, createdAt: true },
+            },
           },
         },
         qualificationCalls: {
@@ -3600,20 +5662,43 @@ app.get("/api/business-admin/crm", async (req, res) => {
                 hangupCause: true,
                 recordingUrl: true,
                 transcript: true,
+                healthFlags: true,
+                metrics: true,
                 startedAt: true,
                 answeredAt: true,
                 endedAt: true,
+                events: {
+                  orderBy: { createdAt: "desc" },
+                  take: 10,
+                  select: { eventType: true, detail: true, createdAt: true },
+                },
               },
             },
           },
           orderBy: { createdAt: "desc" },
           take: 5,
         },
+        feedback: {
+          orderBy: { createdAt: "desc" },
+          take: 5,
+          include: { messageDeliveries: { orderBy: { createdAt: "desc" }, take: 3 } },
+        },
+        leadWebhookEvents: { orderBy: { createdAt: "desc" }, take: 5 },
+        messageDeliveries: { orderBy: { createdAt: "desc" }, take: 5 },
       },
       orderBy: { updatedAt: "desc" },
       take: Math.min(200, Math.max(1, Number(req.query.limit || 100))),
     });
-    res.json({ leads, statuses: Array.from(crmStatuses) });
+    const statusCounts = await prisma.lead.groupBy({
+      by: ["status"],
+      where: leadWhereForProfile(profile),
+      _count: { _all: true },
+    }).catch(() => []);
+    res.json({
+      leads,
+      statuses: Array.from(crmStatuses),
+      statusCounts: Object.fromEntries(statusCounts.map((row) => [row.status, row._count._all])),
+    });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -3691,6 +5776,729 @@ app.post("/api/business-admin/crm/:id/qualify-call", async (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
+});
+
+app.post("/api/business-admin/crm/:id/feedback", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const lead = await prisma.lead.findFirst({
+      where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
+      include: { voiceCall: true },
+    });
+    if (!lead) throw new Error("CRM lead was not found for this business");
+    const sentiment = normalizeSentiment(req.body.sentiment);
+    const feedbackText = String(req.body.feedback || req.body.feedbackText || "").trim();
+    const feedback = await upsertCustomerFeedback({
+      profile,
+      lead,
+      voiceCallId: lead.voiceCallId || null,
+      customerName: lead.name,
+      phone: req.body.phone || lead.phone || lead.voiceCall?.fromNumber || null,
+      email: req.body.email || lead.email || null,
+      sentiment,
+      rating: req.body.rating,
+      feedbackText,
+      status: req.body.status || feedbackStatusForSentiment(sentiment),
+      reviewLink: config.reviewLink || "",
+      metadata: { source: "manual_crm" },
+    });
+    res.status(201).json({ feedback });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/crm/:id/review-request", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const lead = await prisma.lead.findFirst({
+      where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
+      include: { voiceCall: true },
+    });
+    if (!lead) throw new Error("CRM lead was not found for this business");
+    if (!config.reviewRequestsEnabled) throw new Error("Review requests are disabled for this business");
+    if (!config.reviewLink) throw new Error("Review link is not configured");
+    const phone = String(req.body.phone || lead.phone || lead.voiceCall?.fromNumber || "").trim();
+    const feedback = await upsertCustomerFeedback({
+      profile,
+      lead,
+      voiceCallId: lead.voiceCallId || null,
+      customerName: lead.name,
+      phone,
+      email: lead.email,
+      sentiment: "happy",
+      rating: req.body.rating,
+      status: "review_pending",
+      reviewLink: config.reviewLink,
+      feedbackText: req.body.feedback ? String(req.body.feedback) : "",
+      metadata: { source: "manual_crm" },
+    });
+    const settings = await getSettings();
+    const message = templateText(config.reviewRequestTemplate, {
+      business_name: profile.businessName,
+      customer_name: lead.name || "there",
+      review_link: config.reviewLink,
+    }).trim();
+    const delivery = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone: phone,
+      message,
+      purpose: "review_request",
+      leadId: lead.id,
+      voiceCallId: lead.voiceCallId || null,
+      customerFeedbackId: feedback.id,
+      reviewLink: config.reviewLink,
+      metadata: { source: "manual_crm" },
+    });
+    const updatedFeedback = await prisma.customerFeedback.update({
+      where: { id: feedback.id },
+      data: { status: "review_sent", reviewRequestedAt: new Date() },
+      include: { messageDeliveries: true },
+    });
+    await updateLeadFeedbackState({ lead, feedback: updatedFeedback, sentiment: "happy", extraFields: { reviewRequestedAt: updatedFeedback.reviewRequestedAt } });
+    res.status(201).json({ feedback: updatedFeedback, delivery: delivery.delivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/crm/:id/escalate-complaint", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const lead = await prisma.lead.findFirst({
+      where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
+      include: { voiceCall: true },
+    });
+    if (!lead) throw new Error("CRM lead was not found for this business");
+    const complaint = String(req.body.complaint || req.body.feedback || lead.notes || lead.summary || "").trim();
+    if (!complaint) throw new Error("Complaint text is required");
+    const feedback = await upsertCustomerFeedback({
+      profile,
+      lead,
+      voiceCallId: lead.voiceCallId || null,
+      customerName: lead.name,
+      phone: lead.phone || lead.voiceCall?.fromNumber || null,
+      email: lead.email,
+      sentiment: "unhappy",
+      status: "complaint_escalated",
+      feedbackText: complaint,
+      metadata: { source: "manual_crm" },
+    });
+    const escalatedFeedback = await prisma.customerFeedback.update({
+      where: { id: feedback.id },
+      data: { complaintEscalatedAt: new Date() },
+    });
+    const transfer = await prisma.transferMessage.create({
+      data: {
+        businessName: profile.businessName,
+        website: profile.website,
+        name: lead.name,
+        phone: lead.phone || lead.voiceCall?.fromNumber || null,
+        email: lead.email,
+        message: complaint,
+        urgency: "complaint",
+      },
+    });
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: { status: "transferred", notes: [lead.notes, `Complaint escalated: ${complaint}`].filter(Boolean).join("\n\n") || null },
+    });
+    let delivery = null;
+    if (config.managerNotificationPhone) {
+      const settings = await getSettings();
+      const managerMessage = complaintEscalationMessage({
+        config,
+        profile,
+        customerName: lead.name,
+        customerPhone: lead.phone || lead.voiceCall?.fromNumber || "",
+        complaint,
+      });
+      delivery = await deliverBusinessMessage({
+        settings,
+        profile,
+        toPhone: config.managerNotificationPhone,
+        message: managerMessage,
+        purpose: "complaint_escalation",
+        leadId: lead.id,
+        voiceCallId: lead.voiceCallId || null,
+        customerFeedbackId: escalatedFeedback.id,
+        metadata: { source: "manual_crm", transferMessageId: transfer.id },
+      }).then((result) => result.delivery);
+    }
+    await updateLeadFeedbackState({ lead, feedback: escalatedFeedback, sentiment: "unhappy", extraFields: { transferMessageId: transfer.id } });
+    res.status(201).json({ feedback: escalatedFeedback, transferMessage: transfer, delivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/crm/:id/qualify-retry", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const lead = await prisma.lead.findFirst({
+      where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
+    });
+    if (!lead) throw new Error("CRM lead was not found for this business");
+    const scheduledFor = nextQualificationTime(config, new Date());
+    const status = scheduledFor > new Date(Date.now() + 1000) ? "scheduled" : "queued";
+    const prepared = await prepareQualificationAttempt({ config, lead, status, scheduledFor });
+    scheduleQualificationWorker(1000);
+    res.status(prepared.reused ? 200 : 201).json({ attempt: prepared.attempt, reused: prepared.reused });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/crm/:id/qualify-cancel", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    const lead = await prisma.lead.findFirst({
+      where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
+    });
+    if (!lead) throw new Error("CRM lead was not found for this business");
+    const result = await prisma.outboundQualificationCall.updateMany({
+      where: { leadId: lead.id, status: { in: ["scheduled", "queued", "dispatching"] } },
+      data: { status: "cancelled", endedAt: new Date(), lastError: "Cancelled by business user" },
+    });
+    res.json({ ok: true, cancelled: result.count });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/crm/:id/qualify-pause", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    const lead = await prisma.lead.findFirst({
+      where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
+    });
+    if (!lead) throw new Error("CRM lead was not found for this business");
+    const now = new Date();
+    const result = await prisma.outboundQualificationCall.updateMany({
+      where: { leadId: lead.id, status: { in: ["scheduled", "queued", "dispatching"] } },
+      data: { status: "cancelled", endedAt: now, lastError: "Paused by business user" },
+    });
+    const note = `Outbound qualification paused ${now.toISOString()}.`;
+    const updatedLead = await prisma.lead.update({
+      where: { id: lead.id },
+      data: {
+        status: "callback",
+        notes: [lead.notes, note].filter(Boolean).join("\n\n") || null,
+      },
+    });
+    res.json({ ok: true, paused: result.count, lead: updatedLead });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/business-admin/lead-webhook/events", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const events = await prisma.leadWebhookEvent.findMany({
+      where: { businessProfileId: profile.id },
+      include: { lead: { select: { id: true, name: true, phone: true, email: true, status: true } } },
+      orderBy: { createdAt: "desc" },
+      take: Math.min(100, Math.max(1, Number(req.query.limit || 25))),
+    });
+    res.json({ events });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/business-admin/messages", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const messages = await prisma.messageDelivery.findMany({
+      where: { businessProfileId: profile.id },
+      include: {
+        lead: { select: { id: true, name: true, phone: true, status: true } },
+        appointment: { select: { id: true, customerName: true, scheduledStart: true, timezone: true, status: true } },
+        customerFeedback: true,
+      },
+      orderBy: { createdAt: "desc" },
+      take: Math.min(100, Math.max(1, Number(req.query.limit || 50))),
+    });
+    res.json({ messages });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/messages/test", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    const settings = await getSettings();
+    const message = String(req.body.message || `Test message from ${profile.businessName}`).trim();
+    const result = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone: req.body.toPhone,
+      message,
+      purpose: "provider_test",
+      providerOverride: req.body.provider,
+      metadata: { source: "business_admin_test" },
+    });
+    res.status(201).json({ ok: true, provider: result.provider, delivery: result.delivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/crm/:id/missed-call-followup", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const lead = await prisma.lead.findFirst({
+      where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
+      include: { voiceCall: true },
+    });
+    if (!lead) throw new Error("CRM lead was not found for this business");
+    const phone = req.body.toPhone || lead.phone || lead.voiceCall?.fromNumber;
+    const message = templateText(config.missedCallFollowupTemplate, {
+      business_name: profile.businessName,
+      customer_name: lead.name || "there",
+      customer_phone: phone || "",
+    }).trim();
+    if (!message) throw new Error("Missed-call follow-up template is empty");
+    const settings = await getSettings();
+    const result = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone: phone,
+      message,
+      purpose: "missed_call_followup",
+      leadId: lead.id,
+      voiceCallId: lead.voiceCallId || null,
+      metadata: { source: "manual_crm" },
+    });
+    res.status(201).json({ ok: true, provider: result.provider, delivery: result.delivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/appointments/:id/reminder", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const appointment = await prisma.appointment.findFirst({
+      where: { id: Number(req.params.id), businessName: profile.businessName, website: profile.website },
+    });
+    if (!appointment) throw new Error("Appointment was not found for this business");
+    const phone = req.body.toPhone || appointment.phone;
+    const lead = phone
+      ? await prisma.lead.findFirst({
+          where: { AND: [leadWhereForProfile(profile), { phone: normalizeE164Phone(phone) }] },
+          orderBy: { updatedAt: "desc" },
+        })
+      : null;
+    const appointmentTime = formatAppointmentTime(appointment, config.timezone);
+    const message = templateText(config.appointmentReminderTemplate, {
+      business_name: profile.businessName,
+      customer_name: appointment.customerName || "there",
+      customer_phone: phone || "",
+      appointment_time: appointmentTime,
+      confirmation_code: appointmentConfirmationLabel(appointment),
+      reason: appointment.reason || "",
+    }).trim();
+    if (!message) throw new Error("Appointment reminder template is empty");
+    const settings = await getSettings();
+    const result = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone: phone,
+      message,
+      purpose: "appointment_reminder",
+      leadId: lead?.id || null,
+      appointmentId: appointment.id,
+      metadata: { source: "manual_calendar", appointmentTime, confirmationCode: appointmentConfirmationLabel(appointment) },
+    });
+    res.status(201).json({ ok: true, provider: result.provider, delivery: result.delivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/business-admin/usage", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const settings = await getSettings();
+    const [events, transactions, current, categoryTotals] = await Promise.all([
+      prisma.usageEvent.findMany({
+        where: { businessProfileId: profile.id },
+        include: { creditTransaction: true, messageDelivery: true, voiceCall: true, lead: true },
+        orderBy: { createdAt: "desc" },
+        take: Math.min(100, Math.max(1, Number(req.query.limit || 50))),
+      }),
+      prisma.creditTransaction.findMany({
+        where: { businessProfileId: profile.id },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      }),
+      prisma.businessProfile.findUnique({ where: { id: profile.id }, select: { creditBalance: true } }),
+      prisma.usageEvent.groupBy({
+        by: ["category"],
+        where: { businessProfileId: profile.id },
+        _count: { _all: true },
+        _sum: { credits: true, quantity: true },
+      }).catch(() => []),
+    ]);
+    const creditBalance = current?.creditBalance ?? profile.creditBalance;
+    res.json({
+      creditBalance,
+      lowBalanceTokens: settings.lowBalanceTokens,
+      lowBalance: creditBalance <= settings.lowBalanceTokens,
+      rates: {
+        telnyxMinuteCredits: settings.voiceMinuteCredits,
+        geminiMinuteCredits: settings.geminiMinuteCredits ?? settings.voiceMinuteCredits,
+        outboundCallCredits: settings.outboundCallCredits,
+        messageCredits: settings.messageCredits,
+      },
+      totals: Object.fromEntries(
+        categoryTotals.map((row) => [
+          row.category,
+          {
+            count: row._count._all,
+            quantity: row._sum.quantity || 0,
+            credits: row._sum.credits || 0,
+          },
+        ]),
+      ),
+      events,
+      transactions,
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/business-admin/billing", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const [settings, secretKey, webhookSecret, current, sessions] = await Promise.all([
+      getSettings(),
+      systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
+      stripeWebhookSecret().then(Boolean),
+      prisma.businessProfile.findUnique({
+        where: { id: profile.id },
+        select: {
+          accountStatus: true,
+          creditBalance: true,
+          stripeCustomerId: true,
+          stripeSubscriptionId: true,
+          stripeSubscriptionStatus: true,
+          subscriptionCurrentPeriodEnd: true,
+        },
+      }),
+      prisma.stripeCheckoutSession.findMany({
+        where: { businessProfileId: profile.id },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      }),
+    ]);
+    res.json({
+      accountStatus: current?.accountStatus || profile.accountStatus,
+      creditBalance: current?.creditBalance ?? profile.creditBalance,
+      stripe: {
+        checkoutConfigured: secretKey,
+        webhookConfigured: webhookSecret,
+        ready: Boolean(secretKey && webhookSecret),
+        customerConfigured: Boolean(current?.stripeCustomerId),
+        subscriptionConfigured: Boolean(current?.stripeSubscriptionId),
+        subscriptionStatus: current?.stripeSubscriptionStatus || "",
+        subscriptionCurrentPeriodEnd: current?.subscriptionCurrentPeriodEnd || null,
+      },
+      settings: {
+        tokenUsd: settings.tokenUsd,
+        stripeCreditPackCredits: settings.stripeCreditPackCredits,
+        stripeSubscriptionCredits: settings.stripeSubscriptionCredits,
+        stripeSubscriptionPriceConfigured: Boolean(settings.stripeSubscriptionPriceId),
+      },
+      checkoutSessions: sessions,
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/billing/checkout", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const settings = await getSettings();
+    const stripe = await stripeClient();
+    const checkoutType = String(req.body.checkoutType || "credits").trim().toLowerCase();
+    if (!["credits", "subscription"].includes(checkoutType)) throw new Error("Checkout type must be credits or subscription");
+
+    const baseUrl = await webhookBaseUrl(req);
+    const successUrl = businessPortalReturnUrl(baseUrl, profile, "success");
+    const cancelUrl = businessPortalReturnUrl(baseUrl, profile, "cancelled");
+    const existing = await prisma.businessProfile.findUnique({
+      where: { id: profile.id },
+      select: { stripeCustomerId: true },
+    });
+    const metadata = {
+      businessProfileId: String(profile.id),
+      checkoutType,
+    };
+    const sessionParams = {
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      client_reference_id: String(profile.id),
+      metadata,
+    };
+    if (existing?.stripeCustomerId) {
+      sessionParams.customer = existing.stripeCustomerId;
+    } else if (req.user?.role === "business" && req.user.email) {
+      sessionParams.customer_email = req.user.email;
+    }
+
+    let creditAmount = 0;
+    if (checkoutType === "credits") {
+      creditAmount = Math.max(1, Math.round(Number(req.body.credits || settings.stripeCreditPackCredits || 1000)));
+      const unitAmount = Math.max(50, Math.round(creditAmount * Number(settings.tokenUsd || 0.01) * 100));
+      metadata.creditAmount = String(creditAmount);
+      sessionParams.mode = "payment";
+      if (!sessionParams.customer && !sessionParams.customer_email) sessionParams.customer_creation = "always";
+      sessionParams.line_items = [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: { name: `${creditAmount} AI receptionist credits` },
+            unit_amount: unitAmount,
+          },
+          quantity: 1,
+        },
+      ];
+    } else {
+      if (!settings.stripeSubscriptionPriceId) throw new Error("Stripe subscription price ID is not configured");
+      creditAmount = Math.max(0, Math.round(Number(settings.stripeSubscriptionCredits || 0)));
+      metadata.creditAmount = String(creditAmount);
+      sessionParams.mode = "subscription";
+      sessionParams.line_items = [{ price: settings.stripeSubscriptionPriceId, quantity: 1 }];
+      sessionParams.subscription_data = { metadata };
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
+    await prisma.stripeCheckoutSession.create({
+      data: {
+        businessProfileId: profile.id,
+        stripeSessionId: session.id,
+        mode: session.mode || checkoutType,
+        status: session.status || "created",
+        creditAmount,
+        amountTotal: session.amount_total ?? null,
+        currency: session.currency || null,
+        stripeCustomerId: stripeCheckoutCustomer(session),
+        stripeSubscriptionId: stripeCheckoutSubscription(session),
+        url: session.url || null,
+        metadata: jsonSafe(metadata),
+      },
+    });
+    res.status(201).json({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+async function businessHealth(profile) {
+  const settings = await getSettings();
+  const publicUrl = publicUrlDiagnostics(configuredPublicBaseUrl(settings));
+  const [
+    db,
+    geminiKey,
+    telnyxKey,
+    telnyxPublicKey,
+    connectionId,
+    messagePassword,
+    sentDmKey,
+    stripeKey,
+    stripeWebhook,
+    recentCalls,
+    callIssues,
+    activeNumber,
+  ] = await Promise.all([
+    databaseHealth(),
+    systemSecret("gemini_api_key", "GEMINI_API_KEY").then(Boolean),
+    systemSecret("telnyx_api_key", "TELNYX_API_KEY").then(Boolean),
+    systemSecret("telnyx_public_key", "TELNYX_PUBLIC_KEY").then(Boolean),
+    systemSecret("telnyx_connection_id", "TELNYX_CONNECTION_ID").then(Boolean),
+    systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD").then(Boolean),
+    systemSecret("sentdm_api_key", "SENTDM_API_KEY").then(Boolean),
+    systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
+    stripeWebhookSecret().then(Boolean),
+    prisma.voiceCall.findMany({
+      where: { businessProfileId: profile.id },
+      orderBy: { startedAt: "desc" },
+      take: 10,
+      select: {
+        id: true,
+        callControlId: true,
+        callMode: true,
+        status: true,
+        lastError: true,
+        healthFlags: true,
+        startedAt: true,
+        endedAt: true,
+      },
+    }),
+    recentCallIssueSummary({ businessProfileId: profile.id }),
+    prisma.voiceNumber.findFirst({ where: { businessProfileId: profile.id, status: "active" }, select: { phoneNumber: true } }),
+  ]);
+  const telnyxConfigured = telnyxKey && telnyxPublicKey && connectionId;
+  const blueBubblesConfigured = Boolean(settings.blueBubblesBaseUrl && messagePassword);
+  const sentDmConfigured = Boolean(sentDmKey && (settings.sentDmTemplateId || settings.sentDmTemplateName));
+  const stripeConfigured = Boolean(stripeKey && stripeWebhook);
+  const checks = {
+    database: db,
+    gemini: componentStatus(geminiKey, geminiKey ? "Gemini API key is configured" : "Gemini API key is missing"),
+    telnyx: {
+      ...componentStatus(telnyxConfigured, telnyxConfigured ? "Telnyx API key, public key, and connection ID are configured" : "Telnyx configuration is incomplete"),
+      missing: [
+        !telnyxKey ? "TELNYX_API_KEY" : null,
+        !telnyxPublicKey ? "TELNYX_PUBLIC_KEY" : null,
+        !connectionId ? "TELNYX_CONNECTION_ID" : null,
+      ].filter(Boolean),
+    },
+    publicUrl,
+    webhooks: webhookReadiness({ profile, publicUrl }),
+    messaging: {
+      bluebubbles: {
+        ...componentStatus(blueBubblesConfigured, blueBubblesConfigured ? "BlueBubbles URL and password are configured" : "BlueBubbles URL or password is missing"),
+        baseUrl: settings.blueBubblesBaseUrl || "",
+      },
+      sentdm: {
+        ...componentStatus(sentDmConfigured, sentDmConfigured ? "Sent.dm API key and template are configured" : "Sent.dm API key or approved template is missing"),
+        template: settings.sentDmTemplateId || settings.sentDmTemplateName || "",
+      },
+    },
+    billing: {
+      stripe: {
+        ...componentStatus(stripeConfigured, stripeConfigured ? "Stripe secret key and webhook secret are configured" : "Stripe key or webhook secret is missing"),
+        missing: [
+          !stripeKey ? "STRIPE_SECRET_KEY" : null,
+          !stripeWebhook ? "STRIPE_WEBHOOK_SECRET" : null,
+          !settings.stripeSubscriptionPriceId ? "subscription price ID" : null,
+        ].filter(Boolean),
+        subscriptionPriceConfigured: Boolean(settings.stripeSubscriptionPriceId),
+      },
+    },
+    phoneNumber: {
+      status: activeNumber ? "assigned" : "missing",
+      ok: Boolean(activeNumber),
+      phoneNumber: activeNumber?.phoneNumber || null,
+      detail: activeNumber ? "Business has an active Telnyx number" : "Assign an active Telnyx number before receiving calls",
+    },
+    callIssues,
+  };
+  return {
+    db: db.status,
+    gemini: geminiKey ? "configured" : "missing",
+    telnyx: telnyxConfigured ? "configured" : "missing",
+    publicBaseUrl: publicUrl.url,
+    messaging: {
+      bluebubbles: blueBubblesConfigured ? "configured" : "missing",
+      sentdm: sentDmConfigured ? "configured" : "missing",
+    },
+    billing: {
+      stripe: stripeConfigured ? "configured" : "missing",
+    },
+    checks,
+    recentCalls,
+  };
+}
+
+app.get("/api/business-admin/health", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    res.json(await businessHealth(profile));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/health", requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const settings = await getSettings();
+    const publicUrl = publicUrlDiagnostics(configuredPublicBaseUrl(settings));
+    const [db, geminiKey, telnyxKey, telnyxPublicKey, connectionId, blueBubblesPassword, sentDmKey, stripeKey, stripeWebhook, callIssues, profileCounts] =
+      await Promise.all([
+        databaseHealth(),
+        systemSecret("gemini_api_key", "GEMINI_API_KEY").then(Boolean),
+        systemSecret("telnyx_api_key", "TELNYX_API_KEY").then(Boolean),
+        systemSecret("telnyx_public_key", "TELNYX_PUBLIC_KEY").then(Boolean),
+        systemSecret("telnyx_connection_id", "TELNYX_CONNECTION_ID").then(Boolean),
+        systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD").then(Boolean),
+        systemSecret("sentdm_api_key", "SENTDM_API_KEY").then(Boolean),
+        systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
+        stripeWebhookSecret().then(Boolean),
+        recentCallIssueSummary(),
+        prisma.businessProfile.groupBy({ by: ["accountStatus"], _count: { _all: true } }).catch(() => []),
+      ]);
+    const telnyxConfigured = telnyxKey && telnyxPublicKey && connectionId;
+    const blueBubblesConfigured = Boolean(settings.blueBubblesBaseUrl && blueBubblesPassword);
+    const sentDmConfigured = Boolean(sentDmKey && (settings.sentDmTemplateId || settings.sentDmTemplateName));
+    const stripeConfigured = Boolean(stripeKey && stripeWebhook);
+    const checks = {
+      database: db,
+      gemini: componentStatus(geminiKey, geminiKey ? "Gemini API key is configured" : "Gemini API key is missing"),
+      telnyx: componentStatus(telnyxConfigured, telnyxConfigured ? "Telnyx credentials are configured" : "Telnyx credentials are incomplete"),
+      publicUrl,
+      webhooks: webhookReadiness({ publicUrl }),
+      messaging: {
+        bluebubbles: componentStatus(blueBubblesConfigured, blueBubblesConfigured ? "BlueBubbles is configured" : "BlueBubbles URL or password is missing"),
+        sentdm: componentStatus(sentDmConfigured, sentDmConfigured ? "Sent.dm is configured" : "Sent.dm API key or approved template is missing"),
+      },
+      billing: {
+        stripe: {
+          ...componentStatus(stripeConfigured, stripeConfigured ? "Stripe is configured" : "Stripe secret key or webhook secret is missing"),
+          missing: [
+            !stripeKey ? "STRIPE_SECRET_KEY" : null,
+            !stripeWebhook ? "STRIPE_WEBHOOK_SECRET" : null,
+            !settings.stripeSubscriptionPriceId ? "subscription price ID" : null,
+          ].filter(Boolean),
+          subscriptionPriceConfigured: Boolean(settings.stripeSubscriptionPriceId),
+        },
+      },
+      callIssues,
+      businessProfiles: Object.fromEntries(profileCounts.map((row) => [row.accountStatus, row._count._all])),
+    };
+    res.json({
+      db: db.status,
+      publicBaseUrl: publicUrl.url,
+      geminiConfigured: geminiKey,
+      telnyxConfigured,
+      messageProviders: {
+        bluebubbles: blueBubblesConfigured,
+        sentdm: sentDmConfigured,
+      },
+      billingProviders: {
+        stripe: stripeConfigured,
+      },
+      checks,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/healthz", async (_req, res) => {
+  const db = await databaseHealth();
+  res.status(db.ok ? 200 : 503).json({
+    ok: db.ok,
+    db: db.status,
+    latencyMs: db.latencyMs,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 app.get("/api/business", requireAuth, async (req, res) => {
@@ -4200,6 +7008,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       const claim = await createPhoneClaimLink({ profile, email: args.email, settings });
       const delivery = await deliverSetupLink({
         settings,
+        profile,
         toPhone: call.fromNumber,
         setupUrl: claim.setupUrl,
         businessName: profile.businessName,
@@ -4693,6 +7502,8 @@ wss.on("connection", (clientWs, request) => {
   let micForwardingEnabled = false;
   let inputAudioChunks = 0;
   let outputAudioChunks = 0;
+  let liveUsageStartedAt = null;
+  let liveUsageRecorded = false;
 
   const sendClient = (message) => {
     if (clientWs.readyState === WebSocket.OPEN) {
@@ -4758,6 +7569,7 @@ wss.on("connection", (clientWs, request) => {
 
         geminiWs.on("open", () => {
           const selectedLiveModel = liveModelPath(message.liveModel || settings.liveModel);
+          liveUsageStartedAt = new Date();
           const liveSystemPrompt = `${profile.systemPrompt}
 ${runtimeBusinessInstructions(businessConfig)}
 
@@ -4879,6 +7691,7 @@ Live session identity and language:
         geminiWs.on("close", (code, reason) => {
           console.log(`[live] Gemini socket closed code=${code} reason=${reason.toString()}`);
           sendClient({ type: "status", status: "gemini_closed", code, reason: reason.toString() });
+          recordLiveBrowserUsageOnce().catch(() => {});
         });
 
         geminiWs.on("error", (error) => {
@@ -4923,7 +7736,20 @@ Live session identity and language:
     }
   });
 
+  async function recordLiveBrowserUsageOnce() {
+    if (liveUsageRecorded) return;
+    liveUsageRecorded = true;
+    await recordBrowserLiveUsage({
+      profile,
+      startedAt: liveUsageStartedAt,
+      endedAt: new Date(),
+      inputAudioChunks,
+      outputAudioChunks,
+    });
+  }
+
   clientWs.on("close", () => {
+    recordLiveBrowserUsageOnce().catch(() => {});
     if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
       geminiWs.close();
     }
@@ -4933,6 +7759,8 @@ Live session identity and language:
 await backfillAppointmentBookingKeys({ prisma });
 await bootstrapAdmin();
 await bootstrapBusinessLifecycle();
+await recoverQualificationQueue().catch((error) => console.warn(`[qualification] startup recovery failed: ${error.message}`));
+scheduleQualificationWorker(1000);
 
 server.listen(PORT, () => {
   const protocol = USE_HTTPS ? "https" : "http";

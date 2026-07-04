@@ -8,6 +8,7 @@
   --accent: #4cab83;
   --accent-dark: #246a55;
   --accent-soft: #e7f5ed;
+  --green-dark: #246a55;
   --coral: #f47c59;
   --danger: #b42318;
   --gold: #e2aa45;
@@ -600,6 +601,61 @@ body {
 .form-message.success {
   color: var(--green-dark);
   font-weight: 700;
+}
+
+.provider-diagnostic {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.provider-diagnostic > button {
+  width: max-content;
+}
+
+.provider-diagnostic-output {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.provider-diagnostic-output p {
+  margin: 0;
+}
+
+.sentdm-template-list {
+  display: grid;
+  gap: 7px;
+}
+
+.sentdm-template-row {
+  display: grid;
+  width: 100%;
+  min-height: 48px;
+  justify-items: start;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+  text-align: left;
+}
+
+.sentdm-template-row strong {
+  color: var(--ink);
+  font-size: 0.82rem;
+}
+
+.sentdm-template-row span {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.sentdm-template-row.muted-row {
+  opacity: 0.68;
 }
 
 .number-search-form {
@@ -1426,6 +1482,21 @@ dd {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+.crm-webhook-card textarea {
+  width: 100%;
+  min-height: 150px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.84rem;
+}
+
+.crm-webhook-controls span {
+  align-self: center;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .crm-editor {
   grid-template-columns: repeat(6, minmax(0, 1fr));
   margin-bottom: 18px;
@@ -1434,6 +1505,59 @@ dd {
 .crm-board {
   display: grid;
   gap: 12px;
+}
+
+.crm-summary-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.status-pill {
+  min-height: 32px;
+  border: 1px solid #dce8e1;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.status-pill.active {
+  border-color: var(--accent-dark);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.status-pill.warning {
+  border-color: #f0c36a;
+  background: #fff4d8;
+  color: #8a5a00;
+}
+
+.crm-filter-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 180px;
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.compact-list {
+  gap: 6px;
+}
+
+.compact-row {
+  display: block;
+  min-height: 0;
+  padding: 10px 12px;
+}
+
+.mini-row {
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .crm-card {
@@ -1621,6 +1745,12 @@ dd {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px 18px;
+}
+
+.appointment-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
 .appointment-field {
@@ -1977,6 +2107,7 @@ a.appointment-field-value {
   .calendar-board,
   .inline-editor,
   .crm-webhook-controls,
+  .crm-filter-row,
   .crm-editor,
   .crm-detail-grid,
   .crm-lead-editor,

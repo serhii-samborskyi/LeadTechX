@@ -60,9 +60,21 @@
             <label>Trial credits<input id="trialCredits" type="number" min="0" required /></label>
             <label>USD per token<input id="tokenUsd" type="number" min="0.000001" step="0.000001" required /></label>
             <label>Low balance warning (tokens)<input id="lowBalanceTokens" type="number" min="0" required /></label>
+            <label>Voice minute credits<input id="voiceMinuteCredits" type="number" min="0" required /></label>
+            <label>Gemini minute credits<input id="geminiMinuteCredits" type="number" min="0" required /></label>
+            <label>Outbound call credits<input id="outboundCallCredits" type="number" min="0" required /></label>
+            <label>Message credits<input id="messageCredits" type="number" min="0" required /></label>
             <label>Recording retention (days)<input id="recordingRetentionDays" type="number" min="1" required /></label>
             <label>Businesses per demo number<input id="demoNumberCapacity" type="number" min="1" required /></label>
             <label>Caller numbers per trial<input id="demoCallerLimit" type="number" min="1" required /></label>
+          </div>
+          <h3>Stripe billing</h3>
+          <div class="form-grid secret-grid">
+            <label>Stripe secret key<input id="stripeSecretKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="stripeSecretKeyState"></small></label>
+            <label>Stripe webhook secret<input id="stripeWebhookSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="stripeWebhookSecretState"></small></label>
+            <label>Credit pack size<input id="stripeCreditPackCredits" type="number" min="1" required /></label>
+            <label>Subscription monthly credits<input id="stripeSubscriptionCredits" type="number" min="0" required /></label>
+            <label class="wide-field">Subscription price ID<input id="stripeSubscriptionPriceId" placeholder="price_..." /></label>
           </div>
           <h3>Email delivery</h3>
           <div class="form-grid secret-grid">
@@ -131,12 +143,16 @@
             <label>Primary provider<select id="messagePrimaryProvider"><option value="bluebubbles">BlueBubbles</option><option value="sentdm">Sent.dm</option><option value="none">None</option></select></label>
             <label>Failover provider<select id="messageFailoverProvider"><option value="sentdm">Sent.dm</option><option value="bluebubbles">BlueBubbles</option><option value="none">None</option></select></label>
             <label>BlueBubbles server URL<input id="blueBubblesBaseUrl" type="url" placeholder="https://your-bluebubbles-server" /></label>
-            <label>BlueBubbles send path<input id="blueBubblesSendPath" placeholder="/api/v1/chat/new" /></label>
+            <label>BlueBubbles send path<input id="blueBubblesSendPath" placeholder="/api/v1/message/text" /></label>
             <label>BlueBubbles password<input id="blueBubblesPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="blueBubblesPasswordState"></small></label>
             <label>Sent.dm API key<input id="sentDmApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="sentDmApiKeyState"></small></label>
             <label>Sent.dm template ID<input id="sentDmTemplateId" /></label>
             <label>Sent.dm template name<input id="sentDmTemplateName" /></label>
             <label>Sent.dm profile ID<input id="sentDmProfileId" /></label>
+            <div class="wide-field provider-diagnostic">
+              <button id="checkSentDm" type="button"><i data-lucide="list-checks"></i> Check Sent.dm</button>
+              <div id="sentDmDiagnostics" class="provider-diagnostic-output"></div>
+            </div>
           </div>
           <button class="primary action-button" type="submit"><i data-lucide="save"></i> Save onboarding settings</button>
         </form>

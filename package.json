@@ -12,6 +12,7 @@
     "db:local": "bash scripts/start-local-postgres.sh",
     "db:init": "prisma generate && prisma db push",
     "db:backfill-bookings": "node scripts/backfill-bookings.js",
+    "check": "node scripts/release-check.js",
     "db:migrate-sqlite": "bash -c 'source scripts/use-node-22.sh && node scripts/migrate-sqlite-to-postgres.js \"$@\"' --",
     "test:booking": "node scripts/test-booking-stack.js",
     "test:telnyx": "node scripts/test-telnyx-suite.js",
@@ -38,6 +39,7 @@
     "multer": "^2.2.0",
     "nodemailer": "^9.0.1",
     "read-excel-file": "^9.2.0",
+    "stripe": "^22.3.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {

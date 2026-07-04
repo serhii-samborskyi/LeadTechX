@@ -27,6 +27,10 @@ model BusinessProfile {
   trialStartedAt     DateTime?
   trialEndsAt        DateTime?
   creditBalance      Int                    @default(0)
+  stripeCustomerId   String?
+  stripeSubscriptionId String?
+  stripeSubscriptionStatus String?
+  subscriptionCurrentPeriodEnd DateTime?
   leadWebhookToken   String?                @unique
   leadWebhookEnabled Boolean                @default(true)
   createdAt          DateTime               @default(now())
@@ -40,6 +44,12 @@ model BusinessProfile {
   claimTokens        AccountClaimToken[]
   demoAssignments    DemoNumberAssignment[]
   onboardingSessions OnboardingSession[]
+  customerFeedback    CustomerFeedback[]
+  leadWebhookEvents   LeadWebhookEvent[]
+  messageDeliveries   MessageDelivery[]
+  usageEvents         UsageEvent[]
+  creditTransactions  CreditTransaction[]
+  stripeCheckoutSessions StripeCheckoutSession[]
 }
 
 model BusinessConfig {
@@ -54,6 +64,16 @@ model BusinessConfig {
   qualificationDelayMaxSeconds Int        @default(100)
   qualificationMaxAttempts Int            @default(3)
   qualificationRetryDelayMinutes Int       @default(120)
+  leadWebhookDedupeWindowHours Int         @default(24)
+  reviewRequestsEnabled Boolean            @default(false)
+  reviewLink          String             @default("")
+  reviewPromptInstructions String         @default("After a completed service or appointment, ask whether the customer is happy with the service. If they are happy, offer to text the review link. If they are not happy, apologize, collect the issue, and escalate it to management.")
+  reviewRequestTemplate String            @default("Thank you for choosing {{business_name}}. If you were happy with the service, please leave us a review: {{review_link}}")
+  complaintRecoveryInstructions String     @default("Apologize, collect what happened, ask what resolution they want, and tell the customer management will be notified.")
+  complaintEscalationTemplate String       @default("Complaint for {{business_name}}. Customer: {{customer_name}}. Phone: {{customer_phone}}. Issue: {{complaint}}")
+  managerNotificationPhone String          @default("")
+  missedCallFollowupTemplate String        @default("Sorry we missed your call to {{business_name}}. Reply here and we will help.")
+  appointmentReminderTemplate String       @default("Reminder: you have an appointment with {{business_name}} on {{appointment_time}}. Reply if you need to reschedule.")
   appointmentMode     String             @default("instant")
   slotDurationMinutes Int                @default(30)
   bufferMinutes       Int                @default(0)
@@ -144,6 +164,8 @@ model Appointment {
   reason           String?
   status           String    @default("requested")
   createdAt        DateTime  @default(now())
+  feedback          CustomerFeedback[]
+  messageDeliveries MessageDelivery[]
 }
 
 model Lead {
@@ -167,6 +189,10 @@ model Lead {
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
   qualificationCalls OutboundQualificationCall[]
+  feedback          CustomerFeedback[]
+  leadWebhookEvents LeadWebhookEvent[]
+  messageDeliveries MessageDelivery[]
+  usageEvents       UsageEvent[]
 
   @@index([businessProfileId, createdAt])
   @@index([phone, createdAt])
@@ -198,6 +224,13 @@ model AppSettings {
   trialCredits            Int      @default(900)
   tokenUsd                Float    @default(0.01)
   lowBalanceTokens        Int      @default(100)
+  voiceMinuteCredits      Int      @default(10)
+  geminiMinuteCredits     Int      @default(10)
+  outboundCallCredits     Int      @default(20)
+  messageCredits          Int      @default(5)
+  stripeCreditPackCredits Int      @default(1000)
+  stripeSubscriptionCredits Int    @default(5000)
+  stripeSubscriptionPriceId String @default("")
   recordingRetentionDays  Int      @default(30)
   demoNumberCapacity      Int      @default(10)
   demoCallerLimit         Int      @default(3)
@@ -214,7 +247,7 @@ model AppSettings {
   messagePrimaryProvider  String   @default("bluebubbles")
   messageFailoverProvider String   @default("sentdm")
   blueBubblesBaseUrl      String   @default("")
-  blueBubblesSendPath     String   @default("/api/v1/chat/new")
+  blueBubblesSendPath     String   @default("/api/v1/message/text")
   sentDmTemplateId        String   @default("")
   sentDmTemplateName      String   @default("")
   sentDmProfileId         String   @default("")
@@ -331,6 +364,8 @@ model VoiceCall {
   callMode          String             @default("business")
   recordingUrl      String?
   transcript        String?
+  healthFlags       Json?
+  metrics           Json?
   businessProfileId Int?
   businessProfile   BusinessProfile?   @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
   startedAt         DateTime           @default(now())
@@ -341,6 +376,9 @@ model VoiceCall {
   onboardingSession OnboardingSession?
   lead              Lead?
   outboundQualificationCall OutboundQualificationCall?
+  feedback          CustomerFeedback[]
+  messageDeliveries MessageDelivery[]
+  usageEvents       UsageEvent[]
 }
 
 model OutboundQualificationCall {
@@ -400,18 +438,157 @@ model OnboardingSession {
 }
 
 model MessageDelivery {
-  id                Int      @id @default(autoincrement())
-  provider          String
-  purpose           String
-  toPhone           String
-  status            String   @default("queued")
-  providerMessageId String?
-  detail            Json?
-  error             String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id                 Int               @id @default(autoincrement())
+  provider           String
+  purpose            String
+  toPhone            String
+  status             String            @default("queued")
+  providerMessageId  String?
+  detail             Json?
+  error              String?
+  businessProfileId  Int?
+  businessProfile    BusinessProfile?  @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  leadId             Int?
+  lead               Lead?             @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  voiceCallId        Int?
+  voiceCall          VoiceCall?        @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  appointmentId      Int?
+  appointment        Appointment?      @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  customerFeedbackId Int?
+  customerFeedback   CustomerFeedback? @relation(fields: [customerFeedbackId], references: [id], onDelete: SetNull)
+  usageEvents        UsageEvent[]
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
   @@index([toPhone, createdAt])
+  @@index([businessProfileId, createdAt])
+  @@index([purpose, createdAt])
+  @@index([appointmentId, createdAt])
+}
+
+model CustomerFeedback {
+  id                   Int               @id @default(autoincrement())
+  businessProfileId    Int
+  businessProfile      BusinessProfile   @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  leadId               Int?
+  lead                 Lead?             @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  voiceCallId          Int?
+  voiceCall            VoiceCall?        @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  appointmentId        Int?
+  appointment          Appointment?      @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  customerName         String?
+  phone                String?
+  email                String?
+  sentiment            String            @default("unknown")
+  rating               Int?
+  feedbackText         String?
+  status               String            @default("captured")
+  reviewLink           String?
+  reviewRequestedAt    DateTime?
+  complaintEscalatedAt DateTime?
+  resolvedAt           DateTime?
+  messageDeliveries    MessageDelivery[]
+  metadata             Json?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  @@index([businessProfileId, createdAt])
+  @@index([leadId, createdAt])
+  @@index([status, createdAt])
+}
+
+model LeadWebhookEvent {
+  id                Int              @id @default(autoincrement())
+  businessProfileId Int?
+  businessProfile   BusinessProfile? @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  leadId            Int?
+  lead              Lead?            @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  token             String?
+  status            String           @default("received")
+  dedupeKey         String?
+  normalized        Json?
+  payload           Json?
+  qualification     Json?
+  error             String?
+  createdAt         DateTime         @default(now())
+
+  @@index([businessProfileId, createdAt])
+  @@index([dedupeKey, createdAt])
+  @@index([status, createdAt])
+}
+
+model UsageEvent {
+  id                Int                @id @default(autoincrement())
+  businessProfileId Int
+  businessProfile   BusinessProfile    @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  leadId            Int?
+  lead              Lead?              @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  voiceCallId       Int?
+  voiceCall         VoiceCall?         @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  messageDeliveryId Int?
+  messageDelivery   MessageDelivery?   @relation(fields: [messageDeliveryId], references: [id], onDelete: SetNull)
+  category          String
+  provider          String?
+  quantity          Float              @default(1)
+  unit              String             @default("event")
+  credits           Int                @default(0)
+  metadata          Json?
+  createdAt         DateTime           @default(now())
+  creditTransaction CreditTransaction?
+
+  @@index([businessProfileId, createdAt])
+  @@index([category, createdAt])
+}
+
+model CreditTransaction {
+  id                Int              @id @default(autoincrement())
+  businessProfileId Int
+  businessProfile   BusinessProfile  @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  usageEventId      Int?             @unique
+  usageEvent        UsageEvent?      @relation(fields: [usageEventId], references: [id], onDelete: SetNull)
+  type              String
+  amount            Int
+  balanceAfter      Int
+  note              String?
+  metadata          Json?
+  createdAt         DateTime         @default(now())
+
+  @@index([businessProfileId, createdAt])
+  @@index([type, createdAt])
+}
+
+model StripeCheckoutSession {
+  id                Int              @id @default(autoincrement())
+  businessProfileId Int
+  businessProfile   BusinessProfile  @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  stripeSessionId   String           @unique
+  mode              String
+  status            String           @default("created")
+  creditAmount      Int              @default(0)
+  amountTotal       Int?
+  currency          String?
+  stripeCustomerId  String?
+  stripeSubscriptionId String?
+  url               String?
+  metadata          Json?
+  completedAt       DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([businessProfileId, createdAt])
+  @@index([status, createdAt])
+}
+
+model StripeWebhookEvent {
+  id              Int      @id @default(autoincrement())
+  stripeEventId   String   @unique
+  eventType       String
+  payload         Json?
+  processedAt     DateTime?
+  error           String?
+  createdAt       DateTime @default(now())
+
+  @@index([eventType, createdAt])
 }
 
 model VoiceCallEvent {

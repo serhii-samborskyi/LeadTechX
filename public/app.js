@@ -21,6 +21,7 @@ const state = {
   agentSpeakingUntil: 0,
   visualizerFrame: null,
   admin: null,
+  crmSearchTimer: null,
   businessName: params.get("business_name") || "Business Name",
   website: params.get("website") || "",
 };
@@ -114,6 +115,16 @@ const el = {
   qualificationDelayMaxSeconds: document.querySelector("#qualificationDelayMaxSeconds"),
   qualificationMaxAttempts: document.querySelector("#qualificationMaxAttempts"),
   qualificationRetryDelayMinutes: document.querySelector("#qualificationRetryDelayMinutes"),
+  leadWebhookDedupeWindowHours: document.querySelector("#leadWebhookDedupeWindowHours"),
+  reviewRequestsEnabled: document.querySelector("#reviewRequestsEnabled"),
+  reviewLink: document.querySelector("#reviewLink"),
+  managerNotificationPhone: document.querySelector("#managerNotificationPhone"),
+  reviewPromptInstructions: document.querySelector("#reviewPromptInstructions"),
+  reviewRequestTemplate: document.querySelector("#reviewRequestTemplate"),
+  complaintRecoveryInstructions: document.querySelector("#complaintRecoveryInstructions"),
+  complaintEscalationTemplate: document.querySelector("#complaintEscalationTemplate"),
+  missedCallFollowupTemplate: document.querySelector("#missedCallFollowupTemplate"),
+  appointmentReminderTemplate: document.querySelector("#appointmentReminderTemplate"),
   saveInstructionsButton: document.querySelector("#saveInstructionsButton"),
   appointmentMode: document.querySelector("#appointmentMode"),
   slotDuration: document.querySelector("#slotDuration"),
@@ -129,6 +140,14 @@ const el = {
   copyCrmWebhookButton: document.querySelector("#copyCrmWebhookButton"),
   rotateCrmWebhookButton: document.querySelector("#rotateCrmWebhookButton"),
   crmWebhookHelp: document.querySelector("#crmWebhookHelp"),
+  crmStatusCounts: document.querySelector("#crmStatusCounts"),
+  crmWebhookEvents: document.querySelector("#crmWebhookEvents"),
+  crmWebhookTestPayload: document.querySelector("#crmWebhookTestPayload"),
+  sendCrmWebhookTestButton: document.querySelector("#sendCrmWebhookTestButton"),
+  resetCrmWebhookTestButton: document.querySelector("#resetCrmWebhookTestButton"),
+  crmWebhookTestStatus: document.querySelector("#crmWebhookTestStatus"),
+  crmSearch: document.querySelector("#crmSearch"),
+  crmStatusFilter: document.querySelector("#crmStatusFilter"),
   crmName: document.querySelector("#crmName"),
   crmPhone: document.querySelector("#crmPhone"),
   crmEmail: document.querySelector("#crmEmail"),
@@ -136,6 +155,22 @@ const el = {
   crmStatus: document.querySelector("#crmStatus"),
   addCrmLeadButton: document.querySelector("#addCrmLeadButton"),
   crmList: document.querySelector("#crmList"),
+  refreshMessagesButton: document.querySelector("#refreshMessagesButton"),
+  testMessageProvider: document.querySelector("#testMessageProvider"),
+  testMessagePhone: document.querySelector("#testMessagePhone"),
+  testMessageBody: document.querySelector("#testMessageBody"),
+  sendTestMessageButton: document.querySelector("#sendTestMessageButton"),
+  messageList: document.querySelector("#messageList"),
+  refreshUsageButton: document.querySelector("#refreshUsageButton"),
+  usageSummary: document.querySelector("#usageSummary"),
+  billingStatus: document.querySelector("#billingStatus"),
+  creditPackCredits: document.querySelector("#creditPackCredits"),
+  buyCreditsButton: document.querySelector("#buyCreditsButton"),
+  startSubscriptionButton: document.querySelector("#startSubscriptionButton"),
+  billingHistory: document.querySelector("#billingHistory"),
+  usageList: document.querySelector("#usageList"),
+  refreshHealthButton: document.querySelector("#refreshHealthButton"),
+  healthList: document.querySelector("#healthList"),
   mobileNavItems: document.querySelectorAll(".mobile-nav-item"),
 };
 
@@ -767,6 +802,16 @@ function applyAdminData(data) {
   el.qualificationDelayMaxSeconds.value = data.config.qualificationDelayMaxSeconds ?? 100;
   el.qualificationMaxAttempts.value = data.config.qualificationMaxAttempts || 3;
   el.qualificationRetryDelayMinutes.value = data.config.qualificationRetryDelayMinutes || 120;
+  el.leadWebhookDedupeWindowHours.value = data.config.leadWebhookDedupeWindowHours ?? 24;
+  el.reviewRequestsEnabled.checked = Boolean(data.config.reviewRequestsEnabled);
+  el.reviewLink.value = data.config.reviewLink || "";
+  el.managerNotificationPhone.value = data.config.managerNotificationPhone || "";
+  el.reviewPromptInstructions.value = data.config.reviewPromptInstructions || "";
+  el.reviewRequestTemplate.value = data.config.reviewRequestTemplate || "";
+  el.complaintRecoveryInstructions.value = data.config.complaintRecoveryInstructions || "";
+  el.complaintEscalationTemplate.value = data.config.complaintEscalationTemplate || "";
+  el.missedCallFollowupTemplate.value = data.config.missedCallFollowupTemplate || "";
+  el.appointmentReminderTemplate.value = data.config.appointmentReminderTemplate || "";
   el.appointmentMode.value = data.config.appointmentMode;
   el.slotDuration.value = data.config.slotDurationMinutes;
   el.bufferMinutes.value = data.config.bufferMinutes;
@@ -842,6 +887,16 @@ async function saveBusinessConfig() {
     qualificationDelayMaxSeconds: Number(el.qualificationDelayMaxSeconds.value || 0),
     qualificationMaxAttempts: Number(el.qualificationMaxAttempts.value || 3),
     qualificationRetryDelayMinutes: Number(el.qualificationRetryDelayMinutes.value || 120),
+    leadWebhookDedupeWindowHours: Number(el.leadWebhookDedupeWindowHours.value || 0),
+    reviewRequestsEnabled: el.reviewRequestsEnabled.checked,
+    reviewLink: el.reviewLink.value,
+    managerNotificationPhone: el.managerNotificationPhone.value,
+    reviewPromptInstructions: el.reviewPromptInstructions.value,
+    reviewRequestTemplate: el.reviewRequestTemplate.value,
+    complaintRecoveryInstructions: el.complaintRecoveryInstructions.value,
+    complaintEscalationTemplate: el.complaintEscalationTemplate.value,
+    missedCallFollowupTemplate: el.missedCallFollowupTemplate.value,
+    appointmentReminderTemplate: el.appointmentReminderTemplate.value,
     appointmentMode: el.appointmentMode.value,
     slotDurationMinutes: Number(el.slotDuration.value || 30),
     bufferMinutes: Number(el.bufferMinutes.value || 0),
@@ -922,13 +977,41 @@ async function loadCalendar() {
       if (!builtInKeys.has(key.toLowerCase())) fields.push(appointmentField(intakeLabel(key), value));
     }
     details.append(...fields.filter(Boolean));
-    row.append(summary, details);
+    const actions = document.createElement("div");
+    actions.className = "appointment-actions";
+    const reminder = document.createElement("button");
+    reminder.type = "button";
+    reminder.dataset.action = "send-appointment-reminder";
+    reminder.dataset.id = appointment.id;
+    reminder.disabled = !appointment.phone;
+    reminder.textContent = "Send reminder";
+    actions.appendChild(reminder);
+    row.append(summary, details, actions);
     el.bookedAppointments.appendChild(row);
   }
   if (!data.appointments.length) el.bookedAppointments.textContent = "No booked appointments in this range.";
 }
 
+async function sendAppointmentReminder(button) {
+  const appointmentId = button.dataset.id;
+  if (!appointmentId) throw new Error("Appointment was not found");
+  setAdminStatus("Sending appointment reminder");
+  await apiJson(`/api/business-admin/appointments/${appointmentId}/reminder`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  await Promise.all([loadMessages(), loadUsage()]);
+  setAdminStatus("Appointment reminder sent");
+}
+
 const crmStatusOptions = ["new", "qualified", "unqualified", "callback", "appointment", "transferred", "unreachable"];
+
+function qualificationStatusLabel(status) {
+  const value = String(status || "");
+  if (value === "dispatching") return "queued";
+  return value || "unknown";
+}
 
 function crmField(label, value, href = null) {
   if (!value) return null;
@@ -941,6 +1024,40 @@ function crmField(label, value, href = null) {
   if (href) val.href = href;
   wrap.append(key, val);
   return wrap;
+}
+
+function miniRow(parts) {
+  const row = document.createElement("div");
+  row.className = "mini-row";
+  row.textContent = parts.filter(Boolean).join(" · ");
+  return row;
+}
+
+function crmEventDetail(detail) {
+  if (!detail || typeof detail !== "object") return "";
+  return [
+    detail.stage,
+    detail.message,
+    detail.reason,
+    detail.cause,
+    detail.status,
+    detail.sipCode ? `sip ${detail.sipCode}` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function activeFlagText(flags) {
+  if (!flags || typeof flags !== "object") return "";
+  return Object.entries(flags)
+    .filter(([, active]) => active)
+    .map(([key]) => key.replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`))
+    .join(", ");
+}
+
+function crmInsight(lead) {
+  const fields = lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {};
+  return fields.postCallAi || fields.callSummary?.fallbackInsight || fields.callSummary || fields.callTranscript || {};
 }
 
 function renderCrm(leads) {
@@ -968,6 +1085,10 @@ function renderCrm(leads) {
     grid.className = "crm-detail-grid";
     const call = lead.voiceCall;
     const started = call?.startedAt ? new Date(call.startedAt).toLocaleString() : null;
+    const insight = crmInsight(lead);
+    const flags = activeFlagText(call?.healthFlags);
+    const duration = call?.metrics?.durationSeconds ? `${call.metrics.durationSeconds}s` : null;
+    const latestFeedback = lead.feedback?.[0] || null;
     grid.append(
       ...[
         crmField("Source", lead.source),
@@ -975,9 +1096,18 @@ function renderCrm(leads) {
         crmField("Updated", new Date(lead.updatedAt).toLocaleString()),
         crmField("Call", call ? `${call.status}${call.hangupCause ? ` · ${call.hangupCause}` : ""}` : null),
         crmField("Call time", started),
+        crmField("Duration", duration),
         crmField("From", call?.fromNumber || lead.phone, call?.fromNumber || lead.phone ? `tel:${call?.fromNumber || lead.phone}` : null),
         crmField("To", call?.toNumber),
         crmField("Recording", call?.recordingUrl ? "Open recording" : null, call?.recordingUrl || null),
+        crmField("Outcome", insight.outcome),
+        crmField("Urgency", insight.urgency),
+        crmField("Satisfaction", insight.satisfaction),
+        crmField("Next step", insight.nextStep),
+        crmField("Health flags", flags),
+        crmField("Feedback", latestFeedback ? `${latestFeedback.sentiment} · ${latestFeedback.status}` : null),
+        crmField("Review sent", latestFeedback?.reviewRequestedAt ? new Date(latestFeedback.reviewRequestedAt).toLocaleString() : null),
+        crmField("Complaint escalated", latestFeedback?.complaintEscalatedAt ? new Date(latestFeedback.complaintEscalatedAt).toLocaleString() : null),
       ].filter(Boolean),
     );
     const qualificationCalls = lead.qualificationCalls || [];
@@ -985,10 +1115,15 @@ function renderCrm(leads) {
     if (latestQualification) {
       grid.append(
         ...[
-          crmField("Qualification", `${latestQualification.status}${latestQualification.resultStatus ? ` · ${latestQualification.resultStatus}` : ""}`),
+          crmField(
+            "Qualification",
+            `${qualificationStatusLabel(latestQualification.status)}${latestQualification.resultStatus ? ` · ${latestQualification.resultStatus}` : ""}`,
+          ),
           crmField("Qualified from", latestQualification.fromNumber),
           crmField("Qualified to", latestQualification.toNumber),
           crmField("Attempt", String(latestQualification.attemptNumber || 1)),
+          latestQualification.scheduledFor ? crmField("Next qualification", new Date(latestQualification.scheduledFor).toLocaleString()) : null,
+          latestQualification.lastError ? crmField("Qualification note", latestQualification.lastError) : null,
         ].filter(Boolean),
       );
     }
@@ -1002,15 +1137,28 @@ function renderCrm(leads) {
       <label>Need<input class="crm-row-need" /></label>
       <label>Status<select class="crm-row-status"></select></label>
       <label class="wide-field">Notes<textarea class="crm-row-notes" rows="3"></textarea></label>
+      <label>Feedback<select class="crm-row-feedback-sentiment"><option value="happy">Happy</option><option value="neutral">Neutral</option><option value="unhappy">Unhappy</option><option value="unknown">Unknown</option></select></label>
+      <label>Rating<input class="crm-row-feedback-rating" type="number" min="1" max="5" step="1" /></label>
+      <label class="wide-field">Feedback / complaint<textarea class="crm-row-feedback-text" rows="3"></textarea></label>
       <label class="wide-field">Extracted fields JSON<textarea class="crm-row-fields" rows="4"></textarea></label>
       <button data-action="save-crm" type="button">Save lead</button>
+      <button data-action="record-feedback" type="button">Record feedback</button>
       <button data-action="qualify-crm" type="button">Call and qualify</button>
+      <button data-action="retry-qualification" type="button">Retry queue</button>
+      <button data-action="pause-qualification" type="button">Pause qualification</button>
+      <button data-action="cancel-qualification" type="button">Cancel queue</button>
+      <button data-action="send-review" type="button">Send review</button>
+      <button data-action="send-missed-followup" type="button">Send follow-up</button>
+      <button data-action="escalate-complaint" type="button">Escalate complaint</button>
     `;
     editor.querySelector(".crm-row-name").value = lead.name || "";
     editor.querySelector(".crm-row-phone").value = lead.phone || "";
     editor.querySelector(".crm-row-email").value = lead.email || "";
     editor.querySelector(".crm-row-need").value = lead.need || "";
     editor.querySelector(".crm-row-notes").value = lead.notes || "";
+    editor.querySelector(".crm-row-feedback-sentiment").value = latestFeedback?.sentiment || insight.satisfaction || "happy";
+    editor.querySelector(".crm-row-feedback-rating").value = latestFeedback?.rating || "";
+    editor.querySelector(".crm-row-feedback-text").value = latestFeedback?.feedbackText || "";
     editor.querySelector(".crm-row-fields").value = JSON.stringify(lead.extractedFields || {}, null, 2);
     const statusSelect = editor.querySelector(".crm-row-status");
     for (const status of crmStatusOptions) {
@@ -1046,8 +1194,11 @@ function renderCrm(leads) {
         row.className = "qualification-attempt";
         row.textContent = [
           `#${attempt.attemptNumber || 1}`,
-          attempt.status,
+          qualificationStatusLabel(attempt.status),
           attempt.resultStatus,
+          attempt.startedAt ? `started ${new Date(attempt.startedAt).toLocaleString()}` : null,
+          attempt.answeredAt ? `answered ${new Date(attempt.answeredAt).toLocaleString()}` : null,
+          attempt.endedAt ? `ended ${new Date(attempt.endedAt).toLocaleString()}` : null,
           attempt.scheduledFor ? `scheduled ${new Date(attempt.scheduledFor).toLocaleString()}` : null,
           attempt.createdAt ? new Date(attempt.createdAt).toLocaleString() : null,
           attempt.lastError,
@@ -1058,10 +1209,112 @@ function renderCrm(leads) {
       }
       body.appendChild(attempts);
     }
+    if (lead.feedback?.length) {
+      const feedback = document.createElement("div");
+      feedback.className = "qualification-attempts";
+      const heading = document.createElement("strong");
+      heading.textContent = "Feedback and recovery";
+      feedback.appendChild(heading);
+      for (const item of lead.feedback) {
+        feedback.appendChild(
+          miniRow([
+            item.sentiment,
+            item.status,
+            item.feedbackText,
+            item.reviewRequestedAt ? `review ${new Date(item.reviewRequestedAt).toLocaleString()}` : null,
+            item.complaintEscalatedAt ? `escalated ${new Date(item.complaintEscalatedAt).toLocaleString()}` : null,
+            item.messageDeliveries?.length ? `${item.messageDeliveries[0].provider} ${item.messageDeliveries[0].status}` : null,
+          ]),
+        );
+      }
+      body.appendChild(feedback);
+    }
+    if (lead.leadWebhookEvents?.length || lead.messageDeliveries?.length || call?.events?.length) {
+      const timeline = document.createElement("div");
+      timeline.className = "qualification-attempts";
+      const heading = document.createElement("strong");
+      heading.textContent = "Timeline";
+      timeline.appendChild(heading);
+      for (const event of call?.events || []) {
+        timeline.appendChild(
+          miniRow([
+            "Call",
+            event.eventType,
+            crmEventDetail(event.detail),
+            event.createdAt ? new Date(event.createdAt).toLocaleString() : null,
+          ]),
+        );
+      }
+      for (const event of lead.leadWebhookEvents || []) {
+        timeline.appendChild(miniRow(["Webhook", event.status, event.createdAt ? new Date(event.createdAt).toLocaleString() : null]));
+      }
+      for (const message of lead.messageDeliveries || []) {
+        timeline.appendChild(miniRow(["Message", message.purpose, message.provider, message.status, message.error]));
+      }
+      body.appendChild(timeline);
+    }
     card.append(summary, body);
     el.crmList.appendChild(card);
   }
   if (!leads.length) el.crmList.textContent = "No CRM leads yet.";
+}
+
+function renderCrmStatusCounts(counts = {}) {
+  el.crmStatusCounts.innerHTML = "";
+  const total = crmStatusOptions.reduce((sum, status) => sum + Number(counts[status] || 0), 0);
+  const all = document.createElement("button");
+  all.type = "button";
+  all.className = `status-pill ${el.crmStatusFilter.value ? "" : "active"}`;
+  all.textContent = `all: ${total}`;
+  all.addEventListener("click", () => {
+    el.crmStatusFilter.value = "";
+    runAdmin(loadCrm);
+  });
+  el.crmStatusCounts.appendChild(all);
+  for (const status of crmStatusOptions) {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = `status-pill ${el.crmStatusFilter.value === status ? "active" : ""}`;
+    pill.textContent = `${status}: ${counts[status] || 0}`;
+    pill.addEventListener("click", () => {
+      el.crmStatusFilter.value = status;
+      runAdmin(loadCrm);
+    });
+    el.crmStatusCounts.appendChild(pill);
+  }
+}
+
+function renderWebhookEvents(events = []) {
+  el.crmWebhookEvents.innerHTML = "";
+  for (const event of events) {
+    el.crmWebhookEvents.appendChild(
+      miniRow([
+        event.status,
+        event.lead ? `lead #${event.lead.id} ${event.lead.name}` : null,
+        event.qualification?.started ? "qualification started" : event.qualification?.scheduled ? "qualification scheduled" : null,
+        event.qualification?.error ? `qualification error: ${event.qualification.error}` : null,
+        event.error,
+        event.createdAt ? new Date(event.createdAt).toLocaleString() : null,
+      ]),
+    );
+  }
+  if (!events.length) el.crmWebhookEvents.textContent = "No webhook activity yet.";
+}
+
+function webhookSamplePayload() {
+  return {
+    name: "Jane Customer",
+    phone: "+15551234567",
+    email: "jane@example.com",
+    service: "Lock replacement",
+    source: "website-form-test",
+    notes: "Needs service tomorrow morning",
+  };
+}
+
+function resetWebhookTestPayload() {
+  el.crmWebhookTestPayload.value = JSON.stringify(webhookSamplePayload(), null, 2);
+  el.crmWebhookTestStatus.textContent = "";
 }
 
 async function loadLeadWebhook() {
@@ -1072,6 +1325,17 @@ async function loadLeadWebhook() {
   el.crmWebhookUrl.value = data.webhookUrl || "";
   const accepted = data.acceptedFields?.join(", ") || "name, phone, email, service, source, notes";
   el.crmWebhookHelp.textContent = `Accepted fields: ${accepted}. POST JSON or form data.`;
+  if (!el.crmWebhookTestPayload.value.trim()) {
+    el.crmWebhookTestPayload.value = JSON.stringify(data.examplePayload || webhookSamplePayload(), null, 2);
+  }
+}
+
+async function loadWebhookEvents() {
+  if (!state.admin) return;
+  const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
+  if (el.website.value.trim()) query.set("website", el.website.value.trim());
+  const data = await apiJson(`/api/business-admin/lead-webhook/events?${query}`);
+  renderWebhookEvents(data.events || []);
 }
 
 async function loadCrm() {
@@ -1079,8 +1343,11 @@ async function loadCrm() {
   setAdminStatus("Loading CRM");
   const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
-  const [data] = await Promise.all([apiJson(`/api/business-admin/crm?${query}`), loadLeadWebhook()]);
+  if (el.crmSearch.value.trim()) query.set("search", el.crmSearch.value.trim());
+  if (el.crmStatusFilter.value) query.set("status", el.crmStatusFilter.value);
+  const [data] = await Promise.all([apiJson(`/api/business-admin/crm?${query}`), loadLeadWebhook(), loadWebhookEvents()]);
   renderCrm(data.leads || []);
+  renderCrmStatusCounts(data.statusCounts || {});
   setAdminStatus("CRM loaded");
 }
 
@@ -1107,6 +1374,29 @@ async function rotateLeadWebhook() {
   });
   el.crmWebhookUrl.value = data.webhookUrl || "";
   setAdminStatus("Webhook URL rotated");
+}
+
+async function sendWebhookTest() {
+  setAdminStatus("Sending webhook test");
+  el.crmWebhookTestStatus.textContent = "Sending";
+  let payload;
+  try {
+    payload = JSON.parse(el.crmWebhookTestPayload.value || "{}");
+  } catch (_error) {
+    throw new Error("Webhook test payload must be valid JSON");
+  }
+  const data = await apiJson("/api/business-admin/lead-webhook/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...adminIdentity(), payload }),
+  });
+  el.crmWebhookTestStatus.textContent = data.duplicate
+    ? `Duplicate lead #${data.leadId}`
+    : data.leadId
+      ? `Created lead #${data.leadId}`
+      : data.status || "Done";
+  await Promise.all([loadCrm(), loadWebhookEvents()]);
+  setAdminStatus(data.duplicate ? "Webhook test detected duplicate" : "Webhook test accepted");
 }
 
 async function addCrmLead() {
@@ -1181,6 +1471,342 @@ async function startQualificationCall(card) {
   });
   await loadCrm();
   setAdminStatus("Qualification call started");
+}
+
+async function retryQualification(card) {
+  setAdminStatus("Queueing qualification retry");
+  await apiJson(`/api/business-admin/crm/${card.dataset.id}/qualify-retry`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  await loadCrm();
+  setAdminStatus("Qualification retry queued");
+}
+
+async function cancelQualification(card) {
+  setAdminStatus("Cancelling queued qualification");
+  await apiJson(`/api/business-admin/crm/${card.dataset.id}/qualify-cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  await loadCrm();
+  setAdminStatus("Queued qualification cancelled");
+}
+
+async function pauseQualification(card) {
+  setAdminStatus("Pausing qualification");
+  await apiJson(`/api/business-admin/crm/${card.dataset.id}/qualify-pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  await loadCrm();
+  setAdminStatus("Qualification paused");
+}
+
+async function recordCustomerFeedback(card) {
+  setAdminStatus("Recording feedback");
+  await apiJson(`/api/business-admin/crm/${card.dataset.id}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      sentiment: card.querySelector(".crm-row-feedback-sentiment").value,
+      rating: card.querySelector(".crm-row-feedback-rating").value,
+      feedback: card.querySelector(".crm-row-feedback-text").value,
+      phone: card.querySelector(".crm-row-phone").value,
+      email: card.querySelector(".crm-row-email").value,
+    }),
+  });
+  await loadCrm();
+  setAdminStatus("Feedback recorded");
+}
+
+async function sendReviewRequest(card) {
+  setAdminStatus("Sending review request");
+  await apiJson(`/api/business-admin/crm/${card.dataset.id}/review-request`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      phone: card.querySelector(".crm-row-phone").value,
+      rating: card.querySelector(".crm-row-feedback-rating").value,
+      feedback: card.querySelector(".crm-row-feedback-text").value,
+    }),
+  });
+  await Promise.all([loadCrm(), loadMessages(), loadUsage()]);
+  setAdminStatus("Review request sent");
+}
+
+async function sendMissedFollowup(card) {
+  setAdminStatus("Sending follow-up");
+  await apiJson(`/api/business-admin/crm/${card.dataset.id}/missed-call-followup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      toPhone: card.querySelector(".crm-row-phone").value,
+    }),
+  });
+  await Promise.all([loadCrm(), loadMessages(), loadUsage()]);
+  setAdminStatus("Follow-up sent");
+}
+
+async function escalateComplaint(card) {
+  const notes = card.querySelector(".crm-row-notes").value.trim();
+  const need = card.querySelector(".crm-row-need").value.trim();
+  const feedback = card.querySelector(".crm-row-feedback-text").value.trim();
+  const complaint = feedback || notes || need || "Customer complaint requires management follow-up.";
+  setAdminStatus("Escalating complaint");
+  await apiJson(`/api/business-admin/crm/${card.dataset.id}/escalate-complaint`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...adminIdentity(), complaint }),
+  });
+  await Promise.all([loadCrm(), loadMessages(), loadUsage()]);
+  setAdminStatus("Complaint escalated");
+}
+
+function renderMessages(messages = []) {
+  el.messageList.innerHTML = "";
+  for (const message of messages) {
+    const row = document.createElement("div");
+    row.className = "data-row compact-row";
+    row.append(
+      miniRow([
+        message.purpose,
+        message.provider,
+        message.status,
+        message.toPhone,
+        message.lead ? `lead #${message.lead.id} ${message.lead.name}` : null,
+        message.appointment ? `appt ${appointmentCode(message.appointment.id)} ${message.appointment.customerName}` : null,
+        message.detail?.message ? String(message.detail.message).slice(0, 90) : null,
+        message.error,
+        message.createdAt ? new Date(message.createdAt).toLocaleString() : null,
+      ]),
+    );
+    el.messageList.appendChild(row);
+  }
+  if (!messages.length) el.messageList.textContent = "No messages yet.";
+}
+
+async function loadMessages() {
+  if (!state.admin) return;
+  const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
+  if (el.website.value.trim()) query.set("website", el.website.value.trim());
+  const data = await apiJson(`/api/business-admin/messages?${query}`);
+  renderMessages(data.messages || []);
+}
+
+async function sendTestMessage() {
+  setAdminStatus("Sending test message");
+  await apiJson("/api/business-admin/messages/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      provider: el.testMessageProvider.value,
+      toPhone: el.testMessagePhone.value,
+      message: el.testMessageBody.value || "Test message from your AI receptionist.",
+    }),
+  });
+  await Promise.all([loadMessages(), loadUsage()]);
+  setAdminStatus("Test message sent");
+}
+
+function renderUsage(data) {
+  el.usageSummary.innerHTML = "";
+  const balance = document.createElement("span");
+  balance.className = `status-pill ${data.lowBalance ? "warning" : ""}`;
+  balance.textContent = `${data.creditBalance ?? 0} credits`;
+  el.usageSummary.appendChild(balance);
+  if (data.lowBalance) {
+    const warning = document.createElement("span");
+    warning.className = "status-pill warning";
+    warning.textContent = `low credit warning <= ${data.lowBalanceTokens ?? 0}`;
+    el.usageSummary.appendChild(warning);
+  }
+  const rates = data.rates || {};
+  for (const [label, value] of [
+    ["Telnyx/min", rates.telnyxMinuteCredits],
+    ["Gemini/min", rates.geminiMinuteCredits],
+    ["Outbound", rates.outboundCallCredits],
+    ["Message", rates.messageCredits],
+  ]) {
+    const pill = document.createElement("span");
+    pill.className = "status-pill";
+    pill.textContent = `${label}: ${value ?? 0}`;
+    el.usageSummary.appendChild(pill);
+  }
+  for (const [category, total] of Object.entries(data.totals || {})) {
+    const pill = document.createElement("span");
+    pill.className = "status-pill";
+    pill.textContent = `${category}: ${total.credits || 0} credits`;
+    el.usageSummary.appendChild(pill);
+  }
+  el.usageList.innerHTML = "";
+  for (const tx of data.transactions || []) {
+    const row = document.createElement("div");
+    row.className = "data-row compact-row";
+    row.append(
+      miniRow([
+        "Credit",
+        tx.type,
+        `${tx.amount} credits`,
+        `balance ${tx.balanceAfter}`,
+        tx.note,
+        tx.createdAt ? new Date(tx.createdAt).toLocaleString() : null,
+      ]),
+    );
+    el.usageList.appendChild(row);
+  }
+  for (const event of data.events || []) {
+    const row = document.createElement("div");
+    row.className = "data-row compact-row";
+    row.append(
+      miniRow([
+        event.category,
+        `${event.quantity} ${event.unit}`,
+        `${event.credits} credits`,
+        event.provider,
+        event.lead ? `lead #${event.lead.id}` : null,
+        event.messageDelivery ? `${event.messageDelivery.purpose} ${event.messageDelivery.status}` : null,
+        event.metadata?.billedMinutes ? `${event.metadata.billedMinutes} billed min` : null,
+        event.createdAt ? new Date(event.createdAt).toLocaleString() : null,
+      ]),
+    );
+    el.usageList.appendChild(row);
+  }
+  if (!(data.events || []).length) el.usageList.textContent = "No usage events yet.";
+}
+
+function moneyFromCents(amount, currency = "usd") {
+  if (amount === null || amount === undefined) return "";
+  return new Intl.NumberFormat(undefined, { style: "currency", currency: String(currency || "usd").toUpperCase() }).format(
+    Number(amount) / 100,
+  );
+}
+
+function renderBilling(data) {
+  const stripe = data.stripe || {};
+  const settings = data.settings || {};
+  const ready = Boolean(stripe.ready);
+  const subscriptionReady = ready && Boolean(settings.stripeSubscriptionPriceConfigured);
+  const statusParts = [
+    ready ? "Stripe ready" : "Stripe not ready",
+    stripe.webhookConfigured ? "webhook configured" : "webhook missing",
+    stripe.subscriptionStatus ? `subscription ${stripe.subscriptionStatus}` : null,
+    stripe.subscriptionCurrentPeriodEnd ? `renews ${new Date(stripe.subscriptionCurrentPeriodEnd).toLocaleDateString()}` : null,
+  ].filter(Boolean);
+  el.billingStatus.textContent = statusParts.join(" · ");
+  el.creditPackCredits.value = settings.stripeCreditPackCredits || 1000;
+  el.buyCreditsButton.disabled = !ready;
+  el.startSubscriptionButton.disabled = !subscriptionReady;
+  el.billingHistory.innerHTML = "";
+  for (const session of data.checkoutSessions || []) {
+    const row = document.createElement("div");
+    row.className = "data-row compact-row";
+    row.append(
+      miniRow([
+        "Stripe checkout",
+        session.mode,
+        session.status,
+        session.creditAmount ? `${session.creditAmount} credits` : null,
+        session.amountTotal !== null && session.amountTotal !== undefined ? moneyFromCents(session.amountTotal, session.currency) : null,
+        session.createdAt ? new Date(session.createdAt).toLocaleString() : null,
+      ]),
+    );
+    el.billingHistory.appendChild(row);
+  }
+  if (!(data.checkoutSessions || []).length) el.billingHistory.textContent = "No Stripe checkouts yet.";
+}
+
+async function loadBilling() {
+  if (!state.admin) return;
+  const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
+  if (el.website.value.trim()) query.set("website", el.website.value.trim());
+  const data = await apiJson(`/api/business-admin/billing?${query}`);
+  renderBilling(data);
+}
+
+async function loadUsage() {
+  if (!state.admin) return;
+  const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
+  if (el.website.value.trim()) query.set("website", el.website.value.trim());
+  const data = await apiJson(`/api/business-admin/usage?${query}`);
+  renderUsage(data);
+  await loadBilling();
+}
+
+async function startBillingCheckout(checkoutType) {
+  setAdminStatus(checkoutType === "subscription" ? "Opening subscription checkout" : "Opening credit checkout");
+  const data = await apiJson("/api/business-admin/billing/checkout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      checkoutType,
+      credits: Number(el.creditPackCredits.value || 0),
+    }),
+  });
+  if (!data.url) throw new Error("Stripe did not return a checkout URL");
+  window.location.href = data.url;
+}
+
+function renderHealth(data) {
+  el.healthList.innerHTML = "";
+  const checks = data.checks || {};
+  const checkDetail = (check) =>
+    [
+      check?.status,
+      check?.detail,
+      check?.latencyMs !== undefined ? `${check.latencyMs}ms` : null,
+      check?.missing?.length ? `missing ${check.missing.join(", ")}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  const rows = [
+    ["Database", checkDetail(checks.database) || data.db],
+    ["Gemini", checkDetail(checks.gemini) || data.gemini],
+    ["Telnyx", checkDetail(checks.telnyx) || data.telnyx],
+    ["Public URL", checkDetail(checks.publicUrl) || data.publicBaseUrl || "missing"],
+    ["Telnyx webhook", checkDetail(checks.webhooks?.telnyx)],
+    ["Lead webhook", checkDetail(checks.webhooks?.lead)],
+    ["Phone number", checkDetail(checks.phoneNumber)],
+    ["BlueBubbles", checkDetail(checks.messaging?.bluebubbles) || data.messaging?.bluebubbles],
+    ["Sent.dm", checkDetail(checks.messaging?.sentdm) || data.messaging?.sentdm],
+    ["Stripe", checkDetail(checks.billing?.stripe) || data.billing?.stripe],
+    [
+      "Recent call issues",
+      checks.callIssues
+        ? `${checks.callIssues.status} · flagged ${checks.callIssues.counts.flagged}/${checks.callIssues.counts.total}`
+        : "",
+    ],
+  ];
+  for (const [label, value] of rows) {
+    if (!value) continue;
+    const row = document.createElement("div");
+    row.className = "data-row compact-row";
+    row.append(miniRow([label, value]));
+    el.healthList.appendChild(row);
+  }
+  for (const call of data.recentCalls || []) {
+    const flags = call.healthFlags ? Object.entries(call.healthFlags).filter(([, active]) => active).map(([key]) => key).join(", ") : "";
+    const row = document.createElement("div");
+    row.className = "data-row compact-row";
+    row.append(miniRow(["Call", call.callMode, call.status, call.callControlId, flags || "no flags", call.lastError]));
+    el.healthList.appendChild(row);
+  }
+}
+
+async function loadHealth() {
+  if (!state.admin) return;
+  const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
+  if (el.website.value.trim()) query.set("website", el.website.value.trim());
+  const data = await apiJson(`/api/business-admin/health?${query}`);
+  renderHealth(data);
 }
 
 async function refreshResearch() {
@@ -1314,6 +1940,9 @@ async function startCall() {
     if (message.type === "tool_call") {
       loadDemoData();
       loadCalendar();
+      loadCrm().catch(() => {});
+      loadMessages().catch(() => {});
+      loadUsage().catch(() => {});
     }
     if (message.type === "status" && message.status === "gemini_closed") {
       const reason = message.reason ? ` Reason: ${message.reason}` : "";
@@ -1429,6 +2058,9 @@ for (const tab of el.adminTabs) {
     for (const view of el.adminViews) view.classList.toggle("active", view.dataset.view === tab.dataset.tab);
     if (tab.dataset.tab === "appointments") runAdmin(loadCalendar);
     if (tab.dataset.tab === "crm") runAdmin(loadCrm);
+    if (tab.dataset.tab === "messages") runAdmin(loadMessages);
+    if (tab.dataset.tab === "usage") runAdmin(loadUsage);
+    if (tab.dataset.tab === "health") runAdmin(loadHealth);
   });
 }
 
@@ -1569,10 +2201,21 @@ el.saveInstructionsButton.addEventListener("click", () => runAdmin(saveBusinessC
 el.saveBusinessProfileButton.addEventListener("click", () => runAdmin(saveBusinessProfile));
 el.saveCalendarButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.refreshCalendarButton.addEventListener("click", () => runAdmin(loadCalendar));
+el.bookedAppointments.addEventListener("click", (event) => {
+  const reminderButton = event.target.closest("button[data-action='send-appointment-reminder']");
+  if (reminderButton) runAdmin(() => sendAppointmentReminder(reminderButton));
+});
 el.refreshCrmButton.addEventListener("click", () => runAdmin(loadCrm));
 el.copyCrmWebhookButton.addEventListener("click", () => runAdmin(copyLeadWebhook));
 el.rotateCrmWebhookButton.addEventListener("click", () => runAdmin(rotateLeadWebhook));
+el.sendCrmWebhookTestButton.addEventListener("click", () => runAdmin(sendWebhookTest));
+el.resetCrmWebhookTestButton.addEventListener("click", resetWebhookTestPayload);
 el.addCrmLeadButton.addEventListener("click", () => runAdmin(addCrmLead));
+el.crmSearch.addEventListener("input", () => {
+  clearTimeout(state.crmSearchTimer);
+  state.crmSearchTimer = setTimeout(() => runAdmin(loadCrm), 250);
+});
+el.crmStatusFilter.addEventListener("change", () => runAdmin(loadCrm));
 el.crmList.addEventListener("click", (event) => {
   const saveButton = event.target.closest("button[data-action='save-crm']");
   if (saveButton) {
@@ -1580,8 +2223,49 @@ el.crmList.addEventListener("click", (event) => {
     return;
   }
   const qualifyButton = event.target.closest("button[data-action='qualify-crm']");
-  if (qualifyButton) runAdmin(() => startQualificationCall(qualifyButton.closest(".crm-card")));
+  if (qualifyButton) {
+    runAdmin(() => startQualificationCall(qualifyButton.closest(".crm-card")));
+    return;
+  }
+  const retryButton = event.target.closest("button[data-action='retry-qualification']");
+  if (retryButton) {
+    runAdmin(() => retryQualification(retryButton.closest(".crm-card")));
+    return;
+  }
+  const pauseButton = event.target.closest("button[data-action='pause-qualification']");
+  if (pauseButton) {
+    runAdmin(() => pauseQualification(pauseButton.closest(".crm-card")));
+    return;
+  }
+  const cancelButton = event.target.closest("button[data-action='cancel-qualification']");
+  if (cancelButton) {
+    runAdmin(() => cancelQualification(cancelButton.closest(".crm-card")));
+    return;
+  }
+  const feedbackButton = event.target.closest("button[data-action='record-feedback']");
+  if (feedbackButton) {
+    runAdmin(() => recordCustomerFeedback(feedbackButton.closest(".crm-card")));
+    return;
+  }
+  const reviewButton = event.target.closest("button[data-action='send-review']");
+  if (reviewButton) {
+    runAdmin(() => sendReviewRequest(reviewButton.closest(".crm-card")));
+    return;
+  }
+  const missedFollowupButton = event.target.closest("button[data-action='send-missed-followup']");
+  if (missedFollowupButton) {
+    runAdmin(() => sendMissedFollowup(missedFollowupButton.closest(".crm-card")));
+    return;
+  }
+  const complaintButton = event.target.closest("button[data-action='escalate-complaint']");
+  if (complaintButton) runAdmin(() => escalateComplaint(complaintButton.closest(".crm-card")));
 });
+el.refreshMessagesButton.addEventListener("click", () => runAdmin(loadMessages));
+el.sendTestMessageButton.addEventListener("click", () => runAdmin(sendTestMessage));
+el.refreshUsageButton.addEventListener("click", () => runAdmin(loadUsage));
+el.buyCreditsButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("credits")));
+el.startSubscriptionButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("subscription")));
+el.refreshHealthButton.addEventListener("click", () => runAdmin(loadHealth));
 
 el.businessName.addEventListener("input", setTitle);
 el.website.addEventListener("input", () => {

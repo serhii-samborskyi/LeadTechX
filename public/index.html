@@ -113,6 +113,9 @@
           <button class="admin-tab" data-tab="instructions" role="tab" aria-selected="false" type="button">Instructions</button>
           <button class="admin-tab" data-tab="appointments" role="tab" aria-selected="false" type="button">Appointments</button>
           <button class="admin-tab" data-tab="crm" role="tab" aria-selected="false" type="button">CRM</button>
+          <button class="admin-tab" data-tab="messages" role="tab" aria-selected="false" type="button">Messages</button>
+          <button class="admin-tab" data-tab="usage" role="tab" aria-selected="false" type="button">Usage</button>
+          <button class="admin-tab" data-tab="health" role="tab" aria-selected="false" type="button">Health</button>
         </nav>
 
         <div class="admin-content">
@@ -211,7 +214,19 @@
                 <label>Natural delay max seconds<input id="qualificationDelayMaxSeconds" type="number" min="0" step="1" /></label>
                 <label>Max attempts<input id="qualificationMaxAttempts" type="number" min="1" step="1" /></label>
                 <label>Retry delay minutes<input id="qualificationRetryDelayMinutes" type="number" min="1" step="15" /></label>
+                <label>Webhook dedupe hours<input id="leadWebhookDedupeWindowHours" type="number" min="0" step="1" /></label>
               </div>
+            </div>
+            <div class="qualification-settings review-settings">
+              <label><input id="reviewRequestsEnabled" type="checkbox" /> Enable smart review and complaint recovery</label>
+              <label>Review link<input id="reviewLink" type="url" placeholder="https://g.page/r/..." /></label>
+              <label>Manager notification phone<input id="managerNotificationPhone" type="tel" placeholder="+15551234567" /></label>
+              <label>Review behavior instructions<textarea id="reviewPromptInstructions" rows="5"></textarea></label>
+              <label>Review request message<textarea id="reviewRequestTemplate" rows="3"></textarea></label>
+              <label>Complaint recovery instructions<textarea id="complaintRecoveryInstructions" rows="5"></textarea></label>
+              <label>Manager complaint message<textarea id="complaintEscalationTemplate" rows="3"></textarea></label>
+              <label>Missed-call follow-up message<textarea id="missedCallFollowupTemplate" rows="3"></textarea></label>
+              <label>Appointment reminder message<textarea id="appointmentReminderTemplate" rows="3"></textarea></label>
             </div>
             <button id="saveInstructionsButton" class="primary action-button" type="button">Save instructions</button>
           </section>
@@ -264,6 +279,39 @@
               </div>
               <small id="crmWebhookHelp">Accepted fields: name, phone, email, service, source, notes.</small>
             </div>
+            <div class="crm-summary-strip" id="crmStatusCounts"></div>
+            <div class="crm-filter-row">
+              <input id="crmSearch" placeholder="Search name, phone, need, notes" />
+              <select id="crmStatusFilter">
+                <option value="">All statuses</option>
+                <option value="new">New</option>
+                <option value="qualified">Qualified</option>
+                <option value="unqualified">Unqualified</option>
+                <option value="callback">Callback</option>
+                <option value="appointment">Appointment</option>
+                <option value="transferred">Transferred</option>
+                <option value="unreachable">Unreachable</option>
+              </select>
+            </div>
+            <div class="crm-webhook-card">
+              <div>
+                <h4>Webhook activity</h4>
+                <p>Latest accepted, duplicate, rejected, and failed form submissions.</p>
+              </div>
+              <div class="data-list compact-list" id="crmWebhookEvents"></div>
+            </div>
+            <div class="crm-webhook-card">
+              <div>
+                <h4>Webhook test</h4>
+                <p>Send a sample form payload through the same intake path used by the public webhook.</p>
+              </div>
+              <textarea id="crmWebhookTestPayload" rows="7"></textarea>
+              <div class="crm-webhook-controls">
+                <button id="sendCrmWebhookTestButton" type="button">Send test lead</button>
+                <button id="resetCrmWebhookTestButton" type="button">Reset sample</button>
+                <span id="crmWebhookTestStatus"></span>
+              </div>
+            </div>
             <div class="inline-editor crm-editor">
               <input id="crmName" placeholder="Name" />
               <input id="crmPhone" placeholder="Phone" />
@@ -273,6 +321,62 @@
               <button id="addCrmLeadButton" type="button">Add lead</button>
             </div>
             <div class="crm-board" id="crmList"></div>
+          </section>
+
+          <section class="admin-view" data-view="messages">
+            <div class="section-heading">
+              <div>
+                <h3>Messages</h3>
+                <p>Review requests, complaint escalations, setup links, reminders, and provider tests.</p>
+              </div>
+              <button id="refreshMessagesButton" type="button">Refresh messages</button>
+            </div>
+            <div class="inline-editor crm-editor">
+              <select id="testMessageProvider">
+                <option value="">Configured providers</option>
+                <option value="bluebubbles">BlueBubbles only</option>
+                <option value="sentdm">Sent.dm only</option>
+              </select>
+              <input id="testMessagePhone" placeholder="Test phone +15551234567" />
+              <input id="testMessageBody" placeholder="Test message" />
+              <button id="sendTestMessageButton" type="button">Send test</button>
+            </div>
+            <div class="data-list" id="messageList"></div>
+          </section>
+
+          <section class="admin-view" data-view="usage">
+            <div class="section-heading">
+              <div>
+                <h3>Usage and credits</h3>
+                <p>Call minutes, messages, credit deductions, and low-balance visibility.</p>
+              </div>
+              <button id="refreshUsageButton" type="button">Refresh usage</button>
+            </div>
+            <div class="crm-summary-strip" id="usageSummary"></div>
+            <div class="crm-webhook-card billing-card">
+              <div>
+                <h4>Billing</h4>
+                <p id="billingStatus">Loading billing status.</p>
+              </div>
+              <div class="inline-editor crm-editor billing-actions">
+                <input id="creditPackCredits" type="number" min="1" step="100" placeholder="Credits" />
+                <button id="buyCreditsButton" type="button">Buy credits</button>
+                <button id="startSubscriptionButton" type="button">Start subscription</button>
+              </div>
+              <div class="data-list compact-list" id="billingHistory"></div>
+            </div>
+            <div class="data-list" id="usageList"></div>
+          </section>
+
+          <section class="admin-view" data-view="health">
+            <div class="section-heading">
+              <div>
+                <h3>Health</h3>
+                <p>Database, Gemini, Telnyx, messaging, public URL, and recent call health.</p>
+              </div>
+              <button id="refreshHealthButton" type="button">Refresh health</button>
+            </div>
+            <div class="data-list" id="healthList"></div>
           </section>
         </div>
       </section>

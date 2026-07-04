@@ -22,6 +22,15 @@ const el = {
   trialCredits: document.querySelector("#trialCredits"),
   tokenUsd: document.querySelector("#tokenUsd"),
   lowBalanceTokens: document.querySelector("#lowBalanceTokens"),
+  voiceMinuteCredits: document.querySelector("#voiceMinuteCredits"),
+  geminiMinuteCredits: document.querySelector("#geminiMinuteCredits"),
+  outboundCallCredits: document.querySelector("#outboundCallCredits"),
+  messageCredits: document.querySelector("#messageCredits"),
+  stripeSecretKey: document.querySelector("#stripeSecretKey"),
+  stripeWebhookSecret: document.querySelector("#stripeWebhookSecret"),
+  stripeCreditPackCredits: document.querySelector("#stripeCreditPackCredits"),
+  stripeSubscriptionCredits: document.querySelector("#stripeSubscriptionCredits"),
+  stripeSubscriptionPriceId: document.querySelector("#stripeSubscriptionPriceId"),
   recordingRetentionDays: document.querySelector("#recordingRetentionDays"),
   demoNumberCapacity: document.querySelector("#demoNumberCapacity"),
   demoCallerLimit: document.querySelector("#demoCallerLimit"),
@@ -68,6 +77,8 @@ const el = {
   sentDmTemplateId: document.querySelector("#sentDmTemplateId"),
   sentDmTemplateName: document.querySelector("#sentDmTemplateName"),
   sentDmProfileId: document.querySelector("#sentDmProfileId"),
+  checkSentDm: document.querySelector("#checkSentDm"),
+  sentDmDiagnostics: document.querySelector("#sentDmDiagnostics"),
   refreshOnboarding: document.querySelector("#refreshOnboarding"),
   onboardingList: document.querySelector("#onboardingList"),
 };
@@ -100,6 +111,13 @@ async function loadSystem() {
     "trialCredits",
     "tokenUsd",
     "lowBalanceTokens",
+    "voiceMinuteCredits",
+    "geminiMinuteCredits",
+    "outboundCallCredits",
+    "messageCredits",
+    "stripeCreditPackCredits",
+    "stripeSubscriptionCredits",
+    "stripeSubscriptionPriceId",
     "recordingRetentionDays",
     "demoNumberCapacity",
     "demoCallerLimit",
@@ -117,6 +135,8 @@ async function loadSystem() {
   secretState("telnyxConnectionId", data.secrets.telnyxConnectionId);
   secretState("smtpUsername", data.secrets.smtpUsername);
   secretState("smtpPassword", data.secrets.smtpPassword);
+  secretState("stripeSecretKey", data.secrets.stripeSecretKey);
+  secretState("stripeWebhookSecret", data.secrets.stripeWebhookSecret);
 }
 
 async function loadOnboarding() {
@@ -140,6 +160,13 @@ async function loadOnboarding() {
   el.onboardingTranscription.checked = Boolean(settings.onboardingTranscription);
   secretState("blueBubblesPassword", settingsData.secrets.blueBubblesPassword);
   secretState("sentDmApiKey", settingsData.secrets.sentDmApiKey);
+  if (settingsData.secrets.sentDmApiKey.configured) {
+    loadSentDmDiagnostics().catch((error) => {
+      el.sentDmDiagnostics.textContent = error.message;
+    });
+  } else {
+    el.sentDmDiagnostics.textContent = "Sent.dm API key is not configured.";
+  }
   el.onboardingList.innerHTML = "";
   for (const session of sessionData.sessions) {
     const item = document.createElement("details");
@@ -257,6 +284,73 @@ async function loadAccounts() {
   }
 }
 
+function renderSentDmDiagnostics(data) {
+  el.sentDmDiagnostics.innerHTML = "";
+  const summary = document.createElement("p");
+  summary.className = data.configured ? "form-message success" : "form-message error";
+  summary.textContent = data.configured
+    ? `Template saved${data.saved?.templateFound ? "" : ", but not found in the first 20 templates"}.`
+    : data.message || "Save an approved Sent.dm template ID or name before sending.";
+  el.sentDmDiagnostics.appendChild(summary);
+
+  if (data.account) {
+    const account = document.createElement("p");
+    const configuredChannels = Object.entries(data.account.channels || {})
+      .filter(([, value]) => value?.configured)
+      .map(([name]) => name)
+      .join(", ");
+    account.textContent = data.account.ok
+      ? `Account ${data.account.type || "unknown"} connected${configuredChannels ? `; channels: ${configuredChannels}` : ""}.`
+      : `Account check failed: ${data.account.error?.message || data.account.httpStatus}`;
+    el.sentDmDiagnostics.appendChild(account);
+  }
+
+  if (data.profiles?.items?.length) {
+    const profile = document.createElement("p");
+    const saved = data.saved?.profileId;
+    const selected = data.profiles.items.find((item) => item.id === saved);
+    profile.textContent = selected
+      ? `Profile: ${selected.name || selected.id} (${selected.status || "unknown"}).`
+      : `Profiles available: ${data.profiles.items.length}.`;
+    el.sentDmDiagnostics.appendChild(profile);
+  }
+
+  const templates = data.templates?.items || [];
+  if (!templates.length) {
+    const empty = document.createElement("p");
+    empty.textContent = data.templates?.error?.message || "No templates returned.";
+    el.sentDmDiagnostics.appendChild(empty);
+    return;
+  }
+
+  const list = document.createElement("div");
+  list.className = "sentdm-template-list";
+  for (const template of templates) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "sentdm-template-row";
+    if (template.status !== "APPROVED") row.classList.add("muted-row");
+    row.innerHTML = "<strong></strong><span></span>";
+    row.querySelector("strong").textContent = `${template.status || "UNKNOWN"} · ${template.name || template.id}`;
+    row.querySelector("span").textContent = `${template.id} · ${(template.channels || []).join(", ") || "no channels"} · vars: ${(template.variables || []).join(", ") || "none"}`;
+    row.addEventListener("click", () => {
+      el.sentDmTemplateId.value = template.id || "";
+      el.sentDmTemplateName.value = template.name || "";
+      summary.className = template.status === "APPROVED" ? "form-message success" : "form-message error";
+      summary.textContent = `${template.status || "UNKNOWN"} template selected. Save settings before sending.`;
+    });
+    list.appendChild(row);
+  }
+  el.sentDmDiagnostics.appendChild(list);
+  window.lucide?.createIcons();
+}
+
+async function loadSentDmDiagnostics() {
+  el.sentDmDiagnostics.textContent = "Checking Sent.dm...";
+  const data = await api("/api/admin/sentdm/diagnostics");
+  renderSentDmDiagnostics(data);
+}
+
 async function loadCalls() {
   const { calls } = await api("/api/admin/calls");
   el.callLogList.innerHTML = "";
@@ -287,6 +381,17 @@ async function loadCalls() {
       error.className = "call-log-error";
       error.textContent = call.lastError;
       body.appendChild(error);
+    }
+    const activeFlags = call.healthFlags
+      ? Object.entries(call.healthFlags)
+          .filter(([, active]) => active)
+          .map(([key]) => key)
+      : [];
+    if (activeFlags.length) {
+      const flags = document.createElement("p");
+      flags.className = "call-log-error";
+      flags.textContent = `Health flags: ${activeFlags.join(", ")}`;
+      body.appendChild(flags);
     }
     for (const event of call.events) {
       const row = document.createElement("div");
@@ -524,6 +629,15 @@ el.systemForm.addEventListener("submit", async (event) => {
         trialCredits: Number(el.trialCredits.value),
         tokenUsd: Number(el.tokenUsd.value),
         lowBalanceTokens: Number(el.lowBalanceTokens.value),
+        voiceMinuteCredits: Number(el.voiceMinuteCredits.value),
+        geminiMinuteCredits: Number(el.geminiMinuteCredits.value),
+        outboundCallCredits: Number(el.outboundCallCredits.value),
+        messageCredits: Number(el.messageCredits.value),
+        stripeSecretKey: el.stripeSecretKey.value,
+        stripeWebhookSecret: el.stripeWebhookSecret.value,
+        stripeCreditPackCredits: Number(el.stripeCreditPackCredits.value),
+        stripeSubscriptionCredits: Number(el.stripeSubscriptionCredits.value),
+        stripeSubscriptionPriceId: el.stripeSubscriptionPriceId.value,
         recordingRetentionDays: Number(el.recordingRetentionDays.value),
         demoNumberCapacity: Number(el.demoNumberCapacity.value),
         demoCallerLimit: Number(el.demoCallerLimit.value),
@@ -543,6 +657,8 @@ el.systemForm.addEventListener("submit", async (event) => {
       el.telnyxConnectionId,
       el.smtpUsername,
       el.smtpPassword,
+      el.stripeSecretKey,
+      el.stripeWebhookSecret,
     ]) input.value = "";
     await loadSystem();
     el.systemStatus.textContent = "Saved";
@@ -641,6 +757,7 @@ el.numberSearchForm.addEventListener("submit", async (event) => {
 el.syncNumbers.addEventListener("click", () => loadNumbers().catch((error) => (el.numberError.textContent = error.message)));
 el.refreshCalls.addEventListener("click", () => loadCalls());
 el.refreshOnboarding.addEventListener("click", () => loadOnboarding().catch((error) => (el.onboardingStatus.textContent = error.message)));
+el.checkSentDm.addEventListener("click", () => loadSentDmDiagnostics().catch((error) => (el.sentDmDiagnostics.textContent = error.message)));
 
 for (const tab of el.tabs) {
   tab.addEventListener("click", () => {
