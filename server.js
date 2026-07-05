@@ -1697,13 +1697,41 @@ Receptionist behavior:
 - Use schedule_appointment when the caller wants an appointment, reservation, consultation, demo, or callback at a specific time.
 - Use capture_lead when the caller is interested but not ready to schedule.
 - Use transfer_message when the caller asks for a person, wants a transfer, has a complaint, or needs human follow-up.
-- Use end_call when the caller says goodbye, asks to hang up, asks to end the call, or the conversation is clearly complete.
+- Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, asks to disconnect, or the conversation is clearly complete. Do not keep talking after a hangup request.
 - Confirm important details before using a tool.
 - Never claim an appointment is booked from conversation alone.
 - Only say "booked" or "confirmed" after a booking tool result has verified=true and status="confirmed".
 - If status="requested", say the request is pending confirmation, not booked.
 - If a booking tool reports an error or verified=false, clearly say it was not booked and offer another slot.
 `.trim();
+}
+
+function callerRequestedHangup(text) {
+  const normalized = ` ${String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9']+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()} `;
+  if (!normalized.trim()) return false;
+  const negativePatterns = [
+    /\b(don't|dont|do not|not|never)\s+(please\s+)?(hang up|hangup|end\s+(the\s+)?call|disconnect)\b/,
+    /\bkeep\s+(the\s+)?call\s+(open|going|connected)\b/,
+    /\bstay\s+on\s+(the\s+)?(call|line)\b/,
+  ];
+  if (negativePatterns.some((pattern) => pattern.test(normalized))) return false;
+  return [
+    /\b(please\s+)?hang\s+up\b/,
+    /\b(please\s+)?hangup\b/,
+    /\b(can|could|would|will)\s+you\s+(please\s+)?hang\s+up\b/,
+    /\byou\s+can\s+hang\s+up\b/,
+    /\bend\s+(the\s+)?call\b/,
+    /\bstop\s+(the\s+)?call\b/,
+    /\bterminate\s+(the\s+)?call\b/,
+    /\bdisconnect\s+(me|the\s+call)?\b/,
+    /\bgood\s*bye\b/,
+    /\bbye\s*bye\b/,
+    /\bthanks?\s+bye\b/,
+  ].some((pattern) => pattern.test(normalized));
 }
 
 async function researchBusiness({ businessName, website, researchModel, forceRefresh = false }) {
@@ -2541,7 +2569,8 @@ function toolDeclarations(config) {
     },
     {
       name: "end_call",
-      description: "End the live call after the caller asks to hang up, says goodbye, or the conversation is complete.",
+      description:
+        "Immediately end the live call when the caller asks to hang up, asks to end or disconnect the call, says goodbye, or the conversation is complete.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -2586,7 +2615,8 @@ function onboardingToolDeclarations() {
     },
     {
       name: "end_call",
-      description: "End the onboarding call when the caller says goodbye or asks to hang up.",
+      description:
+        "Immediately end the onboarding call when the caller asks to hang up, asks to end or disconnect the call, or says goodbye.",
       parameters: {
         type: "OBJECT",
         properties: { reason: { type: "STRING" } },
@@ -7074,6 +7104,17 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
         }),
       );
     };
+    const maybeEndPhoneCallFromCallerText = (text) => {
+      if (!callerRequestedHangup(text)) return false;
+      runBackground("caller requested hangup", async () => {
+        await logVoiceCallEvent(callControlId, "caller.requested_hangup", {
+          text: String(text || "").slice(0, 240),
+          callMode: isOnboarding ? "onboarding" : isQualification ? "qualification" : "business",
+        });
+        await hangup("caller_requested_hangup");
+      });
+      return true;
+    };
     geminiWs.on("open", async () => {
       await logVoiceCallEvent(callControlId, "gemini.connected");
       const identity = sessionIdentity(config?.agentName || settings.agentName, config?.language || settings.language);
@@ -7087,6 +7128,7 @@ Phone onboarding context:
 - Once the agent is ready, offer to switch into it for a live test.
 - Collect and confirm the caller's email before using send_setup_link.
 - Never claim a link was sent unless the tool reports sent=true.
+- Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, or asks to disconnect.
 - Keep responses brief and conversational.`;
       const qualificationPrompt = `${profile?.systemPrompt}
 ${config ? runtimeBusinessInstructions(config) : ""}
@@ -7107,6 +7149,7 @@ Outbound qualification call:
 - If they are interested and a good fit, use status qualified or appointment.
 - If they are not interested, wrong number, outside service area, or not a fit, use status unqualified or unreachable.
 - Before ending, call update_lead_qualification with the outcome unless the call never reaches the lead.
+- Immediately use end_call when the lead says goodbye, asks to hang up, asks to end the call, or asks to disconnect.
 - Keep responses brief and conversational.`;
       const businessPrompt = `${profile?.systemPrompt}
 ${config ? runtimeBusinessInstructions(config) : ""}
@@ -7116,7 +7159,8 @@ Live session identity and language:
 - Speak in ${identity.language}.
 - Introduce yourself as ${identity.agentName}.
 - Continue using ${identity.language} unless the caller explicitly requests another language.
-- If the caller changes languages and you understand it, respond naturally in the caller's requested language.`;
+- If the caller changes languages and you understand it, respond naturally in the caller's requested language.
+- Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, or asks to disconnect.`;
       const setup = {
         setup: {
           model: phoneLiveModel,
@@ -7187,12 +7231,15 @@ Live session identity and language:
         }
       }
       const serverContent = message.serverContent;
+      let callerHangupRequested = false;
       if (isOnboarding && serverContent?.inputTranscription?.text) {
+        callerHangupRequested = maybeEndPhoneCallFromCallerText(serverContent.inputTranscription.text);
         runBackground("persist onboarding caller transcript", () =>
           persistOnboardingTranscript("Caller", serverContent.inputTranscription.text),
         );
       } else if (!isOnboarding && serverContent?.inputTranscription?.text) {
         const text = serverContent.inputTranscription.text;
+        callerHangupRequested = maybeEndPhoneCallFromCallerText(text);
         runBackground("persist caller transcript", async () => {
           await appendVoiceCallTranscript({
             callId: call.id,
@@ -7203,6 +7250,7 @@ Live session identity and language:
           await persistQualificationTranscript("Caller", text);
         });
       }
+      if (callerHangupRequested) return;
       if (useTelnyxSpeakOutput && serverContent?.outputTranscription?.text) {
         pendingTelnyxSpeakText += serverContent.outputTranscription.text;
         agentTextChunks += 1;
@@ -7504,11 +7552,24 @@ wss.on("connection", (clientWs, request) => {
   let outputAudioChunks = 0;
   let liveUsageStartedAt = null;
   let liveUsageRecorded = false;
+  let browserHangupRequested = false;
 
   const sendClient = (message) => {
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify(message));
     }
+  };
+
+  const maybeEndBrowserCallFromCallerText = (text) => {
+    if (browserHangupRequested || !callerRequestedHangup(text)) return false;
+    browserHangupRequested = true;
+    const reason = "Caller requested hangup";
+    sendClient({ type: "debug", message: "Caller requested hangup. Ending browser call." });
+    sendClient({ type: "end_call", reason });
+    if (geminiWs?.readyState === WebSocket.OPEN) {
+      geminiWs.close(1000, reason);
+    }
+    return true;
   };
 
   clientWs.on("message", async (raw) => {
@@ -7641,7 +7702,9 @@ Live session identity and language:
           if (geminiMessage.serverContent) {
             const serverContent = geminiMessage.serverContent;
             if (serverContent.inputTranscription?.text) {
-              sendClient({ type: "transcript", speaker: "caller", text: serverContent.inputTranscription.text });
+              const callerText = serverContent.inputTranscription.text;
+              sendClient({ type: "transcript", speaker: "caller", text: callerText });
+              if (maybeEndBrowserCallFromCallerText(callerText)) return;
             }
             if (serverContent.outputTranscription?.text) {
               sendClient({ type: "transcript", speaker: "agent", text: serverContent.outputTranscription.text });
