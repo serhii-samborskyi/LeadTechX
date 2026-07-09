@@ -31,6 +31,8 @@ model BusinessProfile {
   stripeSubscriptionId String?
   stripeSubscriptionStatus String?
   subscriptionCurrentPeriodEnd DateTime?
+  subscriptionPlanId Int?
+  subscriptionPlan   SubscriptionPlan?    @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
   leadWebhookToken   String?                @unique
   leadWebhookEnabled Boolean                @default(true)
   createdAt          DateTime               @default(now())
@@ -50,6 +52,25 @@ model BusinessProfile {
   usageEvents         UsageEvent[]
   creditTransactions  CreditTransaction[]
   stripeCheckoutSessions StripeCheckoutSession[]
+  inboundMessages    MessageInbound[]
+}
+
+model SubscriptionPlan {
+  id                Int              @id @default(autoincrement())
+  name              String
+  slug              String           @unique
+  description       String?
+  monthlyPriceCents Int              @default(0)
+  monthlyCredits    Int              @default(0)
+  stripePriceId     String?
+  active            Boolean          @default(true)
+  sortOrder         Int              @default(0)
+  businessProfiles  BusinessProfile[]
+  checkoutSessions  StripeCheckoutSession[]
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([active, sortOrder])
 }
 
 model BusinessConfig {
@@ -166,6 +187,7 @@ model Appointment {
   createdAt        DateTime  @default(now())
   feedback          CustomerFeedback[]
   messageDeliveries MessageDelivery[]
+  inboundMessages    MessageInbound[]
 }
 
 model Lead {
@@ -192,6 +214,7 @@ model Lead {
   feedback          CustomerFeedback[]
   leadWebhookEvents LeadWebhookEvent[]
   messageDeliveries MessageDelivery[]
+  inboundMessages    MessageInbound[]
   usageEvents       UsageEvent[]
 
   @@index([businessProfileId, createdAt])
@@ -218,6 +241,7 @@ model AppSettings {
   voiceName               String   @default("Puck")
   language                String   @default("English")
   agentName               String   @default("Alex")
+  platformBusinessRules   String   @default("Use only the language configured for the business agent. Do not switch languages automatically when the caller speaks another language. If the caller asks for another language, explain briefly in the configured language that the receptionist is set to use only that language unless the business changes settings.")
   publicBaseUrl           String   @default("")
   trialDays               Int      @default(7)
   claimLinkDays           Int      @default(30)
@@ -229,8 +253,6 @@ model AppSettings {
   outboundCallCredits     Int      @default(20)
   messageCredits          Int      @default(5)
   stripeCreditPackCredits Int      @default(1000)
-  stripeSubscriptionCredits Int    @default(5000)
-  stripeSubscriptionPriceId String @default("")
   recordingRetentionDays  Int      @default(30)
   demoNumberCapacity      Int      @default(10)
   demoCallerLimit         Int      @default(3)
@@ -241,7 +263,7 @@ model AppSettings {
   smtpFromName            String   @default("AI Receptionist")
   onboardingLookupUrl     String   @default("")
   onboardingVoiceName     String   @default("Puck")
-  onboardingInstructions  String   @default("You are the AI Receptionist platform onboarding specialist. Explain the value clearly, confirm the caller's business details, build their receptionist, offer a live test by switching personas, and send the secure account setup link when they are ready.")
+  onboardingInstructions  String   @default("You are the AI Receptionist platform onboarding specialist. Collect the company name and website, text those details to the caller for confirmation, build the agent only after confirmation, and send the secure setup link when it is ready. Keep the call brief.")
   onboardingRecordCalls   Boolean  @default(false)
   onboardingTranscription Boolean  @default(true)
   messagePrimaryProvider  String   @default("bluebubbles")
@@ -315,7 +337,7 @@ model FastAgentSession {
 model AccountClaimToken {
   id                Int             @id @default(autoincrement())
   tokenHash         String          @unique
-  email             String
+  email             String?
   businessProfileId Int
   businessProfile   BusinessProfile @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
   expiresAt         DateTime
@@ -378,6 +400,7 @@ model VoiceCall {
   outboundQualificationCall OutboundQualificationCall?
   feedback          CustomerFeedback[]
   messageDeliveries MessageDelivery[]
+  inboundMessages    MessageInbound[]
   usageEvents       UsageEvent[]
 }
 
@@ -464,6 +487,39 @@ model MessageDelivery {
   @@index([businessProfileId, createdAt])
   @@index([purpose, createdAt])
   @@index([appointmentId, createdAt])
+}
+
+model MessageInbound {
+  id                Int              @id @default(autoincrement())
+  provider          String
+  eventType         String           @default("new-message")
+  fromPhone         String?
+  toPhone           String?
+  chatGuid          String?
+  providerMessageId String?
+  text              String?
+  status            String           @default("received")
+  purpose           String?
+  raw               Json?
+  normalized        Json?
+  error             String?
+  businessProfileId Int?
+  businessProfile   BusinessProfile? @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  leadId            Int?
+  lead              Lead?            @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  voiceCallId       Int?
+  voiceCall         VoiceCall?       @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  appointmentId     Int?
+  appointment       Appointment?     @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@unique([provider, providerMessageId])
+  @@index([fromPhone, createdAt])
+  @@index([chatGuid, createdAt])
+  @@index([businessProfileId, createdAt])
+  @@index([voiceCallId, createdAt])
+  @@index([status, createdAt])
 }
 
 model CustomerFeedback {
@@ -561,6 +617,8 @@ model StripeCheckoutSession {
   id                Int              @id @default(autoincrement())
   businessProfileId Int
   businessProfile   BusinessProfile  @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  subscriptionPlanId Int?
+  subscriptionPlan   SubscriptionPlan? @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
   stripeSessionId   String           @unique
   mode              String
   status            String           @default("created")
@@ -576,6 +634,7 @@ model StripeCheckoutSession {
   updatedAt         DateTime         @updatedAt
 
   @@index([businessProfileId, createdAt])
+  @@index([subscriptionPlanId, createdAt])
   @@index([status, createdAt])
 }
 

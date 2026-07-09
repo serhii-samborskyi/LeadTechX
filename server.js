@@ -79,6 +79,8 @@ app.use(express.static(path.join(__dirname, "public")));
 const SESSION_COOKIE = "receptionist_session";
 const SESSION_DAYS = 14;
 const onboardingAttempts = new Map();
+const activeOnboardingTextSessions = new Map();
+const blueBubblesPreferredModes = new Map();
 let prismaReconnectPromise = null;
 
 function sleep(ms) {
@@ -175,6 +177,9 @@ function setSessionCookie(req, res, token) {
 }
 
 function publicBusinessProfile(profile) {
+  const rawData = profile.rawData && typeof profile.rawData === "object" && !Array.isArray(profile.rawData)
+    ? profile.rawData
+    : {};
   return {
     id: profile.id,
     businessName: profile.businessName,
@@ -184,6 +189,9 @@ function publicBusinessProfile(profile) {
     services: profile.services,
     serviceArea: profile.serviceArea,
     contact: profile.contact,
+    phone: rawData.phone || "",
+    address: rawData.address || "",
+    email: rawData.email || "",
     accountStatus: profile.accountStatus,
     trialEndsAt: profile.trialEndsAt,
     creditBalance: profile.creditBalance,
@@ -285,6 +293,76 @@ function accountStatusForStripeSubscription(status) {
   return undefined;
 }
 
+function planPriceCentsFromInput(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") return Math.max(0, Math.round(Number(fallback || 0)));
+  const raw = String(value).trim();
+  const parsed = raw.includes(".") ? Number(raw) * 100 : Number(raw);
+  return Math.max(0, Math.round(Number.isFinite(parsed) ? parsed : fallback || 0));
+}
+
+function normalizePlanSlug(value, fallbackName = "") {
+  const base = String(value || fallbackName || "plan")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return base || `plan-${Date.now()}`;
+}
+
+function planInputData(body, existing = null) {
+  const name = String(body.name ?? existing?.name ?? "").trim();
+  if (!name) throw new Error("Plan name is required");
+  const monthlyCredits = Math.max(0, Math.round(Number(body.monthlyCredits ?? existing?.monthlyCredits ?? 0)));
+  const monthlyPriceCents =
+    body.monthlyPriceCents !== undefined
+      ? planPriceCentsFromInput(body.monthlyPriceCents, existing?.monthlyPriceCents ?? 0)
+      : Math.max(0, Math.round(Number(body.monthlyPriceDollars ?? (existing?.monthlyPriceCents || 0) / 100) * 100));
+  return {
+    name,
+    slug: normalizePlanSlug(body.slug ?? existing?.slug, name),
+    description: String(body.description ?? existing?.description ?? "").trim() || null,
+    monthlyPriceCents,
+    monthlyCredits,
+    stripePriceId: String(body.stripePriceId ?? existing?.stripePriceId ?? "").trim() || null,
+    active: typeof body.active === "boolean" ? body.active : existing?.active ?? true,
+    sortOrder: Math.round(Number(body.sortOrder ?? existing?.sortOrder ?? 0)),
+  };
+}
+
+function publicSubscriptionPlan(plan) {
+  if (!plan) return null;
+  return {
+    id: plan.id,
+    name: plan.name,
+    slug: plan.slug,
+    description: plan.description || "",
+    monthlyPriceCents: plan.monthlyPriceCents,
+    monthlyCredits: plan.monthlyCredits,
+    stripePriceConfigured: Boolean(plan.stripePriceId),
+    active: plan.active,
+    sortOrder: plan.sortOrder,
+    createdAt: plan.createdAt,
+    updatedAt: plan.updatedAt,
+  };
+}
+
+function adminSubscriptionPlan(plan) {
+  if (!plan) return null;
+  return {
+    ...publicSubscriptionPlan(plan),
+    stripePriceId: plan.stripePriceId || "",
+    businessCount: plan._count?.businessProfiles ?? undefined,
+  };
+}
+
+async function activeSubscriptionPlans() {
+  return prisma.subscriptionPlan.findMany({
+    where: { active: true },
+    orderBy: [{ sortOrder: "asc" }, { monthlyPriceCents: "asc" }, { name: "asc" }],
+  });
+}
+
 async function publicBaseUrl() {
   const settings = await getSettings();
   const value = String(settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
@@ -336,21 +414,79 @@ function telnyxMediaToken(callControlId) {
   return crypto.createHmac("sha256", encryptionKey()).update(String(callControlId)).digest("base64url");
 }
 
-const TELNYX_STREAM_CODEC = "L16";
-const TELNYX_STREAM_SAMPLE_RATE = 16000;
-const TELNYX_OUTBOUND_CODEC = TELNYX_STREAM_CODEC;
-const TELNYX_OUTBOUND_SAMPLE_RATE = TELNYX_STREAM_SAMPLE_RATE;
+function telnyxCodec(value, fallback = "PCMU") {
+  const codec = String(value || fallback).trim().toUpperCase();
+  return ["PCMU", "L16"].includes(codec) ? codec : fallback;
+}
+
+function telnyxCodecDefaultRate(codec) {
+  return codec === "PCMU" ? 8000 : 16000;
+}
+
+function telnyxSampleRate(value, codec) {
+  const rate = Number(value || telnyxCodecDefaultRate(codec));
+  return [8000, 16000, 24000].includes(rate) ? rate : telnyxCodecDefaultRate(codec);
+}
+
+const TELNYX_STREAM_CODEC = telnyxCodec(process.env.TELNYX_STREAM_CODEC || process.env.TELNYX_CODEC, "PCMU");
+const TELNYX_STREAM_SAMPLE_RATE = telnyxSampleRate(process.env.TELNYX_STREAM_SAMPLE_RATE, TELNYX_STREAM_CODEC);
+const TELNYX_OUTBOUND_CODEC = telnyxCodec(
+  process.env.TELNYX_OUTBOUND_CODEC || TELNYX_STREAM_CODEC,
+  TELNYX_STREAM_CODEC,
+);
+const TELNYX_OUTBOUND_SAMPLE_RATE = telnyxSampleRate(process.env.TELNYX_OUTBOUND_SAMPLE_RATE, TELNYX_OUTBOUND_CODEC);
 const TELNYX_OUTBOUND_FRAME_MS = 20;
 const TELNYX_L16_ENDIAN = String(process.env.TELNYX_L16_ENDIAN || "LE").toUpperCase() === "BE" ? "BE" : "LE";
-const TELNYX_PHONE_OUTPUT_MODE = "media_stream";
 const TELNYX_LIVE_MODEL = String(process.env.TELNYX_LIVE_MODEL || "").trim();
-const TELNYX_SPEAK_VOICE = "female";
-const TELNYX_SPEAK_LANGUAGE = "en-US";
+const TELNYX_LIVE_MODEL_FORCE = ["1", "true", "yes", "on"].includes(
+  String(process.env.TELNYX_LIVE_MODEL_FORCE || "").trim().toLowerCase(),
+);
+const TELNYX_MAX_OUTBOUND_QUEUE_MS = Math.max(800, Number(process.env.TELNYX_MAX_OUTBOUND_QUEUE_MS || 2600));
+const TELNYX_MAX_OUTBOUND_QUEUE_FRAMES = Math.max(
+  10,
+  Math.ceil(TELNYX_MAX_OUTBOUND_QUEUE_MS / TELNYX_OUTBOUND_FRAME_MS),
+);
+const TELNYX_DROP_QUEUED_AUDIO = ["1", "true", "yes", "on"].includes(
+  String(process.env.TELNYX_DROP_QUEUED_AUDIO || "").trim().toLowerCase(),
+);
 const BRIDGE_AUDIO_CAPTURE_ENABLED = ["1", "true", "yes", "on"].includes(
   String(process.env.BRIDGE_AUDIO_CAPTURE || "").trim().toLowerCase(),
 );
 const BRIDGE_AUDIO_CAPTURE_MS = Number(process.env.BRIDGE_AUDIO_CAPTURE_MS || 30000);
 const BRIDGE_AUDIO_CAPTURE_DIR = path.join(__dirname, "logs/audio-dumps");
+const TOOL_WAIT_NOTICE_ENABLED = !["0", "false", "no", "off"].includes(
+  String(process.env.TOOL_WAIT_NOTICE_ENABLED || "0").trim().toLowerCase(),
+);
+const TOOL_WAIT_NOTICE_DELAY_MS = Math.max(0, Number(process.env.TOOL_WAIT_NOTICE_DELAY_MS || 1400));
+const TOOL_WAIT_NOTICE_REPEAT_MS = Math.max(3000, Number(process.env.TOOL_WAIT_NOTICE_REPEAT_MS || 9000));
+const TOOL_WAIT_NOTICE_MAX_COUNT = Math.max(1, Number(process.env.TOOL_WAIT_NOTICE_MAX_COUNT || 6));
+
+const TOOL_WAIT_NOTICE_MESSAGES = {
+  build_business_agent: [
+    "Okay, I'll build your agent now. This can take about a minute.",
+    "I'm still pulling the business details and preparing the receptionist.",
+    "This is taking a little longer, but I'm still working on the receptionist setup.",
+  ],
+  get_available_slots: ["One moment, I'm checking the schedule.", "I'm still checking the available times."],
+  schedule_appointment: ["I'm booking that now.", "I'm still confirming that appointment."],
+  verify_appointment: ["Let me verify that appointment.", "I'm still checking the confirmation."],
+  send_setup_link: ["I'm sending that setup link now.", "I'm still sending the setup link."],
+  send_review_request: ["I'm sending that review link now.", "I'm still sending the review link."],
+  escalate_complaint: ["One moment while I notify management.", "I'm still sending that escalation."],
+};
+const TOOL_WAIT_NOTICE_IMMEDIATE = new Set(["build_business_agent"]);
+const BLUEBUBBLES_SEND_TIMEOUT_MS = Math.max(800, Number(process.env.BLUEBUBBLES_SEND_TIMEOUT_MS || 1800));
+const DEFAULT_PLATFORM_BUSINESS_RULES =
+  "Use only the language configured for the business agent. Do not switch languages automatically when the caller speaks another language. If the caller asks for another language, explain briefly in the configured language that the receptionist is set to use only that language unless the business changes settings.";
+const DEFAULT_ONBOARDING_INSTRUCTIONS =
+  "You are the AI Receptionist platform onboarding specialist. Collect the company name and website, text those details to the caller for confirmation, build the agent only after confirmation, and send the secure setup link when it is ready. Keep the call brief.";
+
+function onboardingInstructionsForPrompt(value) {
+  const text = String(value || "").trim();
+  if (!text) return DEFAULT_ONBOARDING_INSTRUCTIONS;
+  if (/\b(switch|switching|persona|live test|live demo)\b/i.test(text)) return DEFAULT_ONBOARDING_INSTRUCTIONS;
+  return text;
+}
 
 async function telnyxMediaUrl(callControlId) {
   const baseUrl = await publicBaseUrl();
@@ -902,7 +1038,7 @@ async function generateCallCrmInsight({ voiceCall, profile, fallback }) {
       config: { temperature: 0.1 },
     }),
     sleep(15000).then(() => {
-      throw new Error("Gemini post-call CRM extraction timed out");
+      throw new Error("Post-call CRM extraction timed out");
     }),
   ]);
   const parsed = JSON.parse(stripJsonFence(response.text || ""));
@@ -1278,9 +1414,9 @@ async function recordCallUsageOnce(call) {
     quantity: seconds,
     unit: "second",
     credits: Math.max(0, Number(settings.geminiMinuteCredits ?? settings.voiceMinuteCredits ?? 0)) * minutes,
-    note: `${call.callMode} Gemini Live session ${seconds}s`,
+    note: `${call.callMode} live voice session ${seconds}s`,
     metadata: callMetadata,
-  }).catch((error) => console.warn(`[usage] Gemini call usage skipped: ${error.message}`));
+  }).catch((error) => console.warn(`[usage] live voice call usage skipped: ${error.message}`));
   if (call.callMode === "qualification") {
     await recordUsageEventOnce({
       businessProfileId: call.businessProfileId,
@@ -1310,20 +1446,35 @@ async function recordBrowserLiveUsage({ profile, startedAt, endedAt = new Date()
     quantity: seconds,
     unit: "second",
     credits: Math.max(0, Number(settings.geminiMinuteCredits ?? settings.voiceMinuteCredits ?? 0)) * minutes,
-    note: `Browser Gemini Live session ${seconds}s`,
+    note: `Browser live voice session ${seconds}s`,
     metadata: { seconds, billedMinutes: minutes, inputAudioChunks, outputAudioChunks },
   }).catch((error) => console.warn(`[usage] call usage skipped: ${error.message}`));
 }
 
+function expectedHangupCause(cause) {
+  const normalized = String(cause || "").trim().toLowerCase();
+  return !normalized || ["normal_clearing", "originator_cancel", "user_busy", "no_answer"].includes(normalized);
+}
+
 function callHealthFlagsFromEvents(call) {
-  const eventTypes = new Set((call?.events || []).map((event) => event.eventType));
+  const events = call?.events || [];
+  const eventTypes = new Set(events.map((event) => event.eventType));
+  const hasCallerAudio = eventTypes.has("caller.audio.packet");
+  const hasGeminiAudio = eventTypes.has("gemini.audio.started") || eventTypes.has("gemini.text.turn_complete");
+  const mediaClosed = eventTypes.has("media.closed") || eventTypes.has("media.stopped");
+  const mediaError = events.some(
+    (event) =>
+      event.eventType === "media.provider_error" ||
+      (event.eventType === "error" && ["media", "media_start_timeout", "telnyx_websocket"].includes(String(event.detail?.stage || ""))),
+  );
+  const normallyEnded = call?.status === "ended" && expectedHangupCause(call?.hangupCause);
   return {
-    noCallerAudio: !eventTypes.has("caller.audio.packet"),
-    noGeminiAudio: !eventTypes.has("gemini.audio.started") && !eventTypes.has("gemini.text.turn_complete"),
-    mediaDisconnected: eventTypes.has("media.closed") || eventTypes.has("media.stopped"),
-    dbIssue: (call?.events || []).some((event) => event.eventType === "error" && event.detail?.stage === "db"),
-    geminiIssue: (call?.events || []).some((event) => event.eventType === "error" && event.detail?.stage === "gemini"),
-    telnyxIssue: (call?.events || []).some((event) => event.eventType === "error" && event.detail?.stage === "telnyx"),
+    noCallerAudio: !hasCallerAudio,
+    noGeminiAudio: !hasGeminiAudio,
+    mediaDisconnected: Boolean(mediaError || (mediaClosed && !normallyEnded)),
+    dbIssue: events.some((event) => event.eventType === "error" && event.detail?.stage === "db"),
+    geminiIssue: events.some((event) => event.eventType === "error" && event.detail?.stage === "gemini"),
+    telnyxIssue: events.some((event) => event.eventType === "error" && event.detail?.stage === "telnyx"),
   };
 }
 
@@ -1607,6 +1758,33 @@ function normalizeE164Phone(value) {
   return cleaned;
 }
 
+function phoneFromBlueBubblesChatGuid(value) {
+  const raw = String(value || "");
+  const parts = raw.split(";-;");
+  const candidate = parts.length > 1 ? parts.at(-1) : raw;
+  return normalizeE164Phone(candidate);
+}
+
+function blueBubblesMessageAttempts({ toPhone, message, pathName }) {
+  const phone = normalizeE164Phone(toPhone) || String(toPhone || "").trim();
+  const base = () => ({
+    message,
+    tempGuid: `temp-${crypto.randomUUID()}`,
+    method: "private-api",
+  });
+  if (!pathName.includes("/message/text")) {
+    return [{ mode: "addresses", body: { addresses: [phone], message } }];
+  }
+  const attempts = [
+    { mode: "imessage_chat_guid", body: { ...base(), chatGuid: `iMessage;-;${phone}` } },
+    { mode: "sms_chat_guid", body: { ...base(), chatGuid: `SMS;-;${phone}` } },
+    { mode: "addresses", body: { ...base(), addresses: [phone] } },
+  ];
+  const preferred = blueBubblesPreferredModes.get(phone);
+  if (!preferred) return attempts;
+  return attempts.sort((a, b) => (a.mode === preferred ? -1 : b.mode === preferred ? 1 : 0));
+}
+
 function businessCacheKey(businessName, website) {
   const base = `${businessName.toLowerCase()}|${website || ""}`;
   return crypto.createHash("sha256").update(base).digest("hex");
@@ -1638,6 +1816,8 @@ async function getSettings() {
       voiceName: "Puck",
       language: "English",
       agentName: "Alex",
+      platformBusinessRules: DEFAULT_PLATFORM_BUSINESS_RULES,
+      onboardingInstructions: DEFAULT_ONBOARDING_INSTRUCTIONS,
     },
     update: {},
   });
@@ -1697,6 +1877,7 @@ Receptionist behavior:
 - Use schedule_appointment when the caller wants an appointment, reservation, consultation, demo, or callback at a specific time.
 - Use capture_lead when the caller is interested but not ready to schedule.
 - Use transfer_message when the caller asks for a person, wants a transfer, has a complaint, or needs human follow-up.
+- ${toolWaitNoticeInstruction()}
 - Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, asks to disconnect, or the conversation is clearly complete. Do not keep talking after a hangup request.
 - Confirm important details before using a tool.
 - Never claim an appointment is booked from conversation alone.
@@ -1734,6 +1915,53 @@ function callerRequestedHangup(text) {
   ].some((pattern) => pattern.test(normalized));
 }
 
+function toolWaitNotice(functionName, index = 0) {
+  const messages = TOOL_WAIT_NOTICE_MESSAGES[functionName] || [];
+  if (!TOOL_WAIT_NOTICE_ENABLED || !messages.length) return "";
+  return messages[Math.min(index, messages.length - 1)];
+}
+
+function toolWaitNoticeStartsImmediately(functionName) {
+  return TOOL_WAIT_NOTICE_ENABLED && TOOL_WAIT_NOTICE_IMMEDIATE.has(functionName);
+}
+
+function toolCompletionNotice(functionName, result) {
+  if (!TOOL_WAIT_NOTICE_ENABLED) return "";
+  if (functionName === "build_business_agent") {
+    if (result?.existingAccount) {
+      return "I found that business, but it already has an account. I'll explain what that means.";
+    }
+    if (result?.ok) {
+      return result?.setupLinkSent
+        ? "The receptionist is ready, and I sent the setup link to this phone."
+        : "The receptionist is ready, but I could not send the setup link automatically.";
+    }
+  }
+  return "";
+}
+
+function toolFailureNotice(functionName) {
+  if (!TOOL_WAIT_NOTICE_ENABLED) return "";
+  if (functionName === "build_business_agent") {
+    return "I'm sorry, I hit a problem while looking up that business. I'll explain what happened and try another path.";
+  }
+  return "";
+}
+
+function toolWaitNoticeInstruction() {
+  if (!TOOL_WAIT_NOTICE_ENABLED) {
+    return [
+      "If you tell the caller you are checking, booking, sending, looking up, or working on something, call the matching tool in the same turn.",
+      "Never say you checked availability, found an opening, booked an appointment, or sent a message unless the corresponding tool result confirms it.",
+    ].join(" ");
+  }
+  return [
+    "Before using a tool that may take more than a moment, briefly tell the caller what you are doing.",
+    "Use natural one-sentence acknowledgements like \"One moment, I'm checking the schedule\" or \"Give me a moment while I build that.\"",
+    "After saying the acknowledgement, use the tool immediately and do not fill with extra chatter.",
+  ].join(" ");
+}
+
 async function researchBusiness({ businessName, website, researchModel, forceRefresh = false }) {
   const normalized = normalizeBusinessName(businessName);
   const normalizedWebsite = normalizeWebsite(website);
@@ -1750,7 +1978,7 @@ async function researchBusiness({ businessName, website, researchModel, forceRef
   const prompt = buildResearchPrompt(normalized, normalizedWebsite);
   const tools = normalizedWebsite ? [{ urlContext: {} }, { googleSearch: {} }] : [{ googleSearch: {} }];
   const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY");
-  if (!geminiApiKey) throw new Error("Gemini API key is not configured");
+  if (!geminiApiKey) throw new Error("AI provider API key is not configured");
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
   const response = await ai.models.generateContent({
@@ -1964,6 +2192,40 @@ function requestBaseUrl(req, settings) {
   return `${req.protocol}://${req.get("host")}`;
 }
 
+async function smtpDiagnosticConfig(body = {}) {
+  const settings = await getSettings();
+  const host = String(body.smtpHost ?? settings.smtpHost ?? "").trim();
+  const port = Math.max(1, Number(body.smtpPort ?? settings.smtpPort ?? 587));
+  const secure = typeof body.smtpSecure === "boolean" ? body.smtpSecure : Boolean(settings.smtpSecure);
+  const fromEmail = String(body.smtpFromEmail ?? settings.smtpFromEmail ?? "").trim();
+  const fromName = String(body.smtpFromName ?? settings.smtpFromName ?? "AI Receptionist").trim() || "AI Receptionist";
+  const typedUser = String(body.smtpUsername || "").trim();
+  const typedPassword = String(body.smtpPassword || "").trim();
+  const smtpUser = typedUser || (await systemSecret("smtp_username", "SMTP_USERNAME"));
+  const smtpPassword = typedPassword || (await systemSecret("smtp_password", "SMTP_PASSWORD"));
+  if (!host) throw new Error("SMTP host is required");
+  if (!fromEmail) throw new Error("From email is required");
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: smtpUser ? { user: smtpUser, pass: smtpPassword } : undefined,
+    connectionTimeout: 12000,
+    greetingTimeout: 12000,
+    socketTimeout: 12000,
+  });
+  return {
+    settings,
+    transporter,
+    host,
+    port,
+    secure,
+    fromEmail,
+    fromName,
+    authenticated: Boolean(smtpUser),
+  };
+}
+
 async function sendClaimEmail({ settings, email, setupUrl, businessName }) {
   const smtpUser = await systemSecret("smtp_username", "SMTP_USERNAME");
   const smtpPassword = await systemSecret("smtp_password", "SMTP_PASSWORD");
@@ -2048,27 +2310,221 @@ async function lookupOnboardingBusiness(callerPhone, settings) {
   return { businessName: businessName || null, website, raw: data };
 }
 
-async function sendBlueBubblesMessage({ settings, toPhone, message }) {
-  const password = await systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD");
+async function sendBlueBubblesMessage({ settings, toPhone, message, passwordOverride = "" }) {
+  const password = String(passwordOverride || "").trim() || (await systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD"));
   if (!settings.blueBubblesBaseUrl || !password) throw new Error("BlueBubbles is not configured");
   const url = new URL(settings.blueBubblesSendPath || "/api/v1/message/text", settings.blueBubblesBaseUrl);
   url.searchParams.set("password", password);
-  const isMessageText = url.pathname.includes("/message/text");
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(
-      isMessageText
-        ? { chatGuid: `iMessage;-;${toPhone}`, message, tempGuid: `temp-${crypto.randomUUID()}`, method: "private-api" }
-        : { addresses: [toPhone], message },
-    ),
-    signal: AbortSignal.timeout(12000),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || (data.status && Number(data.status) >= 400)) {
-    throw new Error(data.message || `BlueBubbles returned HTTP ${response.status}`);
+  const attempts = blueBubblesMessageAttempts({ toPhone, message, pathName: url.pathname });
+  const errors = [];
+  for (const attempt of attempts) {
+    const attemptStartedAt = Date.now();
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(attempt.body),
+        signal: AbortSignal.timeout(BLUEBUBBLES_SEND_TIMEOUT_MS),
+      });
+    } catch (error) {
+      errors.push(`${attempt.mode}: ${error.message}`);
+      continue;
+    }
+    const raw = await response.text().catch(() => "");
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = { raw: raw.slice(0, 1000) };
+    }
+    const numericStatus = Number(data.status);
+    const failedStatus = data.status && Number.isFinite(numericStatus) && numericStatus >= 400;
+    if (response.ok && !failedStatus && data.success !== false) {
+      const phone = normalizeE164Phone(toPhone) || String(toPhone || "").trim();
+      if (phone) blueBubblesPreferredModes.set(phone, attempt.mode);
+      return {
+        providerMessageId: data.data?.guid || data.data?.tempGuid || data.guid || data.tempGuid || null,
+        detail: {
+          ...data,
+          blueBubblesAttempt: attempt.mode,
+          httpStatus: response.status,
+          durationMs: Date.now() - attemptStartedAt,
+          timeoutMs: BLUEBUBBLES_SEND_TIMEOUT_MS,
+        },
+      };
+    }
+    errors.push(`${attempt.mode}: ${data.message || data.error || `HTTP ${response.status}`} (${Date.now() - attemptStartedAt}ms)`);
   }
-  return { providerMessageId: data.data?.guid || data.data?.tempGuid || null, detail: data };
+  throw new Error(errors.join("; ") || "BlueBubbles returned no usable response");
+}
+
+function blueBubblesWebhookCredential(req) {
+  const authorization = String(req.get("authorization") || "");
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
+  return (
+    String(req.query.guid || req.query.password || req.query.token || "").trim() ||
+    String(req.get("x-bluebubbles-password") || req.get("x-bluebubbles-token") || "").trim() ||
+    String(bearer || "").trim()
+  );
+}
+
+async function verifyBlueBubblesWebhook(req) {
+  const password = await systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD");
+  if (!password) return false;
+  const credential = blueBubblesWebhookCredential(req);
+  if (safeTokenMatches(credential, password)) return true;
+  const withoutTrailingPeriods = String(password).replace(/\.+$/, "");
+  return withoutTrailingPeriods !== password && safeTokenMatches(credential, withoutTrailingPeriods);
+}
+
+function objectValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function textValue(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function normalizeBlueBubblesWebhookPayload(payload) {
+  const root = objectValue(payload) || {};
+  const eventType = textValue(root.event, root.type, root.name, root.eventType, "unknown");
+  const data = objectValue(root.data) || {};
+  const message = objectValue(data.message) || objectValue(root.message) || data || root;
+  const handle = objectValue(message.handle) || {};
+  const chat = objectValue(message.chat) || {};
+  const chatGuid = textValue(message.chatGuid, message.chat_guid, chat.guid, data.chatGuid, root.chatGuid);
+  const providerMessageId = textValue(
+    message.guid,
+    message.messageGuid,
+    message.message_guid,
+    message.id,
+    data.guid,
+    root.guid,
+  );
+  const fromRaw = textValue(
+    message.from,
+    message.sender,
+    message.address,
+    message.handleAddress,
+    message.handle_address,
+    handle.address,
+    handle.id,
+    data.from,
+    root.from,
+  );
+  const fromPhone = normalizeE164Phone(fromRaw) || phoneFromBlueBubblesChatGuid(chatGuid);
+  const text = textValue(
+    message.text,
+    message.message,
+    message.body,
+    message.content,
+    message.attributedBody,
+    data.text,
+    data.message,
+    root.text,
+  );
+  const isFromMe = Boolean(message.isFromMe || message.fromMe || message.is_from_me || data.isFromMe || root.isFromMe);
+  const timestamp = textValue(message.dateCreated, message.date, message.timestamp, data.timestamp, root.timestamp);
+  const messageLike = /message/i.test(eventType) || Boolean(text || providerMessageId || chatGuid);
+  return {
+    eventType,
+    data,
+    message,
+    messageLike,
+    isFromMe,
+    fromPhone,
+    toPhone: normalizeE164Phone(textValue(message.to, message.recipient, data.to, root.to)),
+    chatGuid,
+    providerMessageId,
+    text,
+    timestamp,
+  };
+}
+
+async function recentMessageContextForPhone(fromPhone) {
+  if (!fromPhone) return {};
+  const [delivery, activeCall] = await Promise.all([
+    prisma.messageDelivery.findFirst({
+      where: { provider: "bluebubbles", toPhone: fromPhone },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        purpose: true,
+        businessProfileId: true,
+        leadId: true,
+        voiceCallId: true,
+        appointmentId: true,
+        createdAt: true,
+      },
+    }),
+    prisma.voiceCall.findFirst({
+      where: { fromNumber: fromPhone, callMode: "onboarding", endedAt: null },
+      orderBy: { startedAt: "desc" },
+      select: { id: true, businessProfileId: true },
+    }),
+  ]);
+  return {
+    purpose: delivery?.purpose ? `${delivery.purpose}_reply` : null,
+    businessProfileId: activeCall?.businessProfileId || delivery?.businessProfileId || null,
+    leadId: delivery?.leadId || null,
+    voiceCallId: activeCall?.id || delivery?.voiceCallId || null,
+    appointmentId: delivery?.appointmentId || null,
+    messageDeliveryId: delivery?.id || null,
+  };
+}
+
+async function persistBlueBubblesInboundMessage(payload) {
+  const normalized = normalizeBlueBubblesWebhookPayload(payload);
+  const context = await recentMessageContextForPhone(normalized.fromPhone);
+  const ignored = normalized.isFromMe || !normalized.messageLike;
+  const data = {
+    provider: "bluebubbles",
+    eventType: normalized.eventType,
+    fromPhone: normalized.fromPhone || null,
+    toPhone: normalized.toPhone || null,
+    chatGuid: normalized.chatGuid || null,
+    providerMessageId: normalized.providerMessageId || null,
+    text: normalized.text || null,
+    status: ignored ? "ignored" : "received",
+    purpose: context.purpose,
+    raw: payload,
+    normalized: { ...normalized, messageDeliveryId: context.messageDeliveryId || null },
+    businessProfileId: context.businessProfileId,
+    leadId: context.leadId,
+    voiceCallId: context.voiceCallId,
+    appointmentId: context.appointmentId,
+  };
+  if (normalized.providerMessageId) {
+    return prisma.messageInbound.upsert({
+      where: { provider_providerMessageId: { provider: "bluebubbles", providerMessageId: normalized.providerMessageId } },
+      create: data,
+      update: { ...data, raw: payload, normalized: data.normalized },
+    });
+  }
+  return prisma.messageInbound.create({ data });
+}
+
+async function routeBlueBubblesInboundMessage(inbound) {
+  if (inbound.status === "ignored" || !inbound.fromPhone || !inbound.text) return { routed: false, reason: "ignored" };
+  const active = activeOnboardingTextSessions.get(inbound.fromPhone);
+  if (!active) return { routed: false, reason: "no_active_onboarding_call" };
+  const route = await active.onMessage(inbound);
+  await prisma.messageInbound.update({
+    where: { id: inbound.id },
+    data: {
+      status: route?.routed ? "routed" : "received",
+      voiceCallId: route?.voiceCallId || inbound.voiceCallId,
+      businessProfileId: route?.businessProfileId || inbound.businessProfileId,
+      purpose: inbound.purpose || "onboarding_text_reply",
+      normalized: { ...(inbound.normalized || {}), route },
+    },
+  });
+  return route;
 }
 
 async function sendSentDmMessage({ settings, toPhone, setupUrl, businessName }) {
@@ -2149,6 +2605,17 @@ async function deliverBusinessMessage({
 }) {
   const target = normalizeE164Phone(toPhone);
   const providerForFailure = String(providerOverride || settings.messagePrimaryProvider || "none").trim().toLowerCase() || "none";
+  const voiceCallForLog = voiceCallId
+    ? await prisma.voiceCall.findUnique({ where: { id: voiceCallId }, select: { callControlId: true } }).catch(() => null)
+    : null;
+  const logMessageDeliveryEvent = async (eventType, detail = {}) => {
+    if (!voiceCallForLog?.callControlId) return;
+    await logVoiceCallEvent(voiceCallForLog.callControlId, eventType, {
+      purpose,
+      toPhone: target || String(toPhone || "").trim() || "invalid",
+      ...detail,
+    });
+  };
   const baseDeliveryData = {
     purpose,
     toPhone: target || String(toPhone || "").trim() || "invalid",
@@ -2168,6 +2635,10 @@ async function deliverBusinessMessage({
         error: "A valid E.164 destination phone is required",
       },
     });
+    await logMessageDeliveryEvent("message.delivery_failed", {
+      provider: providerForFailure,
+      error: "A valid E.164 destination phone is required",
+    });
     throw new Error("A valid E.164 destination phone is required");
   }
   const providers = messageProviderList(settings, providerOverride);
@@ -2181,6 +2652,10 @@ async function deliverBusinessMessage({
         error: "No messaging provider is configured",
       },
     });
+    await logMessageDeliveryEvent("message.delivery_failed", {
+      provider: "none",
+      error: "No messaging provider is configured",
+    });
     throw new Error("No messaging provider is configured");
   }
   const errors = [];
@@ -2192,6 +2667,10 @@ async function deliverBusinessMessage({
         toPhone: target,
         status: "sending",
       },
+    });
+    await logMessageDeliveryEvent("message.delivery_started", {
+      provider,
+      messageDeliveryId: delivery.id,
     });
     try {
       const result =
@@ -2213,6 +2692,12 @@ async function deliverBusinessMessage({
         where: { id: delivery.id },
         data: { status: "sent", providerMessageId: result.providerMessageId, detail: { ...result.detail, metadata, message } },
       });
+      await logMessageDeliveryEvent("message.delivery_sent", {
+        provider,
+        messageDeliveryId: updated.id,
+        providerMessageId: result.providerMessageId || null,
+        blueBubblesAttempt: result.detail?.blueBubblesAttempt || null,
+      });
       const messageCredits = Math.max(0, Number(settings.messageCredits || 0));
       await recordUsageEventOnce({
         businessProfileId: profile?.id,
@@ -2230,9 +2715,15 @@ async function deliverBusinessMessage({
       return { provider, delivery: updated, ...result };
     } catch (error) {
       errors.push(`${provider}: ${error.message}`);
+      console.warn(`[message] ${provider} delivery failed for ${purpose}: ${error.message}`);
       await prisma.messageDelivery.update({
         where: { id: delivery.id },
         data: { status: "failed", error: error.message, detail: { metadata, message } },
+      });
+      await logMessageDeliveryEvent("message.delivery_failed", {
+        provider,
+        messageDeliveryId: delivery.id,
+        error: error.message,
       });
     }
   }
@@ -2254,21 +2745,163 @@ async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, pro
 
 async function createPhoneClaimLink({ profile, email, settings }) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) throw new Error("A valid email is required");
-  if (await prisma.user.findUnique({ where: { email: normalizedEmail } })) throw new Error("That email already belongs to an account");
+  const hasEmail = Boolean(normalizedEmail);
+  if (hasEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) throw new Error("Enter a valid email address");
+  if (hasEmail && (await prisma.user.findUnique({ where: { email: normalizedEmail } }))) {
+    throw new Error("That email already belongs to an account");
+  }
   await prisma.accountClaimToken.deleteMany({ where: { businessProfileId: profile.id, usedAt: null } });
   const claim = issueToken();
   await prisma.accountClaimToken.create({
     data: {
       tokenHash: claim.tokenHash,
-      email: normalizedEmail,
+      email: hasEmail ? normalizedEmail : null,
       businessProfileId: profile.id,
       expiresAt: new Date(Date.now() + settings.claimLinkDays * 86400000),
     },
   });
   const baseUrl = String(settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
   if (!/^https?:\/\//i.test(baseUrl)) throw new Error("Public base URL is not configured");
-  return { email: normalizedEmail, setupUrl: `${baseUrl}/set-password/?token=${encodeURIComponent(claim.token)}` };
+  return {
+    email: hasEmail ? normalizedEmail : null,
+    emailRequired: !hasEmail,
+    setupUrl: `${baseUrl}/set-password/?token=${encodeURIComponent(claim.token)}`,
+  };
+}
+
+async function extractOnboardingBusinessDetailsFromTranscript({ transcript, sourceText, settings }) {
+  const recentTranscript = String(transcript || "").slice(-12000);
+  const recentSource = String(sourceText || "").slice(-2000);
+  const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY");
+  if (!geminiApiKey) throw new Error("AI provider API key is not configured");
+  const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+  const response = await ai.models.generateContent({
+    model: settings.researchModel,
+    contents: [
+      `Extract the most recently confirmed business details from this AI receptionist onboarding call.
+
+Return strict JSON only:
+{
+  "businessName": "most recently confirmed business name or empty string",
+  "website": "most recently confirmed website URL or empty string",
+  "confidence": "high|medium|low",
+  "reason": "short reason"
+}
+
+Rules:
+- Use the latest corrected business, not an earlier mistake.
+- Prefer details the agent repeated back for confirmation.
+- If the caller corrected the name or website, use the correction.
+- Normalize websites as a usable domain or URL, but do not invent a website.
+- Use confidence "low" if the business name is missing or unclear.
+
+Latest agent text that triggered the guard:
+${recentSource}
+
+Transcript:
+${recentTranscript}`,
+    ],
+    config: { temperature: 0 },
+  });
+  let data = {};
+  try {
+    data = JSON.parse(stripJsonFence(response.text || ""));
+  } catch (error) {
+    throw new Error(`Could not parse onboarding business details: ${error.message}`);
+  }
+  const businessName = normalizeBusinessName(data.businessName || "");
+  const website = normalizeWebsite(data.website || "");
+  const confidence = String(data.confidence || "low").toLowerCase();
+  if (!businessName || confidence === "low") {
+    throw new Error(data.reason || "Business details are not confirmed yet");
+  }
+  return {
+    businessName,
+    website,
+    confidence,
+    reason: String(data.reason || "").slice(0, 500),
+  };
+}
+
+function cleanWebsiteCandidate(value) {
+  const raw = String(value || "")
+    .trim()
+    .replace(/[)"'“”‘’\],.;:!?]+$/g, "")
+    .replace(/^[("'“”‘’\[]+/g, "");
+  if (!raw || !/[a-z0-9-]+\.[a-z]{2,}/i.test(raw)) return "";
+  return normalizeWebsite(raw) || "";
+}
+
+function latestWebsiteCandidate(text) {
+  const input = String(text || "");
+  const matches = input.match(
+    /\b(?:https?:\/\/)?(?:www\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:\/[^\s"'<>]*)?/gi,
+  );
+  if (!matches?.length) return "";
+  for (let index = matches.length - 1; index >= 0; index -= 1) {
+    const website = cleanWebsiteCandidate(matches[index]);
+    if (website) return website;
+  }
+  return "";
+}
+
+function cleanBusinessNameCandidate(value) {
+  const text = String(value || "")
+    .replace(/\b(?:please\s+confirm|confirm|i('|’)ll\s+text\s+you\s+to\s+confirm|i\s+will\s+text\s+you\s+to\s+confirm)[^:]*:?\s*/i, "")
+    .replace(/\b(?:business|company)(?:\s+name)?\s*[:\-]?\s*/i, "")
+    .replace(/\b(?:website|web\s*site|site)\b.*$/i, "")
+    .replace(/\b(?:is|it's|its|called|named|as)\b\s*/i, "")
+    .replace(/\s+\band\s+(?:the\s+)?$/i, "")
+    .replace(/^[\s:"'“”‘’.,;-]+|[\s:"'“”‘’.,;-]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text || text.length < 2 || text.length > 90) return "";
+  if (/[a-z0-9-]+\.[a-z]{2,}/i.test(text)) return "";
+  if (/^(yes|yeah|yep|correct|no|nope|thanks|thank you|reply yes|text yes)$/i.test(text)) return "";
+  return normalizeBusinessName(text);
+}
+
+function businessNameNearWebsite(text, website) {
+  const input = String(text || "");
+  const rawWebsite = String(website || "").replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+  const escapedWebsite = rawWebsite.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const patterns = [
+    /\bbusiness(?:\s+name)?\s*[:\-]?\s*([^\n,.;]+?)(?=\s+(?:and\s+(?:the\s+)?)?(?:website|web\s*site|site)\b|[,.;\n]|$)/i,
+    /\bcompany(?:\s+name)?\s*[:\-]?\s*([^\n,.;]+?)(?=\s+(?:and\s+(?:the\s+)?)?(?:website|web\s*site|site)\b|[,.;\n]|$)/i,
+    /\b(?:business|company)(?:\s+name)?\s+(?:is|as|called|named)\s+([^\n,.;]+?)(?=\s+(?:and\s+(?:the\s+)?)?(?:website|web\s*site|site)\b|[,.;\n]|$)/i,
+  ];
+  if (escapedWebsite) {
+    patterns.push(new RegExp(`([^\\n.;]{2,90}?)(?:,|\\s+and\\s+|\\s+with\\s+)?(?:the\\s+)?(?:website|web\\s*site|site)?\\s*(?:is|as|:)??\\s*(?:https?:\\/\\/)?(?:www\\.)?${escapedWebsite}`, "i"));
+  }
+  for (const pattern of patterns) {
+    const candidate = cleanBusinessNameCandidate(input.match(pattern)?.[1]);
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
+function extractOnboardingBusinessDetailsFast({ transcript, sourceText }) {
+  const source = String(sourceText || "");
+  const fullText = `${source}\n${String(transcript || "").slice(-5000)}`;
+  const website = latestWebsiteCandidate(source) || latestWebsiteCandidate(fullText);
+  if (!website) return null;
+  const sourceName = businessNameNearWebsite(source, website);
+  if (sourceName) return { businessName: sourceName, website, confidence: "fast", reason: "Extracted from latest agent confirmation text." };
+  const transcriptName = businessNameNearWebsite(fullText, website);
+  if (transcriptName) return { businessName: transcriptName, website, confidence: "fast", reason: "Extracted from recent onboarding transcript." };
+  const callerLines = String(transcript || "")
+    .split(/\n+/)
+    .map((line) => line.match(/^\[Caller\]\s*(.+)$/)?.[1])
+    .filter(Boolean);
+  for (let index = callerLines.length - 1; index >= 0; index -= 1) {
+    const line = callerLines[index];
+    if (latestWebsiteCandidate(line)) continue;
+    const candidate = cleanBusinessNameCandidate(line);
+    if (candidate && !/^(yes|yeah|yep|yup|correct|confirmed|confirm|exactly|looks good|go ahead)$/i.test(candidate)) {
+      return { businessName: candidate, website, confidence: "fast", reason: "Extracted from latest caller business-name response." };
+    }
+  }
+  return null;
 }
 
 function liveModelPath(model) {
@@ -2281,6 +2914,16 @@ function sessionIdentity(agentName, language) {
   const safeAgentName = String(agentName || "Alex").trim().slice(0, 80) || "Alex";
   const safeLanguage = String(language || "English").trim().slice(0, 80) || "English";
   return { agentName: safeAgentName, language: safeLanguage };
+}
+
+function platformBusinessRulesPrompt(settings) {
+  const rules = String(settings?.platformBusinessRules || DEFAULT_PLATFORM_BUSINESS_RULES).trim();
+  return `
+Platform-wide business agent rules:
+${rules || "none"}
+
+These platform-wide rules apply to every business agent and override per-business instructions when they are stricter.
+`.trim();
 }
 
 const businessConfigInclude = {
@@ -2390,7 +3033,15 @@ Business-managed receptionist configuration:
       : "disabled"
   }
 
-Use get_available_slots before offering or scheduling a time. Collect every required appointment field before calling schedule_appointment. After schedule_appointment succeeds, call verify_appointment with its confirmationCode before telling the caller the outcome. Only call it booked when verification returns verified=true and status="confirmed". For status="requested", say it is pending confirmation. If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint. Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
+${toolWaitNoticeInstruction()}
+Phone-speed rules:
+- Keep every spoken phone reply short: one sentence by default, two only when necessary, and under about 8 seconds of speech.
+- If the caller asks for availability and gives a day or time, call get_available_slots immediately. Do not ask for name, phone, email, or appointment reason before checking availability.
+- After get_available_slots returns, offer only the best matching slot or at most two options. Do not read a long list.
+- If the caller asks to book and has given a time, collect only missing required intake fields, then call schedule_appointment.
+- Do not repeat the same confirmation question after the caller already answered it.
+
+Use get_available_slots before offering or scheduling a time. Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status="confirmed". For status="requested", say it is pending confirmation. If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint. Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
 
 function cellText(value) {
@@ -2589,28 +3240,37 @@ function onboardingToolDeclarations() {
   return [
     {
       name: "build_business_agent",
-      description: "Research the confirmed business and build its trial receptionist. Use after confirming business name and website.",
+      description:
+        "Mandatory only after send_onboarding_confirmation_text has been sent and the caller confirmed YES by phone or text. Builds the real trial receptionist and sends the setup link automatically.",
       parameters: {
         type: "OBJECT",
         properties: {
           businessName: { type: "STRING" },
           website: { type: "STRING" },
         },
-        required: ["businessName"],
+        required: ["businessName", "website"],
       },
     },
     {
-      name: "switch_to_business_agent",
-      description: "Switch the current phone conversation into the newly built business receptionist for a live test.",
-      parameters: { type: "OBJECT", properties: {} },
+      name: "send_onboarding_confirmation_text",
+      description:
+        "Required before building: text the caller the business name and website you heard so they can reply YES or send corrected details while still on the onboarding call.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          businessName: { type: "STRING" },
+          website: { type: "STRING" },
+        },
+        required: ["businessName", "website"],
+      },
     },
     {
       name: "send_setup_link",
-      description: "Send the secure account setup link by the configured text provider after collecting and confirming the email.",
+      description:
+        "Retry sending the secure account setup link to the caller's phone if the automatic link send after build failed or the caller asks for it again.",
       parameters: {
         type: "OBJECT",
-        properties: { email: { type: "STRING" } },
-        required: ["email"],
+        properties: { email: { type: "STRING", description: "Optional confirmed business owner email." } },
       },
     },
     {
@@ -2673,7 +3333,7 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       ok: true,
       timezone: availability.timezone,
       durationMinutes: availability.durationMinutes,
-      slots: availability.slots.slice(0, 20),
+      slots: availability.slots.slice(0, context.channel === "phone" ? 6 : 20),
     };
   }
 
@@ -3012,9 +3672,26 @@ async function handleToolCall(geminiWs, clientWs, profile, config, toolCall) {
   const functionResponses = [];
   let shouldEndCall = false;
   let endReason = "Call ended.";
+  const runBrowserToolWithWaitNotice = async (functionCall, task) => {
+    const waitText = toolWaitNotice(functionCall.name);
+    let done = false;
+    let noticeTimer = null;
+    if (waitText && clientWs.readyState === WebSocket.OPEN) {
+      noticeTimer = setTimeout(() => {
+        if (done || clientWs.readyState !== WebSocket.OPEN) return;
+        clientWs.send(JSON.stringify({ type: "tool_wait_notice", tool: functionCall.name, message: waitText }));
+      }, TOOL_WAIT_NOTICE_DELAY_MS);
+    }
+    try {
+      return await task();
+    } finally {
+      done = true;
+      if (noticeTimer) clearTimeout(noticeTimer);
+    }
+  };
   for (const functionCall of toolCall.functionCalls || []) {
     try {
-      const result = await runToolCall(profile, config, functionCall);
+      const result = await runBrowserToolWithWaitNotice(functionCall, () => runToolCall(profile, config, functionCall));
       if (result.shouldEndCall) {
         shouldEndCall = true;
         endReason = result.reason || endReason;
@@ -3144,6 +3821,62 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
   });
 });
 
+app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
+  try {
+    const session = await fastAgentSession(req.body.accessToken);
+    if (!session) return res.status(401).json({ error: "This demo session is invalid or expired" });
+    if (session.businessProfile.accountStatus !== "trial") throw new Error("This demo profile can no longer be edited here");
+    if (await prisma.user.findFirst({ where: { businessProfileId: session.businessProfileId } })) {
+      throw new Error("This business has already been claimed");
+    }
+
+    const existingRaw =
+      session.businessProfile.rawData &&
+      typeof session.businessProfile.rawData === "object" &&
+      !Array.isArray(session.businessProfile.rawData)
+        ? session.businessProfile.rawData
+        : {};
+    const textOrUnknown = (value) => String(value || "").trim() || "unknown";
+    const summary = textOrUnknown(req.body.summary);
+    const hours = textOrUnknown(req.body.hours);
+    const services = textOrUnknown(req.body.services);
+    const serviceArea = textOrUnknown(req.body.serviceArea);
+    const phone = textOrUnknown(req.body.phone);
+    const address = textOrUnknown(req.body.address);
+    const rawData = {
+      ...existingRaw,
+      businessName: session.businessProfile.businessName,
+      website: session.businessProfile.website,
+      summary,
+      hours,
+      services,
+      serviceArea,
+      phone,
+      address,
+    };
+    const values = {
+      businessName: session.businessProfile.businessName,
+      website: session.businessProfile.website,
+      summary,
+      hours,
+      services,
+      serviceArea,
+      contact: [phone, existingRaw.email, address].filter((value) => value && value !== "unknown").join(" | "),
+      rawData,
+    };
+    const updated = await prisma.businessProfile.update({
+      where: { id: session.businessProfileId },
+      data: {
+        ...values,
+        systemPrompt: buildSystemPrompt(values),
+      },
+    });
+    res.json({ profile: publicBusinessProfile(updated) });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post("/api/onboarding/demo-callers", async (req, res) => {
   try {
     const session = await fastAgentSession(req.body.accessToken);
@@ -3218,7 +3951,12 @@ app.get("/api/onboarding/claim", async (req, res) => {
   if (!claim || claim.usedAt || claim.expiresAt <= new Date()) {
     return res.status(404).json({ error: "This setup link is invalid or expired" });
   }
-  res.json({ email: claim.email, businessName: claim.businessProfile.businessName, expiresAt: claim.expiresAt });
+  res.json({
+    email: claim.email || "",
+    emailRequired: !claim.email,
+    businessName: claim.businessProfile.businessName,
+    expiresAt: claim.expiresAt,
+  });
 });
 
 app.post("/api/onboarding/complete", async (req, res) => {
@@ -3230,14 +3968,16 @@ app.post("/api/onboarding/complete", async (req, res) => {
       include: { businessProfile: true },
     });
     if (!claim || claim.usedAt || claim.expiresAt <= new Date()) throw new Error("This setup link is invalid or expired");
-    if (await prisma.user.findUnique({ where: { email: claim.email } })) throw new Error("That email already belongs to an account");
+    const email = String(claim.email || req.body.email || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Enter a valid email address");
+    if (await prisma.user.findUnique({ where: { email } })) throw new Error("That email already belongs to an account");
     if (await prisma.user.findFirst({ where: { businessProfileId: claim.businessProfileId } })) {
       throw new Error("This business has already been claimed");
     }
     const user = await prisma.$transaction(async (tx) => {
       const created = await tx.user.create({
         data: {
-          email: claim.email,
+          email,
           passwordHash: passwordHash(password),
           name: String(req.body.name || claim.businessProfile.businessName).trim(),
           role: "business",
@@ -3245,7 +3985,7 @@ app.post("/api/onboarding/complete", async (req, res) => {
         },
         include: { businessProfile: true },
       });
-      await tx.accountClaimToken.update({ where: { id: claim.id }, data: { usedAt: new Date() } });
+      await tx.accountClaimToken.update({ where: { id: claim.id }, data: { email, usedAt: new Date() } });
       return created;
     });
     const session = issueToken();
@@ -3600,11 +4340,37 @@ app.post("/webhooks/stripe", async (req, res) => {
   }
 });
 
+async function handleBlueBubblesWebhook(req, res) {
+  try {
+    if (!(await verifyBlueBubblesWebhook(req))) {
+      return res.status(401).json({ ok: false, error: "Invalid BlueBubbles webhook password" });
+    }
+    const inbound = await persistBlueBubblesInboundMessage(req.body || {});
+    const route = await routeBlueBubblesInboundMessage(inbound);
+    res.json({
+      ok: true,
+      inboundMessageId: inbound.id,
+      status: route?.routed ? "routed" : inbound.status,
+      route,
+    });
+  } catch (error) {
+    console.error("[bluebubbles] webhook error", error.message);
+    res.status(400).json({ ok: false, error: error.message });
+  }
+}
+
+app.post("/webhooks/bluebubbles", handleBlueBubblesWebhook);
+app.post("/bluebubbles-webhook", handleBlueBubblesWebhook);
+
 app.use("/api/business-admin", requireAuth);
 app.use("/api/demo-data", requireAuth);
 
 app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
-  const [settings, secrets] = await Promise.all([getSettings(), prisma.systemSecret.findMany()]);
+  const [settings, secrets, blueBubblesPassword] = await Promise.all([
+    getSettings(),
+    prisma.systemSecret.findMany(),
+    systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD").catch(() => ""),
+  ]);
   const stored = new Map(secrets.map((secret) => [secret.secretKey, secret]));
   const secretState = (key, envKey) => ({
     configured: stored.has(key) || Boolean(process.env[envKey]),
@@ -3626,7 +4392,122 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
       stripeWebhookSecret: secretState("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
     },
     publicBaseUrl: settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "",
+    webhooks: {
+      blueBubblesReplies: blueBubblesWebhookUrl(configuredPublicBaseUrl(settings), blueBubblesPassword),
+    },
   });
+});
+
+app.post("/api/admin/email/test-connection", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const config = await smtpDiagnosticConfig(req.body || {});
+    await config.transporter.verify();
+    res.json({
+      ok: true,
+      message: "SMTP connection verified.",
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      authenticated: config.authenticated,
+    });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.post("/api/admin/email/send-test", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const config = await smtpDiagnosticConfig(req.body || {});
+    const toEmail = String(req.body?.toEmail || config.fromEmail).trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail)) throw new Error("A valid test recipient email is required");
+    const sentAt = new Date();
+    const result = await config.transporter.sendMail({
+      from: { name: config.fromName, address: config.fromEmail },
+      to: toEmail,
+      subject: "Receptionist email test",
+      text: `This is a test email from Receptionist admin.\n\nSent at ${sentAt.toISOString()}.`,
+      html: `<p>This is a test email from Receptionist admin.</p><p>Sent at ${sentAt.toISOString()}.</p>`,
+    });
+    res.json({
+      ok: true,
+      message: "Test email sent.",
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      authenticated: config.authenticated,
+      toEmail,
+      messageId: result.messageId || null,
+      accepted: result.accepted || [],
+      rejected: result.rejected || [],
+    });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.post("/api/admin/bluebubbles/send-test", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const settings = await getSettings();
+    const diagnosticSettings = {
+      ...settings,
+      blueBubblesBaseUrl:
+        typeof req.body?.blueBubblesBaseUrl === "string"
+          ? req.body.blueBubblesBaseUrl.trim().replace(/\/$/, "")
+          : settings.blueBubblesBaseUrl,
+      blueBubblesSendPath:
+        typeof req.body?.blueBubblesSendPath === "string" && req.body.blueBubblesSendPath.trim()
+          ? req.body.blueBubblesSendPath.trim()
+          : settings.blueBubblesSendPath,
+    };
+    const toPhone = normalizeE164Phone(req.body?.toPhone);
+    if (!/^\+[1-9]\d{7,14}$/.test(toPhone)) throw new Error("A valid E.164 test phone is required");
+    const message = String(req.body?.message || "Test message from Receptionist admin.").trim();
+    if (!message) throw new Error("Test message is required");
+    const result = await sendBlueBubblesMessage({
+      settings: diagnosticSettings,
+      toPhone,
+      message,
+      passwordOverride: req.body?.blueBubblesPassword,
+    });
+    res.json({
+      ok: true,
+      message: "BlueBubbles test message sent.",
+      toPhone,
+      providerMessageId: result.providerMessageId || null,
+      blueBubblesAttempt: result.detail?.blueBubblesAttempt || null,
+      httpStatus: result.detail?.httpStatus || null,
+    });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
+app.get("/api/admin/bluebubbles/replies", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit || 10)));
+    const replies = await prisma.messageInbound.findMany({
+      where: { provider: "bluebubbles", status: { not: "ignored" } },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+      select: {
+        id: true,
+        eventType: true,
+        fromPhone: true,
+        toPhone: true,
+        chatGuid: true,
+        providerMessageId: true,
+        text: true,
+        status: true,
+        purpose: true,
+        createdAt: true,
+        businessProfile: { select: { id: true, businessName: true } },
+        voiceCall: { select: { id: true, callMode: true, status: true, startedAt: true } },
+      },
+    });
+    res.json({ replies });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
@@ -3640,6 +4521,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         voiceName: req.body.voiceName || "Puck",
         language: req.body.language || "English",
         agentName: req.body.agentName || "Alex",
+        platformBusinessRules: String(req.body.platformBusinessRules || DEFAULT_PLATFORM_BUSINESS_RULES).trim() || DEFAULT_PLATFORM_BUSINESS_RULES,
         publicBaseUrl: String(req.body.publicBaseUrl || "").trim().replace(/\/$/, ""),
         trialDays: Math.max(1, Number(req.body.trialDays || 7)),
         claimLinkDays: Math.max(1, Number(req.body.claimLinkDays || 30)),
@@ -3651,8 +4533,6 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         outboundCallCredits: Math.max(0, Number(req.body.outboundCallCredits || 20)),
         messageCredits: Math.max(0, Number(req.body.messageCredits || 5)),
         stripeCreditPackCredits: Math.max(1, Number(req.body.stripeCreditPackCredits || 1000)),
-        stripeSubscriptionCredits: Math.max(0, Number(req.body.stripeSubscriptionCredits || 5000)),
-        stripeSubscriptionPriceId: String(req.body.stripeSubscriptionPriceId || "").trim(),
         recordingRetentionDays: Math.max(1, Number(req.body.recordingRetentionDays || 30)),
         demoNumberCapacity: Math.max(1, Number(req.body.demoNumberCapacity || 10)),
         demoCallerLimit: Math.max(1, Number(req.body.demoCallerLimit || 3)),
@@ -3663,7 +4543,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         smtpFromName: String(req.body.smtpFromName || "AI Receptionist").trim(),
         onboardingLookupUrl: String(req.body.onboardingLookupUrl || "").trim(),
         onboardingVoiceName: String(req.body.onboardingVoiceName || "Puck").trim() || "Puck",
-        onboardingInstructions: String(req.body.onboardingInstructions || "").trim(),
+        onboardingInstructions: String(req.body.onboardingInstructions || DEFAULT_ONBOARDING_INSTRUCTIONS).trim(),
         onboardingRecordCalls: Boolean(req.body.onboardingRecordCalls),
         onboardingTranscription: req.body.onboardingTranscription !== false,
         messagePrimaryProvider: String(req.body.messagePrimaryProvider || "bluebubbles"),
@@ -3677,6 +4557,10 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
       update: {
         researchModel: req.body.researchModel || undefined,
         liveModel: req.body.liveModel ? liveModelPath(req.body.liveModel) : undefined,
+        platformBusinessRules:
+          typeof req.body.platformBusinessRules === "string"
+            ? req.body.platformBusinessRules.trim() || DEFAULT_PLATFORM_BUSINESS_RULES
+            : undefined,
         publicBaseUrl: typeof req.body.publicBaseUrl === "string" ? req.body.publicBaseUrl.trim().replace(/\/$/, "") : undefined,
         trialDays: req.body.trialDays === undefined ? undefined : Math.max(1, Number(req.body.trialDays)),
         claimLinkDays: req.body.claimLinkDays === undefined ? undefined : Math.max(1, Number(req.body.claimLinkDays)),
@@ -3692,10 +4576,6 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         messageCredits: req.body.messageCredits === undefined ? undefined : Math.max(0, Number(req.body.messageCredits)),
         stripeCreditPackCredits:
           req.body.stripeCreditPackCredits === undefined ? undefined : Math.max(1, Number(req.body.stripeCreditPackCredits)),
-        stripeSubscriptionCredits:
-          req.body.stripeSubscriptionCredits === undefined ? undefined : Math.max(0, Number(req.body.stripeSubscriptionCredits)),
-        stripeSubscriptionPriceId:
-          typeof req.body.stripeSubscriptionPriceId === "string" ? req.body.stripeSubscriptionPriceId.trim() : undefined,
         recordingRetentionDays:
           req.body.recordingRetentionDays === undefined ? undefined : Math.max(1, Number(req.body.recordingRetentionDays)),
         demoNumberCapacity:
@@ -3711,7 +4591,9 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         onboardingVoiceName:
           typeof req.body.onboardingVoiceName === "string" ? req.body.onboardingVoiceName.trim() || "Puck" : undefined,
         onboardingInstructions:
-          typeof req.body.onboardingInstructions === "string" ? req.body.onboardingInstructions.trim() : undefined,
+          typeof req.body.onboardingInstructions === "string"
+            ? req.body.onboardingInstructions.trim() || DEFAULT_ONBOARDING_INSTRUCTIONS
+            : undefined,
         onboardingRecordCalls:
           typeof req.body.onboardingRecordCalls === "boolean" ? req.body.onboardingRecordCalls : undefined,
         onboardingTranscription:
@@ -3743,6 +4625,69 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
       saveSystemSecret("stripe_webhook_secret", req.body.stripeWebhookSecret),
     ]);
     res.json({ ok: true, settings });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/subscription-plans", requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const plans = await prisma.subscriptionPlan.findMany({
+      include: { _count: { select: { businessProfiles: true } } },
+      orderBy: [{ sortOrder: "asc" }, { monthlyPriceCents: "asc" }, { name: "asc" }],
+    });
+    res.json({ plans: plans.map(adminSubscriptionPlan) });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/subscription-plans", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const data = planInputData(req.body);
+    const plan = await prisma.subscriptionPlan.create({
+      data,
+      include: { _count: { select: { businessProfiles: true } } },
+    });
+    res.status(201).json({ plan: adminSubscriptionPlan(plan) });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.put("/api/admin/subscription-plans/:id", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const existing = await prisma.subscriptionPlan.findUnique({ where: { id: Number(req.params.id) } });
+    if (!existing) throw new Error("Subscription plan was not found");
+    const data = planInputData(req.body, existing);
+    const plan = await prisma.subscriptionPlan.update({
+      where: { id: existing.id },
+      data,
+      include: { _count: { select: { businessProfiles: true } } },
+    });
+    res.json({ plan: adminSubscriptionPlan(plan) });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete("/api/admin/subscription-plans/:id", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const existing = await prisma.subscriptionPlan.findUnique({
+      where: { id: Number(req.params.id) },
+      include: { _count: { select: { businessProfiles: true } } },
+    });
+    if (!existing) throw new Error("Subscription plan was not found");
+    if (existing._count.businessProfiles > 0) {
+      const plan = await prisma.subscriptionPlan.update({
+        where: { id: existing.id },
+        data: { active: false },
+        include: { _count: { select: { businessProfiles: true } } },
+      });
+      return res.json({ plan: adminSubscriptionPlan(plan), deactivated: true });
+    }
+    await prisma.subscriptionPlan.delete({ where: { id: existing.id } });
+    res.json({ ok: true, deleted: true });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -3890,6 +4835,7 @@ app.get("/api/admin/businesses", requireAuth, requireAdmin, async (_req, res) =>
     include: {
       users: { select: { id: true, email: true, name: true, active: true } },
       voiceNumbers: { select: { id: true, phoneNumber: true, status: true } },
+      subscriptionPlan: true,
       config: {
         select: {
           id: true,
@@ -3918,65 +4864,6 @@ app.get("/api/admin/calls", requireAuth, requireAdmin, async (_req, res) => {
     take: 50,
   });
   res.json({ calls });
-});
-
-app.post("/api/admin/calls/:id/diagnostics/speak", requireAuth, requireAdmin, async (req, res) => {
-  const call = await prisma.voiceCall.findUnique({ where: { id: Number(req.params.id) } });
-  if (!call) return res.status(404).json({ error: "Call not found" });
-  if (!call.callControlId) return res.status(400).json({ error: "Call has no Telnyx call control ID" });
-  if (call.status === "ended" || call.endedAt) return res.status(400).json({ error: "Call has already ended. Start a live call, refresh logs, then run the test." });
-
-  const payload = String(req.body.payload || "Telnyx diagnostic test. If you can hear this sentence clearly, Telnyx native audio is working on this phone call.").slice(0, 3000);
-  const rawVoice = String(req.body.voice || "female").trim() || "female";
-  const basicVoice = ["male", "female"].includes(rawVoice.toLowerCase());
-  const voice = basicVoice ? rawVoice.toLowerCase() : rawVoice;
-  const targetLegs = ["self", "opposite", "both"].includes(req.body.targetLegs) ? req.body.targetLegs : "self";
-  const stopStreaming = req.body.stopStreaming !== false;
-  const results = [];
-
-  try {
-    if (stopStreaming) {
-      try {
-        await telnyxRequest(`/calls/${encodeURIComponent(call.callControlId)}/actions/streaming_stop`, {
-          method: "POST",
-          body: JSON.stringify({ command_id: crypto.randomUUID() }),
-        });
-        results.push("streaming_stop requested");
-        await logVoiceCallEvent(call.callControlId, "diagnostic.streaming_stop_requested");
-      } catch (error) {
-        results.push(`streaming_stop failed: ${error.message}`);
-        await logVoiceCallEvent(call.callControlId, "diagnostic.streaming_stop_failed", { message: error.message });
-      }
-    }
-
-    const commandId = crypto.randomUUID();
-    const response = await telnyxRequest(`/calls/${encodeURIComponent(call.callControlId)}/actions/speak`, {
-      method: "POST",
-      body: JSON.stringify({
-        command_id: commandId,
-        payload,
-        payload_type: "text",
-        service_level: basicVoice ? "basic" : "premium",
-        voice,
-        language: "en-US",
-        stop: "all",
-        target_legs: targetLegs,
-        client_state: Buffer.from(JSON.stringify({ diagnostic: "telnyx_speak", callId: call.id })).toString("base64"),
-      }),
-    });
-    await logVoiceCallEvent(call.callControlId, "diagnostic.speak_requested", {
-      commandId,
-      voice,
-      targetLegs,
-      serviceLevel: basicVoice ? "basic" : "premium",
-      stoppedStreaming: stopStreaming,
-      payload,
-    });
-    res.json({ ok: true, results, response });
-  } catch (error) {
-    await logVoiceCallEvent(call.callControlId, "diagnostic.speak_failed", { message: error.message });
-    res.status(500).json({ error: error.message, results });
-  }
 });
 
 app.get("/api/admin/onboarding", requireAuth, requireAdmin, async (_req, res) => {
@@ -4130,8 +5017,6 @@ app.patch("/api/admin/telnyx/numbers/:id", requireAuth, requireAdmin, async (req
 app.get("/api/settings", async (_req, res) => {
   const settings = await getSettings();
   res.json({
-    researchModel: settings.researchModel,
-    liveModel: settings.liveModel,
     voiceName: settings.voiceName,
     language: settings.language,
     agentName: settings.agentName,
@@ -4614,6 +5499,13 @@ function configuredPublicBaseUrl(settings) {
   return String(settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
 }
 
+function blueBubblesWebhookUrl(baseUrl, password) {
+  const cleanBaseUrl = String(baseUrl || "").trim().replace(/\/$/, "");
+  if (!cleanBaseUrl) return "";
+  const token = String(password || "").trim();
+  return `${cleanBaseUrl}/webhooks/bluebubbles${token ? `?password=${encodeURIComponent(token)}` : ""}`;
+}
+
 function publicUrlDiagnostics(baseUrl) {
   const url = String(baseUrl || "").trim().replace(/\/$/, "");
   if (!url) {
@@ -4729,6 +5621,7 @@ async function completeStripeSubscriptionCheckout(session) {
   if (!profileId) return null;
   const customerId = stripeCheckoutCustomer(session);
   const subscriptionId = stripeCheckoutSubscription(session);
+  const subscriptionPlanId = checkout?.subscriptionPlanId || Number(metadata.subscriptionPlanId || 0) || null;
   await prisma.businessProfile.update({
     where: { id: profileId },
     data: {
@@ -4736,12 +5629,14 @@ async function completeStripeSubscriptionCheckout(session) {
       stripeCustomerId: customerId || undefined,
       stripeSubscriptionId: subscriptionId || undefined,
       stripeSubscriptionStatus: subscriptionId ? "active" : undefined,
+      subscriptionPlanId: subscriptionPlanId || undefined,
     },
   });
   return prisma.stripeCheckoutSession.upsert({
     where: { stripeSessionId: session.id },
     create: {
       businessProfileId: profileId,
+      subscriptionPlanId,
       stripeSessionId: session.id,
       mode: session.mode || "subscription",
       status: "completed",
@@ -4760,6 +5655,7 @@ async function completeStripeSubscriptionCheckout(session) {
       currency: session.currency || undefined,
       stripeCustomerId: customerId || undefined,
       stripeSubscriptionId: subscriptionId || undefined,
+      subscriptionPlanId: subscriptionPlanId || undefined,
       metadata: jsonSafe(metadata),
       completedAt: new Date(),
     },
@@ -4795,14 +5691,16 @@ async function processStripeInvoicePaid(invoice) {
   const subscriptionId = stripeId(invoice.subscription);
   const customerId = stripeId(invoice.customer);
   if (!subscriptionId && !customerId) return null;
-  const settings = await getSettings();
   const profile =
     (subscriptionId
-      ? await prisma.businessProfile.findFirst({ where: { stripeSubscriptionId: subscriptionId } })
+      ? await prisma.businessProfile.findFirst({ where: { stripeSubscriptionId: subscriptionId }, include: { subscriptionPlan: true } })
       : null) ||
-    (customerId ? await prisma.businessProfile.findFirst({ where: { stripeCustomerId: customerId } }) : null);
+    (customerId ? await prisma.businessProfile.findFirst({ where: { stripeCustomerId: customerId }, include: { subscriptionPlan: true } }) : null);
   if (!profile) return null;
-  const creditAmount = Math.max(0, Math.round(Number(invoice.metadata?.creditAmount || settings.stripeSubscriptionCredits || 0)));
+  const creditAmount = Math.max(
+    0,
+    Math.round(Number(invoice.metadata?.creditAmount || profile.subscriptionPlan?.monthlyCredits || 0)),
+  );
   if (!creditAmount) return profile;
   const note = `Stripe subscription credits (${invoice.id})`;
   const existing = await prisma.creditTransaction.findFirst({
@@ -4815,12 +5713,14 @@ async function processStripeInvoicePaid(invoice) {
     amount: creditAmount,
     type: "stripe_subscription",
     note,
-    metadata: {
-      stripeInvoiceId: invoice.id,
-      stripeSubscriptionId: subscriptionId,
-      amountPaid: invoice.amount_paid ?? null,
-      currency: invoice.currency || null,
-    },
+      metadata: {
+        stripeInvoiceId: invoice.id,
+        stripeSubscriptionId: subscriptionId,
+        subscriptionPlanId: profile.subscriptionPlanId || null,
+        subscriptionPlanName: profile.subscriptionPlan?.name || null,
+        amountPaid: invoice.amount_paid ?? null,
+        currency: invoice.currency || null,
+      },
   });
   return prisma.businessProfile.update({
     where: { id: profile.id },
@@ -4894,6 +5794,7 @@ async function recentCallIssueSummary(where = {}) {
 
 function webhookReadiness({ profile = null, publicUrl }) {
   const telnyxWebhookUrl = publicUrl.ok ? `${publicUrl.url}/webhooks/telnyx` : null;
+  const blueBubblesWebhookUrl = publicUrl.ok ? `${publicUrl.url}/webhooks/bluebubbles` : null;
   const leadWebhookReady = !profile
     ? null
     : Boolean(profile.leadWebhookEnabled && profile.leadWebhookToken && publicUrl.ok);
@@ -4903,6 +5804,14 @@ function webhookReadiness({ profile = null, publicUrl }) {
       ok: publicUrl.ok,
       url: telnyxWebhookUrl,
       detail: publicUrl.ok ? "Configure this URL in Telnyx webhooks" : publicUrl.detail,
+      },
+    bluebubbles: {
+      status: publicUrl.ok ? "ready" : "blocked",
+      ok: publicUrl.ok,
+      url: blueBubblesWebhookUrl,
+      detail: publicUrl.ok
+        ? "Configure this URL in BlueBubbles and append ?password=<BlueBubbles password>"
+        : publicUrl.detail,
     },
     lead:
       profile && {
@@ -4916,6 +5825,91 @@ function webhookReadiness({ profile = null, publicUrl }) {
             ? "Open the CRM webhook panel to generate/copy the business lead webhook"
             : "Lead webhook is disabled",
       },
+  };
+}
+
+function sellableMvpReadiness({ checks, profile = null, activeNumber = null, settings }) {
+  const items = [
+    {
+      key: "database",
+      label: "Database",
+      ok: Boolean(checks.database?.ok),
+      required: true,
+      detail: checks.database?.detail || (checks.database?.latencyMs !== undefined ? `${checks.database.latencyMs}ms` : ""),
+    },
+    {
+      key: "gemini",
+      label: "Live voice agent",
+      ok: Boolean(checks.gemini?.ok),
+      required: true,
+      detail: checks.gemini?.detail || "",
+    },
+    {
+      key: "telnyx",
+      label: "Telnyx calling",
+      ok: Boolean(checks.telnyx?.ok),
+      required: true,
+      detail: checks.telnyx?.detail || "",
+    },
+    {
+      key: "public_url",
+      label: "Public HTTPS URL",
+      ok: Boolean(checks.publicUrl?.ok),
+      required: true,
+      detail: checks.publicUrl?.detail || "",
+    },
+    {
+      key: "phone_number",
+      label: "Assigned business number",
+      ok: !profile || Boolean(activeNumber),
+      required: Boolean(profile),
+      detail: activeNumber?.phoneNumber || (!profile ? "Platform-level check" : "Assign a Telnyx number"),
+    },
+    {
+      key: "lead_webhook",
+      label: "Lead webhook",
+      ok: !profile || Boolean(checks.webhooks?.lead?.ok),
+      required: Boolean(profile),
+      detail: checks.webhooks?.lead?.detail || "",
+    },
+    {
+      key: "messaging",
+      label: "Messaging provider",
+      ok: Boolean(checks.messaging?.bluebubbles?.ok || checks.messaging?.sentdm?.ok),
+      required: true,
+      detail: checks.messaging?.bluebubbles?.ok
+        ? "BlueBubbles ready"
+        : checks.messaging?.sentdm?.ok
+          ? "Sent.dm ready"
+          : "Configure BlueBubbles or Sent.dm",
+    },
+    {
+      key: "billing",
+      label: "Stripe billing",
+      ok: Boolean(checks.billing?.stripe?.ok && checks.billing?.stripe?.activePlanCount),
+      required: false,
+      detail: checks.billing?.stripe?.ok
+        ? checks.billing?.stripe?.activePlanCount
+          ? "Stripe and plans ready"
+          : "Add at least one active subscription plan"
+        : "Stripe can stay off for private pilots",
+    },
+    {
+      key: "recent_calls",
+      label: "Recent call health",
+      ok: !checks.callIssues?.counts?.flagged,
+      required: false,
+      detail: checks.callIssues ? `flagged ${checks.callIssues.counts.flagged}/${checks.callIssues.counts.total}` : "",
+    },
+  ];
+  const blockers = items.filter((item) => item.required && !item.ok);
+  const warnings = items.filter((item) => !item.required && !item.ok);
+  return {
+    status: blockers.length ? "blocked" : warnings.length ? "pilot_ready" : "ready",
+    ok: blockers.length === 0,
+    blockers: blockers.map((item) => item.label),
+    warnings: warnings.map((item) => item.label),
+    items,
   };
 }
 
@@ -5715,6 +6709,7 @@ app.get("/api/business-admin/crm", async (req, res) => {
         },
         leadWebhookEvents: { orderBy: { createdAt: "desc" }, take: 5 },
         messageDeliveries: { orderBy: { createdAt: "desc" }, take: 5 },
+        inboundMessages: { orderBy: { createdAt: "desc" }, take: 5 },
       },
       orderBy: { updatedAt: "desc" },
       take: Math.min(200, Math.max(1, Number(req.query.limit || 100))),
@@ -6047,17 +7042,30 @@ app.get("/api/business-admin/lead-webhook/events", async (req, res) => {
 app.get("/api/business-admin/messages", async (req, res) => {
   try {
     const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
-    const messages = await prisma.messageDelivery.findMany({
-      where: { businessProfileId: profile.id },
-      include: {
-        lead: { select: { id: true, name: true, phone: true, status: true } },
-        appointment: { select: { id: true, customerName: true, scheduledStart: true, timezone: true, status: true } },
-        customerFeedback: true,
-      },
-      orderBy: { createdAt: "desc" },
-      take: Math.min(100, Math.max(1, Number(req.query.limit || 50))),
-    });
-    res.json({ messages });
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
+    const [messages, inboundMessages] = await Promise.all([
+      prisma.messageDelivery.findMany({
+        where: { businessProfileId: profile.id },
+        include: {
+          lead: { select: { id: true, name: true, phone: true, status: true } },
+          appointment: { select: { id: true, customerName: true, scheduledStart: true, timezone: true, status: true } },
+          customerFeedback: true,
+        },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+      }),
+      prisma.messageInbound.findMany({
+        where: { businessProfileId: profile.id },
+        include: {
+          lead: { select: { id: true, name: true, phone: true, status: true } },
+          appointment: { select: { id: true, customerName: true, scheduledStart: true, timezone: true, status: true } },
+          voiceCall: { select: { id: true, callMode: true, status: true, startedAt: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+      }),
+    ]);
+    res.json({ messages, inboundMessages });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -6190,7 +7198,7 @@ app.get("/api/business-admin/usage", async (req, res) => {
       lowBalance: creditBalance <= settings.lowBalanceTokens,
       rates: {
         telnyxMinuteCredits: settings.voiceMinuteCredits,
-        geminiMinuteCredits: settings.geminiMinuteCredits ?? settings.voiceMinuteCredits,
+        aiMinuteCredits: settings.geminiMinuteCredits ?? settings.voiceMinuteCredits,
         outboundCallCredits: settings.outboundCallCredits,
         messageCredits: settings.messageCredits,
       },
@@ -6215,7 +7223,7 @@ app.get("/api/business-admin/usage", async (req, res) => {
 app.get("/api/business-admin/billing", async (req, res) => {
   try {
     const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
-    const [settings, secretKey, webhookSecret, current, sessions] = await Promise.all([
+    const [settings, secretKey, webhookSecret, current, sessions, plans] = await Promise.all([
       getSettings(),
       systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
       stripeWebhookSecret().then(Boolean),
@@ -6228,17 +7236,22 @@ app.get("/api/business-admin/billing", async (req, res) => {
           stripeSubscriptionId: true,
           stripeSubscriptionStatus: true,
           subscriptionCurrentPeriodEnd: true,
+          subscriptionPlan: true,
         },
       }),
       prisma.stripeCheckoutSession.findMany({
         where: { businessProfileId: profile.id },
+        include: { subscriptionPlan: true },
         orderBy: { createdAt: "desc" },
         take: 20,
       }),
+      activeSubscriptionPlans(),
     ]);
     res.json({
       accountStatus: current?.accountStatus || profile.accountStatus,
       creditBalance: current?.creditBalance ?? profile.creditBalance,
+      currentPlan: publicSubscriptionPlan(current?.subscriptionPlan),
+      availablePlans: plans.map(publicSubscriptionPlan),
       stripe: {
         checkoutConfigured: secretKey,
         webhookConfigured: webhookSecret,
@@ -6251,8 +7264,6 @@ app.get("/api/business-admin/billing", async (req, res) => {
       settings: {
         tokenUsd: settings.tokenUsd,
         stripeCreditPackCredits: settings.stripeCreditPackCredits,
-        stripeSubscriptionCredits: settings.stripeSubscriptionCredits,
-        stripeSubscriptionPriceConfigured: Boolean(settings.stripeSubscriptionPriceId),
       },
       checkoutSessions: sessions,
     });
@@ -6276,6 +7287,17 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
       where: { id: profile.id },
       select: { stripeCustomerId: true },
     });
+    const selectedPlanId = Number(req.body.subscriptionPlanId || req.body.planId || 0);
+    const selectedPlan =
+      checkoutType === "subscription" && selectedPlanId
+        ? await prisma.subscriptionPlan.findFirst({ where: { id: selectedPlanId, active: true } })
+        : null;
+    if (checkoutType === "subscription" && !selectedPlanId) {
+      throw new Error("Choose an active subscription plan before starting checkout");
+    }
+    if (checkoutType === "subscription" && selectedPlanId && !selectedPlan) {
+      throw new Error("Selected subscription plan is not active");
+    }
     const metadata = {
       businessProfileId: String(profile.id),
       checkoutType,
@@ -6310,11 +7332,32 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
         },
       ];
     } else {
-      if (!settings.stripeSubscriptionPriceId) throw new Error("Stripe subscription price ID is not configured");
-      creditAmount = Math.max(0, Math.round(Number(settings.stripeSubscriptionCredits || 0)));
+      creditAmount = Math.max(0, Math.round(Number(selectedPlan.monthlyCredits || 0)));
       metadata.creditAmount = String(creditAmount);
+      metadata.subscriptionPlanId = String(selectedPlan.id);
+      metadata.subscriptionPlanName = selectedPlan.name;
       sessionParams.mode = "subscription";
-      sessionParams.line_items = [{ price: settings.stripeSubscriptionPriceId, quantity: 1 }];
+      if (selectedPlan.stripePriceId) {
+        sessionParams.line_items = [{ price: selectedPlan.stripePriceId, quantity: 1 }];
+      } else {
+        if (selectedPlan.monthlyPriceCents < 50) {
+          throw new Error("Plan price must be at least $0.50 or use a Stripe price ID");
+        }
+        sessionParams.line_items = [
+          {
+            price_data: {
+              currency: "usd",
+              unit_amount: selectedPlan.monthlyPriceCents,
+              recurring: { interval: "month" },
+              product_data: {
+                name: selectedPlan.name,
+                description: selectedPlan.description || `${selectedPlan.monthlyCredits} AI receptionist tokens per month`,
+              },
+            },
+            quantity: 1,
+          },
+        ];
+      }
       sessionParams.subscription_data = { metadata };
     }
 
@@ -6322,6 +7365,7 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
     await prisma.stripeCheckoutSession.create({
       data: {
         businessProfileId: profile.id,
+        subscriptionPlanId: selectedPlan?.id || null,
         stripeSessionId: session.id,
         mode: session.mode || checkoutType,
         status: session.status || "created",
@@ -6355,6 +7399,7 @@ async function businessHealth(profile) {
     stripeWebhook,
     recentCalls,
     callIssues,
+    activePlanCount,
     activeNumber,
   ] = await Promise.all([
     databaseHealth(),
@@ -6382,6 +7427,7 @@ async function businessHealth(profile) {
       },
     }),
     recentCallIssueSummary({ businessProfileId: profile.id }),
+    prisma.subscriptionPlan.count({ where: { active: true } }),
     prisma.voiceNumber.findFirst({ where: { businessProfileId: profile.id, status: "active" }, select: { phoneNumber: true } }),
   ]);
   const telnyxConfigured = telnyxKey && telnyxPublicKey && connectionId;
@@ -6390,7 +7436,7 @@ async function businessHealth(profile) {
   const stripeConfigured = Boolean(stripeKey && stripeWebhook);
   const checks = {
     database: db,
-    gemini: componentStatus(geminiKey, geminiKey ? "Gemini API key is configured" : "Gemini API key is missing"),
+    gemini: componentStatus(geminiKey, geminiKey ? "AI provider API key is configured" : "AI provider API key is missing"),
     telnyx: {
       ...componentStatus(telnyxConfigured, telnyxConfigured ? "Telnyx API key, public key, and connection ID are configured" : "Telnyx configuration is incomplete"),
       missing: [
@@ -6413,13 +7459,20 @@ async function businessHealth(profile) {
     },
     billing: {
       stripe: {
-        ...componentStatus(stripeConfigured, stripeConfigured ? "Stripe secret key and webhook secret are configured" : "Stripe key or webhook secret is missing"),
+        ...componentStatus(
+          stripeConfigured && activePlanCount > 0,
+          stripeConfigured && activePlanCount > 0
+            ? "Stripe keys, webhook, and active plans are configured"
+            : stripeConfigured
+              ? "Stripe is configured, but no active subscription plan exists"
+              : "Stripe key or webhook secret is missing",
+        ),
         missing: [
           !stripeKey ? "STRIPE_SECRET_KEY" : null,
           !stripeWebhook ? "STRIPE_WEBHOOK_SECRET" : null,
-          !settings.stripeSubscriptionPriceId ? "subscription price ID" : null,
+          activePlanCount <= 0 ? "active subscription plan" : null,
         ].filter(Boolean),
-        subscriptionPriceConfigured: Boolean(settings.stripeSubscriptionPriceId),
+        activePlanCount,
       },
     },
     phoneNumber: {
@@ -6430,6 +7483,7 @@ async function businessHealth(profile) {
     },
     callIssues,
   };
+  checks.sellableMvp = sellableMvpReadiness({ checks, profile, activeNumber, settings });
   return {
     db: db.status,
     gemini: geminiKey ? "configured" : "missing",
@@ -6439,15 +7493,16 @@ async function businessHealth(profile) {
       bluebubbles: blueBubblesConfigured ? "configured" : "missing",
       sentdm: sentDmConfigured ? "configured" : "missing",
     },
-    billing: {
-      stripe: stripeConfigured ? "configured" : "missing",
-    },
+      billing: {
+        stripe: stripeConfigured ? "configured" : "missing",
+      },
+    sellableMvp: checks.sellableMvp,
     checks,
     recentCalls,
   };
 }
 
-app.get("/api/business-admin/health", async (req, res) => {
+app.get("/api/business-admin/health", requireAdmin, async (req, res) => {
   try {
     const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
     res.json(await businessHealth(profile));
@@ -6460,7 +7515,20 @@ app.get("/api/admin/health", requireAuth, requireAdmin, async (_req, res) => {
   try {
     const settings = await getSettings();
     const publicUrl = publicUrlDiagnostics(configuredPublicBaseUrl(settings));
-    const [db, geminiKey, telnyxKey, telnyxPublicKey, connectionId, blueBubblesPassword, sentDmKey, stripeKey, stripeWebhook, callIssues, profileCounts] =
+    const [
+      db,
+      geminiKey,
+      telnyxKey,
+      telnyxPublicKey,
+      connectionId,
+      blueBubblesPassword,
+      sentDmKey,
+      stripeKey,
+      stripeWebhook,
+      activePlanCount,
+      callIssues,
+      profileCounts,
+    ] =
       await Promise.all([
         databaseHealth(),
         systemSecret("gemini_api_key", "GEMINI_API_KEY").then(Boolean),
@@ -6471,6 +7539,7 @@ app.get("/api/admin/health", requireAuth, requireAdmin, async (_req, res) => {
         systemSecret("sentdm_api_key", "SENTDM_API_KEY").then(Boolean),
         systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
         stripeWebhookSecret().then(Boolean),
+        prisma.subscriptionPlan.count({ where: { active: true } }),
         recentCallIssueSummary(),
         prisma.businessProfile.groupBy({ by: ["accountStatus"], _count: { _all: true } }).catch(() => []),
       ]);
@@ -6480,7 +7549,7 @@ app.get("/api/admin/health", requireAuth, requireAdmin, async (_req, res) => {
     const stripeConfigured = Boolean(stripeKey && stripeWebhook);
     const checks = {
       database: db,
-      gemini: componentStatus(geminiKey, geminiKey ? "Gemini API key is configured" : "Gemini API key is missing"),
+      gemini: componentStatus(geminiKey, geminiKey ? "AI provider API key is configured" : "AI provider API key is missing"),
       telnyx: componentStatus(telnyxConfigured, telnyxConfigured ? "Telnyx credentials are configured" : "Telnyx credentials are incomplete"),
       publicUrl,
       webhooks: webhookReadiness({ publicUrl }),
@@ -6490,18 +7559,26 @@ app.get("/api/admin/health", requireAuth, requireAdmin, async (_req, res) => {
       },
       billing: {
         stripe: {
-          ...componentStatus(stripeConfigured, stripeConfigured ? "Stripe is configured" : "Stripe secret key or webhook secret is missing"),
+          ...componentStatus(
+            stripeConfigured && activePlanCount > 0,
+            stripeConfigured && activePlanCount > 0
+              ? "Stripe keys, webhook, and active plans are configured"
+              : stripeConfigured
+                ? "Stripe is configured, but no active subscription plan exists"
+                : "Stripe secret key or webhook secret is missing",
+          ),
           missing: [
             !stripeKey ? "STRIPE_SECRET_KEY" : null,
             !stripeWebhook ? "STRIPE_WEBHOOK_SECRET" : null,
-            !settings.stripeSubscriptionPriceId ? "subscription price ID" : null,
+            activePlanCount <= 0 ? "active subscription plan" : null,
           ].filter(Boolean),
-          subscriptionPriceConfigured: Boolean(settings.stripeSubscriptionPriceId),
+          activePlanCount,
         },
       },
       callIssues,
       businessProfiles: Object.fromEntries(profileCounts.map((row) => [row.accountStatus, row._count._all])),
     };
+    checks.sellableMvp = sellableMvpReadiness({ checks, settings });
     res.json({
       db: db.status,
       publicBaseUrl: publicUrl.url,
@@ -6514,6 +7591,7 @@ app.get("/api/admin/health", requireAuth, requireAdmin, async (_req, res) => {
       billingProviders: {
         stripe: stripeConfigured,
       },
+      sellableMvp: checks.sellableMvp,
       checks,
     });
   } catch (error) {
@@ -6605,11 +7683,10 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   const qualificationAttempt = call.outboundQualificationCall;
   const qualificationLead = qualificationAttempt?.lead || null;
   const settings = await getSettings();
-  const useTelnyxSpeakOutput = TELNYX_PHONE_OUTPUT_MODE === "telnyx_speak" && call.status !== "test";
   await logVoiceCallEvent(callControlId, "media.connected", {
     businessProfileId: profile?.id || null,
     callMode: isOnboarding ? "onboarding" : isQualification ? "qualification" : "business",
-    phoneOutputMode: useTelnyxSpeakOutput ? "telnyx_speak" : "media_stream",
+    phoneOutputMode: "media_stream",
     l16Endian: TELNYX_L16_ENDIAN,
     leadId: qualificationLead?.id || null,
     qualificationAttemptId: qualificationAttempt?.id || null,
@@ -6634,9 +7711,16 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   let pendingOnboardingPreparation = null;
   const outboundAudioQueue = [];
   let outboundAudioTimer = null;
-  let telnyxSpeakTimer = null;
-  let pendingTelnyxSpeakText = "";
-  let agentTextChunks = 0;
+  let onboardingAgentTurnText = "";
+  let onboardingAutoConfirmationPromise = null;
+  let onboardingAutoConfirmationLastAttemptAt = 0;
+  let onboardingAutoBuildPromise = null;
+  let onboardingAutoBuildLastAttemptAt = 0;
+  let onboardingConfirmationTextSent = false;
+  let onboardingDetailsConfirmed = false;
+  let onboardingConfirmedBusinessName = "";
+  let onboardingConfirmedWebsite = "";
+  let onboardingSetupLinkSent = Boolean(onboardingSession?.claimLinkSentAt);
   let agentAudioPlaying = false;
   let callerInputForwardingEnabled = false;
   let initialGreetingComplete = false;
@@ -6647,6 +7731,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   let closing = false;
   let mediaStartTimer = null;
   let onboardingTranscript = onboardingSession?.transcript || "";
+  let onboardingRealtimeTranscript = onboardingTranscript;
   let qualificationTranscript = qualificationAttempt?.transcript || "";
   let provisioningPromise = null;
   let loggedCallerAudioPacket = false;
@@ -6655,6 +7740,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   let loggedTelnyxOutboundFrame = false;
   let outboundFramesQueued = 0;
   let outboundFramesSent = 0;
+  let outboundFramesDropped = 0;
   let outboundMaxQueueDepth = 0;
   const bridgeAudioCapture = {
     enabled: BRIDGE_AUDIO_CAPTURE_ENABLED,
@@ -6705,7 +7791,10 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
         files.geminiSourceWav = filePath;
       }
       if (telnyxOutbound.length) {
-        const rawPath = path.join(BRIDGE_AUDIO_CAPTURE_DIR, `${prefix}-telnyx-outbound-exact.l16${TELNYX_L16_ENDIAN.toLowerCase()}`);
+        const rawPath = path.join(
+          BRIDGE_AUDIO_CAPTURE_DIR,
+          `${prefix}-telnyx-outbound-exact.${telnyxOutputEncoding.toLowerCase()}${telnyxOutputEncoding === "L16" ? TELNYX_L16_ENDIAN.toLowerCase() : ""}`,
+        );
         fs.writeFileSync(rawPath, telnyxOutbound);
         files.telnyxOutboundExactRaw = rawPath;
         if (telnyxOutputEncoding === "L16") {
@@ -6729,6 +7818,14 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
           );
           files.telnyxOutboundConfiguredEndianWav = configuredWavPath;
           files.telnyxOutboundOppositeEndianWav = oppositeWavPath;
+        } else if (telnyxOutputEncoding === "PCMU") {
+          const wavPath = path.join(BRIDGE_AUDIO_CAPTURE_DIR, `${prefix}-telnyx-outbound-pcmu-decoded-${telnyxOutputRate}hz.wav`);
+          const decoded = Buffer.allocUnsafe(telnyxOutbound.length * 2);
+          for (let index = 0; index < telnyxOutbound.length; index += 1) {
+            decoded.writeInt16LE(muLawDecode(telnyxOutbound[index]), index * 2);
+          }
+          writePcm16Wav(wavPath, decoded, telnyxOutputRate);
+          files.telnyxOutboundPcmuDecodedWav = wavPath;
         }
       }
       if (callerInbound.length) {
@@ -6749,6 +7846,14 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
             telnyxSampleRate,
           );
           files.callerInboundConfiguredEndianWav = wavPath;
+        } else if (telnyxEncoding === "PCMU") {
+          const wavPath = path.join(BRIDGE_AUDIO_CAPTURE_DIR, `${prefix}-caller-inbound-pcmu-decoded-${telnyxSampleRate}hz.wav`);
+          const decoded = Buffer.allocUnsafe(callerInbound.length * 2);
+          for (let index = 0; index < callerInbound.length; index += 1) {
+            decoded.writeInt16LE(muLawDecode(callerInbound[index]), index * 2);
+          }
+          writePcm16Wav(wavPath, decoded, telnyxSampleRate);
+          files.callerInboundPcmuDecodedWav = wavPath;
         }
       }
       await logVoiceCallEvent(callControlId, "bridge.audio.capture_saved", {
@@ -6790,6 +7895,25 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       ]);
     } catch (error) {
       console.warn(`[db] onboarding transcript persistence skipped: ${error.message}`);
+    }
+  };
+
+  const appendOnboardingRealtimeTranscript = (speaker, text) => {
+    if (!isOnboarding || !String(text || "").trim()) return;
+    onboardingRealtimeTranscript += `${onboardingRealtimeTranscript ? "\n" : ""}[${speaker}] ${String(text).trim()}`;
+  };
+
+  const appendOnboardingAgentTurnChunk = (text) => {
+    const chunk = String(text || "").trim();
+    if (!chunk) return;
+    if (!onboardingAgentTurnText) {
+      onboardingAgentTurnText = chunk;
+      return;
+    }
+    if (/^[,.;:!?)]/.test(chunk) || /[\s([{]$/.test(onboardingAgentTurnText)) {
+      onboardingAgentTurnText += chunk;
+    } else {
+      onboardingAgentTurnText += ` ${chunk}`;
     }
   };
 
@@ -6867,7 +7991,16 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
             businessName: lookup.businessName,
             website: lookup.website,
           });
-          return { found: true, lookup, agent: await buildOnboardingAgent(lookup.businessName, lookup.website, lookup.raw) };
+          await prisma.onboardingSession.update({
+            where: { id: onboardingSession.id },
+            data: {
+              status: "awaiting_confirmation",
+              businessName: lookup.businessName,
+              website: normalizeWebsite(lookup.website),
+              lookupData: lookup.raw || undefined,
+            },
+          });
+          return { found: true, lookup };
         } catch (error) {
           await prisma.onboardingSession.update({
             where: { id: onboardingSession.id },
@@ -6899,12 +8032,27 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       clearInterval(outboundAudioTimer);
       outboundAudioTimer = null;
     }
-    if (telnyxSpeakTimer) {
-      clearTimeout(telnyxSpeakTimer);
-      telnyxSpeakTimer = null;
-    }
     agentAudioPlaying = false;
     if (suppressAfterMs) suppressInputUntil = Date.now() + suppressAfterMs;
+  };
+
+  const clearTelnyxPlayback = (reason, suppressAfterMs = 250) => {
+    const queueDepthBefore = outboundAudioQueue.length;
+    const audioPlayingBefore = agentAudioPlaying;
+    clearOutboundAudioQueue(suppressAfterMs);
+    if (telnyxWs.readyState === WebSocket.OPEN && streamId) {
+      telnyxWs.send(JSON.stringify({ event: "clear" }));
+    }
+    if (queueDepthBefore || audioPlayingBefore) {
+      logVoiceCallEvent(callControlId, "telnyx.audio.cleared", {
+        reason,
+        queueDepthBefore,
+        audioPlayingBefore,
+        outboundFramesSent,
+        outboundFramesQueued,
+        outboundFramesDropped,
+      }).catch(() => {});
+    }
   };
 
   const agentOutputActive = () => agentAudioPlaying || outboundAudioQueue.length > 0 || Date.now() < suppressInputUntil;
@@ -6964,128 +8112,500 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       bytesPerSample,
       Math.floor(telnyxOutputRate * (TELNYX_OUTBOUND_FRAME_MS / 1000)) * bytesPerSample,
     );
-    const frameCount = Math.ceil(audio.length / frameBytes);
-    outboundFramesQueued += frameCount;
+    let droppedThisChunk = 0;
     for (let offset = 0; offset < audio.length; offset += frameBytes) {
+      if (TELNYX_DROP_QUEUED_AUDIO && outboundAudioQueue.length >= TELNYX_MAX_OUTBOUND_QUEUE_FRAMES) {
+        droppedThisChunk += 1;
+        continue;
+      }
       outboundAudioQueue.push(audio.subarray(offset, offset + frameBytes).toString("base64"));
+      outboundFramesQueued += 1;
+    }
+    if (droppedThisChunk) {
+      outboundFramesDropped += droppedThisChunk;
+      if (outboundFramesDropped === droppedThisChunk || outboundFramesDropped % 100 === 0) {
+        logVoiceCallEvent(callControlId, "telnyx.audio.queue_trimmed", {
+          droppedThisChunk,
+          outboundFramesDropped,
+          queueDepth: outboundAudioQueue.length,
+          maxQueueFrames: TELNYX_MAX_OUTBOUND_QUEUE_FRAMES,
+          maxQueueMs: TELNYX_MAX_OUTBOUND_QUEUE_MS,
+          dropQueuedAudio: TELNYX_DROP_QUEUED_AUDIO,
+        }).catch(() => {});
+      }
     }
     outboundMaxQueueDepth = Math.max(outboundMaxQueueDepth, outboundAudioQueue.length);
     startOutboundAudioPacer();
   };
 
-  const estimateTelnyxSpeakMs = (text) => Math.min(30000, Math.max(1500, Math.ceil(String(text || "").length * 70)));
+  const runPhoneToolWithWaitNotice = async (functionCall, task) => {
+    const startedAt = Date.now();
+    let done = false;
+    let noticeCount = 0;
+    let noticeTimer = null;
+    let toolError = null;
 
-  const speakWithTelnyx = async (text) => {
-    const payload = String(text || "").replace(/\s+/g, " ").trim().slice(0, 3000);
-    if (!payload || closing) return;
-    clearOutboundAudioQueue();
-    const estimatedMs = estimateTelnyxSpeakMs(payload);
-    agentAudioPlaying = true;
-    suppressInputUntil = Date.now() + estimatedMs + 500;
-    telnyxSpeakTimer = setTimeout(() => {
-      agentAudioPlaying = false;
-      telnyxSpeakTimer = null;
-    }, estimatedMs + 500);
-    const commandId = crypto.randomUUID();
-    try {
-      await telnyxRequest(`/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
-        method: "POST",
-        body: JSON.stringify({
-          command_id: commandId,
-          payload,
-          payload_type: "text",
-          service_level: "basic",
-          voice: TELNYX_SPEAK_VOICE,
-          language: TELNYX_SPEAK_LANGUAGE,
-          stop: "all",
-          target_legs: "self",
-          client_state: Buffer.from(JSON.stringify({ mode: "agent_tts", voiceCallId: call.id })).toString("base64"),
+    const waitForNoticeWindow = async (maxMs = 4000) => {
+      const deadline = Date.now() + maxMs;
+      while (!done && !closing && agentOutputActive() && Date.now() < deadline) {
+        await sleep(250);
+      }
+    };
+
+    const sendNotice = async (text, kind = "progress", countProgress = true) => {
+      const message = String(text || "").replace(/\s+/g, " ").trim();
+      if (!message || closing) return;
+      await waitForNoticeWindow(kind === "progress" || kind === "start" ? 4000 : 1500);
+      if ((kind === "progress" || kind === "start") && done) return;
+      if (countProgress) noticeCount += 1;
+      runBackground("log tool.wait_notice_skipped", () =>
+        logVoiceCallEvent(callControlId, "tool.wait_notice_skipped", {
+          tool: functionCall.name,
+          kind,
+          message,
+          noticeCount,
+          delayMs: Date.now() - startedAt,
+          channel: "carrier_native_speech_disabled",
         }),
-      });
-      await logVoiceCallEvent(callControlId, "telnyx.speak_requested", {
-        commandId,
-        characters: payload.length,
-        estimatedMs,
-        voice: TELNYX_SPEAK_VOICE,
-        language: TELNYX_SPEAK_LANGUAGE,
-      });
+      );
+    };
+
+    const scheduleNotice = (delayMs) => {
+      if (!toolWaitNotice(functionCall.name, noticeCount) || done || closing || noticeCount >= TOOL_WAIT_NOTICE_MAX_COUNT) return;
+      noticeTimer = setTimeout(async () => {
+        noticeTimer = null;
+        if (done || closing) return;
+        if (agentOutputActive()) {
+          scheduleNotice(500);
+          return;
+        }
+        const text = toolWaitNotice(functionCall.name, noticeCount);
+        if (!text) return;
+        await sendNotice(text).catch((error) => {
+          console.warn(`[telnyx] tool wait notice failed: ${error.message}`);
+        });
+        if (!done && noticeCount < TOOL_WAIT_NOTICE_MAX_COUNT) scheduleNotice(TOOL_WAIT_NOTICE_REPEAT_MS);
+      }, delayMs);
+    };
+
+    runBackground("log tool.started", () =>
+      logVoiceCallEvent(callControlId, "tool.started", { tool: functionCall.name }),
+    );
+    try {
+      if (toolWaitNoticeStartsImmediately(functionCall.name)) {
+        await sendNotice(toolWaitNotice(functionCall.name), "start");
+        if (noticeCount < TOOL_WAIT_NOTICE_MAX_COUNT) scheduleNotice(TOOL_WAIT_NOTICE_REPEAT_MS);
+      } else {
+        scheduleNotice(TOOL_WAIT_NOTICE_DELAY_MS);
+      }
+      const result = await task();
+      await sendNotice(toolCompletionNotice(functionCall.name, result), "success", false);
+      return result;
     } catch (error) {
-      await logVoiceCallEvent(callControlId, "telnyx.speak_failed", { message: error.message });
-      agentAudioPlaying = false;
+      toolError = error;
+      await sendNotice(toolFailureNotice(functionCall.name), "failure", false).catch((noticeError) => {
+        console.warn(`[telnyx] tool failure notice failed: ${noticeError.message}`);
+      });
+      throw error;
+    } finally {
+      done = true;
+      if (noticeTimer) clearTimeout(noticeTimer);
+      runBackground("log tool.completed", () =>
+        logVoiceCallEvent(callControlId, "tool.completed", {
+          tool: functionCall.name,
+          durationMs: Date.now() - startedAt,
+          waitNoticeCount: noticeCount,
+          error: toolError?.message || null,
+        }),
+      );
     }
   };
 
-  const runOnboardingTool = async (functionCall) => {
-    const args = functionCall.args || {};
-    if (functionCall.name === "build_business_agent") {
-      return buildOnboardingAgent(args.businessName, args.website);
-    }
-    if (functionCall.name === "switch_to_business_agent") {
-      if (!profile || !config) throw new Error("Build the business agent before switching personas");
-      onboardingSession = await prisma.onboardingSession.update({
-        where: { id: onboardingSession.id },
-        data: { status: "testing_agent", personaSwitchedAt: new Date() },
-      });
-      await logVoiceCallEvent(callControlId, "onboarding.persona_switched", { businessProfileId: profile.id });
+  const onboardingAffirmativeConfirmation = (text) => {
+    const normalized = ` ${String(text || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9']+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()} `;
+    if (!normalized.trim()) return false;
+    if (/\b(no|nope|not correct|wrong|incorrect|change|edit|different)\b/.test(normalized)) return false;
+    return [
+      /\b(yes|yeah|yep|yup|correct|confirmed|confirm|exactly)\b/,
+      /\b(that'?s|that is|this is|looks|all)\s+(right|correct|good|accurate)\b/,
+      /\b(go ahead|looks good|that works)\b/,
+    ].some((pattern) => pattern.test(normalized));
+  };
+
+  const sendOnboardingSetupLink = async ({ email } = {}) => {
+    if (!profile) throw new Error("Build the business agent before sending its setup link");
+    if (onboardingSetupLinkSent) {
       return {
         ok: true,
-        switched: true,
-        personaPrompt: `${profile.systemPrompt}\n${runtimeBusinessInstructions(config)}\n\nYou have now switched into the live receptionist for ${profile.businessName}. Stop discussing platform onboarding. Greet the caller as ${config.agentName}, answer as this business receptionist, and use the business tools when appropriate.`,
+        sent: true,
+        alreadySent: true,
+        provider: onboardingSession?.messageProvider || null,
+        emailRequired: true,
       };
     }
-    if (functionCall.name === "send_setup_link") {
-      if (!profile) throw new Error("Build the business agent before sending its setup link");
-      const claim = await createPhoneClaimLink({ profile, email: args.email, settings });
-      const delivery = await deliverSetupLink({
-        settings,
-        profile,
-        toPhone: call.fromNumber,
-        setupUrl: claim.setupUrl,
-        businessName: profile.businessName,
-      });
+    const claim = await createPhoneClaimLink({ profile, email, settings });
+    const delivery = await deliverSetupLink({
+      settings,
+      profile,
+      toPhone: call.fromNumber,
+      setupUrl: claim.setupUrl,
+      businessName: profile.businessName,
+    });
+    if (claim.email) {
       await sendClaimEmail({
         settings,
         email: claim.email,
         setupUrl: claim.setupUrl,
         businessName: profile.businessName,
       }).catch(() => false);
+    }
+    onboardingSetupLinkSent = true;
+    onboardingSession = await prisma.onboardingSession.update({
+      where: { id: onboardingSession.id },
+      data: {
+        status: "claim_link_sent",
+        email: claim.email || onboardingSession.email || null,
+        claimLinkSentAt: new Date(),
+        messageProvider: delivery.provider,
+      },
+    });
+    await logVoiceCallEvent(callControlId, "onboarding.claim_link_sent", {
+      provider: delivery.provider,
+      email: claim.email,
+      emailRequired: claim.emailRequired,
+    });
+    return { ok: true, sent: true, provider: delivery.provider, emailRequired: claim.emailRequired };
+  };
+
+  const runOnboardingTool = async (functionCall) => {
+    const args = functionCall.args || {};
+    if (functionCall.name === "build_business_agent") {
+      if (!onboardingConfirmationTextSent) {
+        throw new Error("Send the confirmation text before building the agent");
+      }
+      if (!onboardingDetailsConfirmed) {
+        throw new Error("Wait for the caller to confirm the texted business details by saying yes or replying YES");
+      }
+      const buildBusinessName = normalizeBusinessName(onboardingConfirmedBusinessName || args.businessName);
+      const buildWebsite = normalizeWebsite(onboardingConfirmedWebsite || args.website);
+      if (!buildBusinessName) throw new Error("Business name is required before building the agent");
+      if (!buildWebsite) throw new Error("Website is required before building the agent");
+      const result = await buildOnboardingAgent(
+        buildBusinessName,
+        buildWebsite,
+      );
+      if (!result?.ok) return result;
+      try {
+        const setupLink = await sendOnboardingSetupLink({});
+        return { ...result, setupLinkSent: Boolean(setupLink?.sent), setupLink };
+      } catch (error) {
+        await logVoiceCallEvent(callControlId, "onboarding.claim_link_failed", { message: error.message });
+        return { ...result, setupLinkSent: false, setupLinkError: error.message };
+      }
+    }
+    if (functionCall.name === "send_onboarding_confirmation_text") {
+      const businessName = normalizeBusinessName(args.businessName);
+      if (!businessName) throw new Error("Business name is required before texting a confirmation");
+      const website = normalizeWebsite(args.website);
+      if (!website) throw new Error("Website is required before texting a confirmation");
+      const message = [
+        "Please confirm I heard this correctly:",
+        `Business: ${businessName}`,
+        `Website: ${website}`,
+        "Reply YES if correct, or text the correct name and website.",
+      ].join("\n");
+      const delivery = await deliverBusinessMessage({
+        settings,
+        profile,
+        toPhone: call.fromNumber,
+        message,
+        purpose: "onboarding_confirmation",
+        voiceCallId: call.id,
+        providerOverride: "bluebubbles",
+        metadata: { businessName, website },
+      });
       onboardingSession = await prisma.onboardingSession.update({
         where: { id: onboardingSession.id },
         data: {
-          status: "claim_link_sent",
-          email: claim.email,
-          claimLinkSentAt: new Date(),
+          status: "awaiting_confirmation",
+          businessName,
+          website,
           messageProvider: delivery.provider,
         },
       });
-      await logVoiceCallEvent(callControlId, "onboarding.claim_link_sent", {
+      onboardingConfirmationTextSent = true;
+      onboardingDetailsConfirmed = false;
+      onboardingConfirmedBusinessName = businessName;
+      onboardingConfirmedWebsite = website;
+      await logVoiceCallEvent(callControlId, "onboarding.confirmation_text_sent", {
         provider: delivery.provider,
-        email: claim.email,
+        businessName,
+        website,
       });
-      return { ok: true, sent: true, provider: delivery.provider };
+      return { ok: true, sent: true, provider: delivery.provider, businessName, website };
+    }
+    if (functionCall.name === "send_setup_link") {
+      return sendOnboardingSetupLink({ email: args.email });
     }
     if (functionCall.name === "end_call") return { ok: true, shouldEndCall: true, reason: args.reason || "Onboarding complete" };
     throw new Error(`Unknown onboarding tool: ${functionCall.name}`);
   };
 
+  const sendGeminiUserText = (text) => {
+    if (geminiWs?.readyState !== WebSocket.OPEN || closing) return false;
+    geminiWs.send(
+      JSON.stringify({
+        clientContent: { turns: [{ role: "user", parts: [{ text }] }], turnComplete: true },
+      }),
+    );
+    return true;
+  };
+
+  const onboardingClaimsBuildIntent = (text) => {
+    const normalized = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!normalized) return false;
+    return [
+      /\b(i('|’)ll|i will|let me|i('|’)m going to|i am going to|i('|’)ll go ahead and|i will go ahead and)\b.{0,100}\b(build|create|prepare|set up|get .{0,30}built)\b.{0,80}\b(now|right now|for you|your trial|your receptionist)\b/,
+      /\b(go ahead and|start|started)\b.{0,80}\b(building|creating|preparing|setting up)\b.{0,80}\b(receptionist|agent)\b/,
+      /\b(receptionist|agent)\b.{0,60}\b(is|it's|is now)\b.{0,30}\b(ready|built|created|complete|completed)\b/,
+    ].some((pattern) => pattern.test(normalized));
+  };
+
+  const onboardingClaimsSwitchIntent = (text) => {
+    const normalized = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!normalized) return false;
+    return [
+      /\b(i('|’)ll|i will|let me|i('|’)m going to|i am going to)\b.{0,80}\b(switch|connect|transfer)\b.{0,100}\b(receptionist|agent|persona|live demo|demo)\b/,
+      /\b(switching|connecting|transferring)\b.{0,100}\b(receptionist|agent|persona|live demo|demo)\b/,
+      /\b(testing mode begins|live demo begins)\b/,
+    ].some((pattern) => pattern.test(normalized));
+  };
+
+  const onboardingClaimsConfirmationTextSentIntent = (text) => {
+    const normalized = String(text || "")
+      .replace(/\s+([,.;:!?])/g, "$1")
+      .replace(/\bi\s+(['’])\s*(ll|ve|m)\b/gi, "i'$2")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+    if (!normalized) return false;
+    return [
+      /\b(i('|’)ve|i have|i just|i)\s+(already\s+)?(texted|sent|messaged)\s+(the\s+)?(text|message|sms|confirmation)\b/,
+      /\b(i('|’)ve|i have|i)\s+(already\s+)?(texted|sent)\b.{0,120}\b(you|your phone|the details|business|company|name|website|confirmation)\b/,
+      /\b(texted|sent)\s+(you|your phone)\b.{0,120}\b(details|business|company|name|website|confirmation)\b/,
+      /\b(i('|’)ll|i will|let me|i('|’)m going to|i am going to)\b.{0,80}\b(send|text|message)\b.{0,120}\b(you|your phone|details|business|company|name|website|confirmation|reply yes)\b/,
+      /\b(i('|’)ll|i will|let me|i('|’)m going to|i am going to)\b.{0,120}\b(confirmation|confirm)\b.{0,80}\b(text|message|sms)\b/,
+      /\b(reply|text)\s+yes\b.{0,120}\b(correct|details|business|company|name|website|text|message)\b/,
+      /\b(check|look at|see)\b.{0,40}\b(the|your)\s+(text|message|sms)\b/,
+      /\byou\s+should\s+(have|see|get|receive)\b.{0,80}\b(text|message|sms|details)\b/,
+    ].some((pattern) => pattern.test(normalized));
+  };
+
+  const ensureOnboardingBuiltFromTranscript = async (reason, sourceText = "") => {
+    if (!isOnboarding || profile || closing) return { ok: true, alreadyBuilt: true };
+    if (onboardingAutoBuildPromise) return onboardingAutoBuildPromise;
+    const now = Date.now();
+    if (now - onboardingAutoBuildLastAttemptAt < 15000) return { ok: false, skipped: true, reason: "recent_attempt" };
+    onboardingAutoBuildLastAttemptAt = now;
+    onboardingAutoBuildPromise = (async () => {
+      try {
+        await logVoiceCallEvent(callControlId, "onboarding.auto_build_triggered", {
+          reason,
+          sourceText: String(sourceText || "").slice(0, 500),
+        });
+        const details = await extractOnboardingBusinessDetailsFromTranscript({
+          transcript: onboardingRealtimeTranscript,
+          sourceText,
+          settings,
+        });
+        await logVoiceCallEvent(callControlId, "onboarding.auto_build_details", details);
+        const functionCall = {
+          name: "build_business_agent",
+          args: { businessName: details.businessName, website: details.website },
+        };
+        const result = await runPhoneToolWithWaitNotice(functionCall, () => runOnboardingTool(functionCall));
+        await logVoiceCallEvent(callControlId, "onboarding.auto_build_completed", {
+          reason,
+          ok: Boolean(result?.ok),
+          businessProfileId: profile?.id || null,
+          businessName: result?.businessName || details.businessName,
+          website: result?.website || details.website,
+          existingAccount: Boolean(result?.existingAccount),
+        });
+        sendGeminiUserText(
+          result?.ok
+            ? `Backend guard: build_business_agent has now completed successfully for ${result.businessName}. The real tool result is: ${JSON.stringify(result)}. If setupLinkSent is true, tell the caller the setup link was sent to this phone so they can finish registration. Do not offer to switch into the live agent.`
+            : `Backend guard: build_business_agent did not create a new receptionist. The real tool result is: ${JSON.stringify(result)}. Explain this accurately; do not claim a new receptionist is ready.`,
+        );
+        return result;
+      } catch (error) {
+        await logVoiceCallEvent(callControlId, "onboarding.auto_build_failed", {
+          reason,
+          message: error.message,
+        });
+        sendGeminiUserText(
+          `Backend guard: no receptionist has been built yet. ${error.message}. Ask the caller to confirm the business name and website again, then call build_business_agent. Do not claim the receptionist is ready.`,
+        );
+        return { ok: false, error: error.message };
+      } finally {
+        onboardingAutoBuildPromise = null;
+      }
+    })();
+    return onboardingAutoBuildPromise;
+  };
+
+  const ensureOnboardingConfirmationTextSentFromTranscript = async (reason, sourceText = "") => {
+    if (!isOnboarding || onboardingConfirmationTextSent || closing) return { ok: true, alreadySent: true };
+    if (onboardingAutoConfirmationPromise) return onboardingAutoConfirmationPromise;
+    const now = Date.now();
+    if (now - onboardingAutoConfirmationLastAttemptAt < 8000) {
+      return { ok: false, skipped: true, reason: "recent_attempt" };
+    }
+    onboardingAutoConfirmationLastAttemptAt = now;
+    onboardingAutoConfirmationPromise = (async () => {
+      try {
+        await logVoiceCallEvent(callControlId, "onboarding.auto_confirmation_text_triggered", {
+          reason,
+          sourceText: String(sourceText || "").slice(0, 500),
+        });
+        const fastDetails = extractOnboardingBusinessDetailsFast({
+          transcript: onboardingRealtimeTranscript,
+          sourceText,
+        });
+        const details =
+          fastDetails ||
+          (await extractOnboardingBusinessDetailsFromTranscript({
+            transcript: onboardingRealtimeTranscript,
+            sourceText,
+            settings,
+          }));
+        if (!details.website) throw new Error("Website is missing or unclear");
+        await logVoiceCallEvent(callControlId, "onboarding.auto_confirmation_text_details", {
+          ...details,
+          extraction: fastDetails ? "fast" : "ai",
+        });
+        const functionCall = {
+          name: "send_onboarding_confirmation_text",
+          args: { businessName: details.businessName, website: details.website },
+        };
+        const result = await runPhoneToolWithWaitNotice(functionCall, () => runOnboardingTool(functionCall));
+        await logVoiceCallEvent(callControlId, "onboarding.auto_confirmation_text_completed", {
+          ok: Boolean(result?.sent),
+          provider: result?.provider || null,
+          businessName: result?.businessName || details.businessName,
+          website: result?.website || details.website,
+        });
+        sendGeminiUserText(
+          result?.sent
+            ? `Backend guard: the confirmation text has now actually been sent to the caller with ${result.businessName} and ${result.website}. Tell them to reply YES by text or say yes on the phone if it is correct.`
+            : "Backend guard: the confirmation text was not sent. Ask for the company name and website again, then use send_onboarding_confirmation_text.",
+        );
+        return result;
+      } catch (error) {
+        await logVoiceCallEvent(callControlId, "onboarding.auto_confirmation_text_failed", {
+          reason,
+          message: error.message,
+        });
+        sendGeminiUserText(
+          `Backend guard: you have not actually sent the confirmation text. ${error.message}. Apologize briefly, ask for the company website if needed, then use send_onboarding_confirmation_text. Do not say the text was sent until that tool returns sent=true.`,
+        );
+        return { ok: false, error: error.message };
+      } finally {
+        onboardingAutoConfirmationPromise = null;
+      }
+    })();
+    return onboardingAutoConfirmationPromise;
+  };
+
+  const enforceOnboardingToolClaims = (turnText) => {
+    if (!isOnboarding || closing) return;
+    const text = String(turnText || "").trim();
+    if (!text) return;
+    if (!onboardingConfirmationTextSent && onboardingClaimsConfirmationTextSentIntent(text)) {
+      safeBackground("onboarding auto confirmation text", () =>
+        ensureOnboardingConfirmationTextSentFromTranscript("agent_claimed_confirmation_text", text),
+      );
+    }
+    if (!profile && onboardingClaimsBuildIntent(text)) {
+      safeBackground("onboarding auto build", () => ensureOnboardingBuiltFromTranscript("agent_claimed_build", text));
+    }
+    if (onboardingClaimsSwitchIntent(text)) {
+      sendGeminiUserText(
+        "Do not offer to switch into the live agent during phone onboarding. Continue the onboarding flow by confirming details, building the agent, and sending the setup link.",
+      );
+    }
+  };
+
+  const onboardingTextSessionKey = isOnboarding ? normalizeE164Phone(call.fromNumber) : "";
+  if (onboardingTextSessionKey) {
+    activeOnboardingTextSessions.set(onboardingTextSessionKey, {
+      voiceCallId: call.id,
+      callControlId,
+      onMessage: async (inbound) => {
+        const text = String(inbound.text || "").trim();
+        if (!text) return { routed: false, reason: "empty_text" };
+        const fromPhone = inbound.fromPhone || onboardingTextSessionKey;
+        appendOnboardingRealtimeTranscript("Text", `Reply from ${fromPhone}: ${text}`);
+        await persistOnboardingTranscript("Text", `Reply from ${fromPhone}: ${text}`);
+        await logVoiceCallEvent(callControlId, "bluebubbles.reply_received", {
+          inboundMessageId: inbound.id,
+          fromPhone,
+          text: text.slice(0, 500),
+        });
+        const confirmedByText = onboardingConfirmationTextSent && onboardingAffirmativeConfirmation(text);
+        if (confirmedByText) {
+          onboardingDetailsConfirmed = true;
+          await prisma.onboardingSession.update({
+            where: { id: onboardingSession.id },
+            data: { status: "confirmed_details" },
+          }).catch(() => null);
+          await logVoiceCallEvent(callControlId, "onboarding.details_confirmed", {
+            channel: "text",
+            businessName: onboardingConfirmedBusinessName,
+            website: onboardingConfirmedWebsite,
+          });
+        } else if (onboardingConfirmationTextSent) {
+          onboardingDetailsConfirmed = false;
+        }
+        sendGeminiUserText(
+          confirmedByText
+            ? `The caller just replied YES by text message and confirmed these business details: ${onboardingConfirmedBusinessName} (${onboardingConfirmedWebsite || "no website"}). Say "Okay, I'll build your agent now. This can take about a minute," then call build_business_agent. After it returns, the setup link will be sent automatically. Do not offer to switch into the live agent.`
+            : `The caller just replied by text message during this onboarding call: "${text}". Treat this as caller-provided information. If it corrects the business name or website, repeat the corrected details and use send_onboarding_confirmation_text again. Do not build until they reply YES by text or say yes on the phone after the confirmation text.`,
+        );
+        return {
+          routed: true,
+          voiceCallId: call.id,
+          businessProfileId: profile?.id || null,
+          callControlId,
+        };
+      },
+    });
+  }
+
   const startGemini = async () => {
     if (geminiWs) return;
     const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY");
-    if (!geminiApiKey) throw new Error("Gemini API key is not configured");
-    const phoneLiveModel = liveModelPath(TELNYX_LIVE_MODEL || settings.liveModel);
+    if (!geminiApiKey) throw new Error("AI provider API key is not configured");
+    const forcedPhoneLiveModel = TELNYX_LIVE_MODEL_FORCE ? TELNYX_LIVE_MODEL : "";
+    const phoneLiveModel = liveModelPath(forcedPhoneLiveModel || settings.liveModel);
     await logVoiceCallEvent(callControlId, "gemini.connecting", {
       model: phoneLiveModel,
-      source: TELNYX_LIVE_MODEL ? "TELNYX_LIVE_MODEL" : "appSettings.liveModel",
+      source: forcedPhoneLiveModel
+        ? "TELNYX_LIVE_MODEL"
+        : TELNYX_LIVE_MODEL
+          ? "appSettings.liveModel_env_override_ignored"
+          : "appSettings.liveModel",
     });
     geminiWs = new WebSocket(`${GEMINI_WS_URL}?key=${encodeURIComponent(geminiApiKey)}`);
     const onboardingContextFromPreparation = (prepared) => {
-      if (prepared?.found && prepared.agent?.existingAccount) {
-        return `Caller lookup found ${prepared.lookup.businessName} (${prepared.lookup.website || "website unknown"}), but it already has an account. Explain that you cannot expose the existing private agent and offer to explain the sign-in path.`;
+      if (prepared?.found) {
+        return `Caller lookup found possible details: ${prepared.lookup.businessName} (${prepared.lookup.website || "website unknown"}). Do not build yet. Send these details to the caller with send_onboarding_confirmation_text, then ask them to reply YES by text or say yes on the phone if correct. If the details are wrong, collect the correction and text the corrected confirmation.`;
       }
-      if (prepared?.found && prepared.agent?.ok) {
-        return `Caller lookup found and built ${prepared.agent.businessName} (${prepared.agent.website || "website unknown"}). Confirm this is the correct company, summarize what was found, and offer to switch into the completed receptionist for a live test.`;
-      }
-      return `No usable company was returned by caller lookup. Ask for the business name and optional website, confirm them, then use build_business_agent.`;
+      return `No usable company was returned by caller lookup. Ask for the company name and website. Once you have them, use send_onboarding_confirmation_text. Do not build until the caller confirms the texted details by replying YES or saying yes on the phone.`;
     };
     const maybeSendOnboardingContext = async () => {
       if (!isOnboarding || onboardingContextSent || !onboardingGreetingComplete || !pendingOnboardingPreparation) return;
@@ -7096,11 +8616,20 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       const context = onboardingContextFromPreparation(prepared);
       await logVoiceCallEvent(callControlId, "onboarding.context_sent", {
         found: Boolean(prepared?.found),
-        agentReady: Boolean(prepared?.agent?.ok),
+        awaitingConfirmation: true,
       });
       geminiWs.send(
         JSON.stringify({
           clientContent: { turns: [{ role: "user", parts: [{ text: context }] }], turnComplete: true },
+        }),
+      );
+    };
+    const maybeSendOnboardingWaitNotice = () => {
+      if (!TOOL_WAIT_NOTICE_ENABLED || !isOnboarding || onboardingContextSent || pendingOnboardingPreparation || closing) return;
+      runBackground("log onboarding.wait_notice_skipped", () =>
+        logVoiceCallEvent(callControlId, "tool.wait_notice_skipped", {
+          tool: "onboarding_preparation",
+          channel: "carrier_native_speech_disabled",
         }),
       );
     };
@@ -7118,19 +8647,28 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
     geminiWs.on("open", async () => {
       await logVoiceCallEvent(callControlId, "gemini.connected");
       const identity = sessionIdentity(config?.agentName || settings.agentName, config?.language || settings.language);
-      const onboardingPrompt = `${settings.onboardingInstructions}
+      const onboardingPrompt = `${onboardingInstructionsForPrompt(settings.onboardingInstructions)}
 
 Phone onboarding context:
 - Caller phone: ${call.fromNumber || "unknown"}
 - Campaign source: ${onboardingSession?.campaignLabel || "unlabeled"}
-- Look up or collect the business name and website.
-- Confirm details before using build_business_agent.
-- Once the agent is ready, offer to switch into it for a live test.
-- Collect and confirm the caller's email before using send_setup_link.
-- Never claim a link was sent unless the tool reports sent=true.
+- Collect the company name and website. If lookup provides candidate details, use those as candidates.
+- Do not use send_onboarding_confirmation_text until both company name and website are known. If the website is missing or unclear, ask for it again.
+- Before building, always use send_onboarding_confirmation_text with the company name and website so the caller can see what was captured on their phone.
+- Before sending the confirmation text, say one short natural sentence like "I'm sending that now so you can check it on your phone," then immediately use send_onboarding_confirmation_text.
+- Never say you texted, sent, or delivered the confirmation unless send_onboarding_confirmation_text returned sent=true.
+- After sending the confirmation text, wait for the caller to reply YES by text or say that the texted details are correct on the phone. If they correct anything, send a new confirmation text and wait again.
+- Do not use build_business_agent until the confirmation text was sent and the caller confirmed it by text or phone.
+- When the caller confirms, say: "Okay, I'll build your agent now. This can take about a minute." Then immediately use build_business_agent.
+- Function use is mandatory. Never say the receptionist is built, ready, created, or complete unless build_business_agent returned ok=true in this call.
+- After build_business_agent returns ok=true, the setup link is sent automatically to this phone. Tell the caller the link was sent so they can finish account registration.
+- Do not suggest switching into the live agent, live-testing the receptionist, connecting to the receptionist, or starting testing mode during phone onboarding.
+- Use send_setup_link only to retry the setup link if the automatic send failed or the caller asks for the link again.
+- Never claim a link was sent unless build_business_agent returns setupLinkSent=true or send_setup_link returns sent=true.
 - Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, or asks to disconnect.
 - Keep responses brief and conversational.`;
       const qualificationPrompt = `${profile?.systemPrompt}
+${platformBusinessRulesPrompt(settings)}
 ${config ? runtimeBusinessInstructions(config) : ""}
 
 Outbound qualification call:
@@ -7152,14 +8690,14 @@ Outbound qualification call:
 - Immediately use end_call when the lead says goodbye, asks to hang up, asks to end the call, or asks to disconnect.
 - Keep responses brief and conversational.`;
       const businessPrompt = `${profile?.systemPrompt}
+${platformBusinessRulesPrompt(settings)}
 ${config ? runtimeBusinessInstructions(config) : ""}
 
 Live session identity and language:
 - Your receptionist name is ${identity.agentName}.
 - Speak in ${identity.language}.
 - Introduce yourself as ${identity.agentName}.
-- Continue using ${identity.language} unless the caller explicitly requests another language.
-- If the caller changes languages and you understand it, respond naturally in the caller's requested language.
+- Follow the platform-wide language rules above.
 - Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, or asks to disconnect.`;
       const setup = {
         setup: {
@@ -7200,7 +8738,7 @@ Live session identity and language:
         geminiReady = true;
         runBackground("log gemini.ready", () => logVoiceCallEvent(callControlId, "gemini.ready"));
         const greeting = isOnboarding
-          ? `Greet the caller as the AI Receptionist onboarding specialist. Follow the configured opening instructions and briefly explain that you can build and demonstrate their own business agent during this call.`
+          ? "Start the onboarding call now. In one short sentence, ask for the company name and website."
           : isQualification
             ? `Start the outbound qualification call. Ask for ${qualificationLead?.name || "the lead"} if appropriate, identify yourself as ${config.agentName || settings.agentName} calling for ${profile.businessName}, and ask if now is a good time for a quick follow-up.`
           : `Greet the caller briefly as ${config.agentName || settings.agentName}, the receptionist for ${profile.businessName}.`;
@@ -7233,12 +8771,30 @@ Live session identity and language:
       const serverContent = message.serverContent;
       let callerHangupRequested = false;
       if (isOnboarding && serverContent?.inputTranscription?.text) {
-        callerHangupRequested = maybeEndPhoneCallFromCallerText(serverContent.inputTranscription.text);
+        const text = serverContent.inputTranscription.text;
+        if (agentOutputActive() && /\p{L}|\d/u.test(text)) clearTelnyxPlayback("caller_input_transcription", 250);
+        callerHangupRequested = maybeEndPhoneCallFromCallerText(text);
+        if (onboardingConfirmationTextSent && onboardingAffirmativeConfirmation(text)) {
+          onboardingDetailsConfirmed = true;
+          runBackground("mark onboarding details confirmed by phone", async () => {
+            await prisma.onboardingSession.update({
+              where: { id: onboardingSession.id },
+              data: { status: "confirmed_details" },
+            });
+            await logVoiceCallEvent(callControlId, "onboarding.details_confirmed", {
+              channel: "phone",
+              businessName: onboardingConfirmedBusinessName,
+              website: onboardingConfirmedWebsite,
+            });
+          });
+        }
+        appendOnboardingRealtimeTranscript("Caller", text);
         runBackground("persist onboarding caller transcript", () =>
-          persistOnboardingTranscript("Caller", serverContent.inputTranscription.text),
+          persistOnboardingTranscript("Caller", text),
         );
       } else if (!isOnboarding && serverContent?.inputTranscription?.text) {
         const text = serverContent.inputTranscription.text;
+        if (agentOutputActive() && /\p{L}|\d/u.test(text)) clearTelnyxPlayback("caller_input_transcription", 250);
         callerHangupRequested = maybeEndPhoneCallFromCallerText(text);
         runBackground("persist caller transcript", async () => {
           await appendVoiceCallTranscript({
@@ -7251,12 +8807,12 @@ Live session identity and language:
         });
       }
       if (callerHangupRequested) return;
-      if (useTelnyxSpeakOutput && serverContent?.outputTranscription?.text) {
-        pendingTelnyxSpeakText += serverContent.outputTranscription.text;
-        agentTextChunks += 1;
-      } else if (isOnboarding && serverContent?.outputTranscription?.text) {
+      if (isOnboarding && serverContent?.outputTranscription?.text) {
+        const text = serverContent.outputTranscription.text;
+        appendOnboardingAgentTurnChunk(text);
+        appendOnboardingRealtimeTranscript("Agent", text);
         runBackground("persist onboarding agent transcript", () =>
-          persistOnboardingTranscript("Agent", serverContent.outputTranscription.text),
+          persistOnboardingTranscript("Agent", text),
         );
       } else if (!isOnboarding && serverContent?.outputTranscription?.text) {
         const text = serverContent.outputTranscription.text;
@@ -7271,17 +8827,13 @@ Live session identity and language:
         });
       }
       if (serverContent?.interrupted && telnyxWs.readyState === WebSocket.OPEN) {
-        clearOutboundAudioQueue();
+        clearTelnyxPlayback("gemini_interrupted", 250);
         runBackground("log gemini.interrupted", () => logVoiceCallEvent(callControlId, "gemini.interrupted", {
           callMode: isOnboarding ? "onboarding" : isQualification ? "qualification" : "business",
         }));
-        telnyxWs.send(JSON.stringify({ event: "clear" }));
       }
       for (const part of serverContent?.modelTurn?.parts || []) {
-        if (useTelnyxSpeakOutput && part.text) {
-          pendingTelnyxSpeakText += part.text;
-          agentTextChunks += 1;
-        } else if (!useTelnyxSpeakOutput && part.inlineData?.data && telnyxWs.readyState === WebSocket.OPEN && streamId) {
+        if (part.inlineData?.data && telnyxWs.readyState === WebSocket.OPEN && streamId) {
           captureBridgeAudio("geminiSourcePcm24Le", part.inlineData.data, bridgeAudioCapture.geminiSourceMaxBytes);
           if (!loggedGeminiSourcePacket) {
             loggedGeminiSourcePacket = true;
@@ -7321,45 +8873,14 @@ Live session identity and language:
           enqueueTelnyxAudio(telnyxAudio);
         }
       }
-      if (useTelnyxSpeakOutput && serverContent?.turnComplete && pendingTelnyxSpeakText.trim()) {
-        const text = pendingTelnyxSpeakText.trim();
-        pendingTelnyxSpeakText = "";
-        await logVoiceCallEvent(callControlId, "gemini.text.turn_complete", {
-          chunks: agentTextChunks,
-          characters: text.length,
-        });
-        agentTextChunks = 0;
-        if (isOnboarding) {
-          await persistOnboardingTranscript("Agent", text);
-        } else {
-          await appendVoiceCallTranscript({
-            callId: call.id,
-            speaker: "Agent",
-            text,
-            profile,
-          });
-          await persistQualificationTranscript("Agent", text);
-        }
-        await speakWithTelnyx(text);
-        if (!initialGreetingComplete) {
-          initialGreetingComplete = true;
-          setTimeout(() => enableCallerInput("initial_telnyx_speak_estimate_elapsed"), estimateTelnyxSpeakMs(text) + 250);
-        }
-        if (isOnboarding && !onboardingGreetingComplete) {
-          onboardingGreetingComplete = true;
-          setTimeout(() => {
-            maybeSendOnboardingContext().catch((error) =>
-              console.warn(`[telnyx] onboarding context send failed: ${error.message}`),
-            );
-          }, 400);
-        }
-      }
       if (serverContent?.turnComplete && agentAudioChunks) {
         runBackground("log gemini.audio.turn_complete", () => logVoiceCallEvent(callControlId, "gemini.audio.turn_complete", {
           chunks: agentAudioChunks,
           bytes: agentAudioBytes,
           outboundFramesQueued,
           outboundFramesSent,
+          outboundFramesDropped,
+          queueDepth: outboundAudioQueue.length,
           outboundMaxQueueDepth,
         }));
         if (!initialGreetingComplete) {
@@ -7370,13 +8891,20 @@ Live session identity and language:
         if (isOnboarding && !onboardingGreetingComplete) {
           onboardingGreetingComplete = true;
           setTimeout(() => {
+            maybeSendOnboardingWaitNotice();
             maybeSendOnboardingContext().catch((error) =>
               console.warn(`[telnyx] onboarding context send failed: ${error.message}`),
             );
           }, 400);
         }
       }
+      if (isOnboarding && serverContent?.turnComplete && onboardingAgentTurnText.trim() && !message.toolCall) {
+        const completedTurnText = onboardingAgentTurnText.trim();
+        onboardingAgentTurnText = "";
+        enforceOnboardingToolClaims(completedTurnText);
+      }
       if (message.toolCall) {
+        if (agentOutputActive()) clearTelnyxPlayback("tool_call_started", 100);
         const functionResponses = [];
         let shouldEndCall = false;
         let endReason = "Call completed";
@@ -7384,6 +8912,7 @@ Live session identity and language:
         for (const functionCall of message.toolCall.functionCalls || []) {
           try {
             const toolContext = {
+              channel: "phone",
               voiceCallId: call.id,
               fromNumber: call.fromNumber,
               toNumber: call.toNumber,
@@ -7391,15 +8920,17 @@ Live session identity and language:
               qualificationAttemptId: qualificationAttempt?.id || null,
               leadExtractedFields: qualificationLead?.extractedFields || null,
             };
-            const result = isOnboarding
-              ? await runOnboardingTool(functionCall)
-              : isQualification
-                ? await runQualificationToolCall(profile, config, functionCall, toolContext)
-              : await runToolCall(profile, config, functionCall, {
-                  voiceCallId: call.id,
-                  fromNumber: call.fromNumber,
-                  toNumber: call.toNumber,
-                });
+            const result = await runPhoneToolWithWaitNotice(functionCall, async () =>
+              isOnboarding
+                ? runOnboardingTool(functionCall)
+                : isQualification
+                  ? runQualificationToolCall(profile, config, functionCall, toolContext)
+                  : runToolCall(profile, config, functionCall, {
+                      voiceCallId: call.id,
+                      fromNumber: call.fromNumber,
+                      toNumber: call.toNumber,
+                    }),
+            );
             shouldEndCall ||= Boolean(result.shouldEndCall);
             endReason = result.reason || endReason;
             personaPrompt ||= result.personaPrompt || null;
@@ -7427,7 +8958,7 @@ Live session identity and language:
     });
 
     geminiWs.on("error", async (error) => {
-      console.error("[telnyx] Gemini Live error", error.message);
+      console.error("[telnyx] live voice provider error", error.message);
       await logVoiceCallEvent(callControlId, "error", { stage: "gemini", message: error.message });
       hangup("gemini_error");
     });
@@ -7522,6 +9053,10 @@ Live session identity and language:
   telnyxWs.on("close", async (code, reason) => {
       if (mediaStartTimer) clearTimeout(mediaStartTimer);
       clearOutboundAudioQueue();
+      if (onboardingTextSessionKey) {
+        const active = activeOnboardingTextSessions.get(onboardingTextSessionKey);
+        if (active?.voiceCallId === call.id) activeOnboardingTextSessions.delete(onboardingTextSessionKey);
+      }
       await logVoiceCallEvent(callControlId, "media.closed", { code, reason: reason.toString() });
       await saveBridgeAudioCapture("media_closed");
     closing = true;
@@ -7553,11 +9088,35 @@ wss.on("connection", (clientWs, request) => {
   let liveUsageStartedAt = null;
   let liveUsageRecorded = false;
   let browserHangupRequested = false;
+  let browserAgentTranscriptBuffer = "";
 
   const sendClient = (message) => {
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify(message));
     }
+  };
+
+  const appendBrowserAgentTranscriptChunk = (text) => {
+    const chunk = String(text || "").trim();
+    if (!chunk) return;
+    if (!browserAgentTranscriptBuffer) {
+      browserAgentTranscriptBuffer = chunk;
+      return;
+    }
+    if (/^[,.;:!?)]/.test(chunk) || /[\s([{]$/.test(browserAgentTranscriptBuffer)) {
+      browserAgentTranscriptBuffer += chunk;
+    } else {
+      browserAgentTranscriptBuffer += ` ${chunk}`;
+    }
+  };
+
+  const flushBrowserAgentTranscript = () => {
+    const text = browserAgentTranscriptBuffer
+      .replace(/\s+([,.;:!?])/g, "$1")
+      .replace(/\s+/g, " ")
+      .trim();
+    browserAgentTranscriptBuffer = "";
+    if (text) sendClient({ type: "transcript", speaker: "agent", text });
   };
 
   const maybeEndBrowserCallFromCallerText = (text) => {
@@ -7625,21 +9184,21 @@ wss.on("connection", (clientWs, request) => {
         sendClient({ type: "debug", message: `Business profile loaded. Cache: ${result.cached ? "yes" : "no"}.` });
 
         const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY");
-        if (!geminiApiKey) throw new Error("Gemini API key is not configured");
+        if (!geminiApiKey) throw new Error("Live agent provider key is not configured");
         geminiWs = new WebSocket(`${GEMINI_WS_URL}?key=${encodeURIComponent(geminiApiKey)}`);
 
         geminiWs.on("open", () => {
           const selectedLiveModel = liveModelPath(message.liveModel || settings.liveModel);
           liveUsageStartedAt = new Date();
           const liveSystemPrompt = `${profile.systemPrompt}
+${platformBusinessRulesPrompt(settings)}
 ${runtimeBusinessInstructions(businessConfig)}
 
 Live session identity and language:
 - Your receptionist name is ${identity.agentName}.
 - Speak in ${identity.language}.
 - Introduce yourself as ${identity.agentName}.
-- Continue using ${identity.language} unless the caller explicitly requests another language.
-- If the caller changes languages and you understand it, respond naturally in the caller's requested language.`;
+- Follow the platform-wide language rules above.`;
           const setup = {
             setup: {
               model: selectedLiveModel,
@@ -7662,9 +9221,9 @@ Live session identity and language:
             },
           };
           geminiWs.send(JSON.stringify(setup));
-          console.log(`[live] Gemini socket opened for ${profile.businessName} using ${selectedLiveModel}`);
-          sendClient({ type: "status", status: "gemini_open" });
-          sendClient({ type: "debug", message: `Gemini Live socket opened with ${selectedLiveModel}.` });
+          console.log(`[live] voice provider socket opened for ${profile.businessName} using ${selectedLiveModel}`);
+          sendClient({ type: "status", status: "agent_open" });
+          sendClient({ type: "debug", message: "Live agent connection opened." });
         });
 
         geminiWs.on("message", async (geminiRaw) => {
@@ -7679,7 +9238,7 @@ Live session identity and language:
             greeted = true;
             setupComplete = true;
             sendClient({ type: "ready" });
-            sendClient({ type: "debug", message: "Gemini Live setup completed. Asking agent to greet." });
+            sendClient({ type: "debug", message: "Live agent setup completed. Asking agent to greet." });
             geminiWs.send(
               JSON.stringify({
                 clientContent: {
@@ -7702,14 +9261,16 @@ Live session identity and language:
           if (geminiMessage.serverContent) {
             const serverContent = geminiMessage.serverContent;
             if (serverContent.inputTranscription?.text) {
+              flushBrowserAgentTranscript();
               const callerText = serverContent.inputTranscription.text;
               sendClient({ type: "transcript", speaker: "caller", text: callerText });
               if (maybeEndBrowserCallFromCallerText(callerText)) return;
             }
             if (serverContent.outputTranscription?.text) {
-              sendClient({ type: "transcript", speaker: "agent", text: serverContent.outputTranscription.text });
+              appendBrowserAgentTranscriptChunk(serverContent.outputTranscription.text);
             }
             if (serverContent.interrupted) {
+              flushBrowserAgentTranscript();
               sendClient({ type: "interrupted" });
               sendClient({ type: "debug", message: "Agent playback interrupted by caller speech." });
             }
@@ -7724,7 +9285,7 @@ Live session identity and language:
                 if (outputAudioChunks === 1 || outputAudioChunks % 10 === 0) {
                   sendClient({
                     type: "debug",
-                    message: `Received Gemini audio chunk ${outputAudioChunks}.`,
+                    message: `Received agent audio chunk ${outputAudioChunks}.`,
                   });
                 }
                 sendClient({
@@ -7739,9 +9300,13 @@ Live session identity and language:
               sendClient({ type: "mic_ready" });
               sendClient({ type: "debug", message: "Initial greeting finished. Microphone forwarding enabled." });
             }
+            if (serverContent.turnComplete) {
+              flushBrowserAgentTranscript();
+            }
           }
 
           if (geminiMessage.toolCall) {
+            flushBrowserAgentTranscript();
             await handleToolCall(geminiWs, clientWs, profile, businessConfig, geminiMessage.toolCall);
             sendClient({ type: "tool_call", toolCall: geminiMessage.toolCall });
           }
@@ -7752,14 +9317,15 @@ Live session identity and language:
         });
 
         geminiWs.on("close", (code, reason) => {
-          console.log(`[live] Gemini socket closed code=${code} reason=${reason.toString()}`);
-          sendClient({ type: "status", status: "gemini_closed", code, reason: reason.toString() });
+          console.log(`[live] voice provider socket closed code=${code} reason=${reason.toString()}`);
+          flushBrowserAgentTranscript();
+          sendClient({ type: "status", status: "agent_closed", code, reason: reason.toString() });
           recordLiveBrowserUsageOnce().catch(() => {});
         });
 
         geminiWs.on("error", (error) => {
-          console.error("[live] Gemini socket error", error);
-          sendClient({ type: "error", error: error.message });
+          console.error("[live] voice provider socket error", error);
+          sendClient({ type: "error", error: `Live agent connection error: ${error.message}` });
         });
       } catch (error) {
         sendClient({ type: "error", error: error.message });
@@ -7772,7 +9338,7 @@ Live session identity and language:
       if (!micForwardingEnabled) return;
       inputAudioChunks += 1;
       if (inputAudioChunks === 1 || inputAudioChunks % 50 === 0) {
-        sendClient({ type: "debug", message: `Sent microphone audio chunk ${inputAudioChunks} to Gemini.` });
+        sendClient({ type: "debug", message: `Sent microphone audio chunk ${inputAudioChunks} to live agent.` });
       }
       geminiWs.send(
         JSON.stringify({

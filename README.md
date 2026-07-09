@@ -140,21 +140,22 @@ The phone bridge currently runs in Telnyx bidirectional media-stream mode:
 1. Telnyx sends `call.initiated` to `/webhooks/telnyx`.
 2. The app looks up the dialed number, resolves the business/onboarding/qualification call context, answers the call, and starts a token-protected WebSocket stream at `/telnyx-media`.
 3. Telnyx connects the media socket with inbound RTP media only from the caller leg and accepts outbound RTP media back to the same call leg.
-4. The bridge opens Gemini Live with `TELNYX_LIVE_MODEL` when set; otherwise it uses the admin-configured live model.
+4. The bridge opens Gemini Live with the admin-configured live model. `TELNYX_LIVE_MODEL` is ignored unless `TELNYX_LIVE_MODEL_FORCE=true` is also set.
 5. Gemini receives caller audio as 16 kHz PCM16 little-endian audio.
 6. Gemini returns agent audio as 24 kHz PCM16 little-endian audio.
-7. The bridge resamples Gemini audio from 24 kHz to 16 kHz with a stateful converter, writes it as Telnyx `L16`, splits it into 20 ms frames, and paces those frames back to Telnyx.
+7. The bridge converts Gemini audio from 24 kHz PCM to the configured Telnyx outbound codec, splits it into 20 ms frames, and paces those frames back to Telnyx.
 8. When Gemini reports `serverContent.interrupted`, the bridge clears the queued outbound audio and sends Telnyx a `clear` event so caller barge-in can stop agent playback.
 
 Current phone codec settings:
 
-- Telnyx inbound stream: `L16`, 16 kHz, mono.
-- Telnyx outbound stream: `L16`, 16 kHz, mono.
-- Telnyx L16 byte order: little-endian by default. Set `TELNYX_L16_ENDIAN=BE` only as a rollback/test override.
-- Outbound frame size: 20 ms, which is 320 samples or 640 bytes for `L16` at 16 kHz.
+- Telnyx inbound stream: `PCMU`, 8 kHz, mono by default. Set `TELNYX_STREAM_CODEC=L16` and `TELNYX_STREAM_SAMPLE_RATE=16000` to test the previous linear PCM path.
+- Telnyx outbound stream: `PCMU`, 8 kHz, mono by default. Set `TELNYX_OUTBOUND_CODEC=L16` and `TELNYX_OUTBOUND_SAMPLE_RATE=16000` to test the previous linear PCM path.
+- Telnyx L16 byte order: little-endian by default when L16 is enabled. Set `TELNYX_L16_ENDIAN=BE` only as a rollback/test override.
+- Outbound frame size: 20 ms, which is 160 bytes for `PCMU` at 8 kHz or 640 bytes for `L16` at 16 kHz.
 - Gemini input from the bridge: PCM16 little-endian at 16 kHz.
 - Gemini output to the bridge: PCM16 little-endian at 24 kHz.
-- Current local phone model override: `TELNYX_LIVE_MODEL=models/gemini-2.5-flash-native-audio-preview-09-2025`.
+- Phone model default: the admin-configured live model, matching the browser call path. Use `TELNYX_LIVE_MODEL_FORCE=true` plus `TELNYX_LIVE_MODEL=...` only for explicit test overrides.
+- Normal phone playback does not drop queued audio frames by default, because that cuts words. Barge-in still clears stale queued playback when the caller interrupts. Set `TELNYX_DROP_QUEUED_AUDIO=1` only for latency experiments.
 - Bridge audio diagnostics are disabled by default. Set `BRIDGE_AUDIO_CAPTURE=1` for a debug run, and optionally set `BRIDGE_AUDIO_CAPTURE_MS=60000` to capture a longer window. Files are written under `logs/audio-dumps/` and are ignored by git.
 
 The browser call path is separate from Telnyx: the browser streams microphone audio to the app as 16 kHz PCM, Gemini returns 24 kHz PCM, and the browser plays it directly through Web Audio. Browser clients also clear queued playback when Gemini reports an interruption.

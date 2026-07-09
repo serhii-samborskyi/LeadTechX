@@ -29,6 +29,7 @@
 
       <nav class="admin-page-tabs" aria-label="Admin sections">
         <button class="active" data-admin-tab="system" type="button"><i data-lucide="cpu"></i> System</button>
+        <button data-admin-tab="health" type="button"><i data-lucide="activity"></i> Health</button>
         <button data-admin-tab="accounts" type="button"><i data-lucide="building-2"></i> Business accounts</button>
         <button data-admin-tab="numbers" type="button"><i data-lucide="phone"></i> Phone numbers</button>
         <button data-admin-tab="onboarding" type="button"><i data-lucide="bot"></i> Onboarding</button>
@@ -37,57 +38,205 @@
 
       <section class="admin-page-view active" data-admin-view="system">
         <div class="section-heading">
-          <div><h2>AI and providers</h2><p>Global models and encrypted provider credentials.</p></div>
+          <div><h2>AI and providers</h2><p>Global AI settings and encrypted provider credentials.</p></div>
           <span class="admin-status" id="systemStatus"></span>
         </div>
-        <form id="systemForm" class="settings-form">
-          <div class="form-grid">
-            <label>Research model<input id="systemResearchModel" required /></label>
-            <label>Gemini Live model<input id="systemLiveModel" required /></label>
+        <nav class="system-subtabs" aria-label="System setting groups">
+          <button class="active" data-system-tab="core" type="button"><i data-lucide="sliders-horizontal"></i> Core</button>
+          <button data-system-tab="rules" type="button"><i data-lucide="list-checks"></i> Rules</button>
+          <button data-system-tab="credentials" type="button"><i data-lucide="key-round"></i> Credentials</button>
+          <button data-system-tab="credits" type="button"><i data-lucide="coins"></i> Credits</button>
+          <button data-system-tab="messaging" type="button"><i data-lucide="message-square"></i> Messaging</button>
+          <button data-system-tab="billing" type="button"><i data-lucide="credit-card"></i> Stripe</button>
+          <button data-system-tab="email" type="button"><i data-lucide="mail"></i> Email</button>
+          <button data-system-tab="plans" type="button"><i data-lucide="badge-dollar-sign"></i> Plans</button>
+        </nav>
+
+        <form id="systemForm" class="settings-form system-settings-form">
+          <section class="system-panel active" data-system-panel="core">
+            <div class="system-panel-heading"><h3>Core AI settings</h3><p>Default engines used for business research and live calls.</p></div>
+            <div class="form-grid">
+              <label>Research engine<input id="systemResearchModel" required /></label>
+              <label>Live voice engine<input id="systemLiveModel" required /></label>
+            </div>
+          </section>
+          <section class="system-panel" data-system-panel="rules">
+            <div class="system-panel-heading"><h3>Global business agent rules</h3><p>Rules applied to every business receptionist, phone call, browser call, and outbound qualification call.</p></div>
+            <label class="wide-field">Platform rules<textarea id="platformBusinessRules" rows="9"></textarea></label>
+          </section>
+          <section class="system-panel" data-system-panel="credentials">
+            <div class="system-panel-heading"><h3>Provider credentials</h3><p>Encrypted platform keys and the public URL providers call back to.</p></div>
+            <div class="form-grid secret-grid">
+              <label>AI provider API key<input id="geminiApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="geminiApiKeyState"></small></label>
+              <label>Telnyx API key<input id="telnyxApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxApiKeyState"></small></label>
+              <label>Telnyx public key<input id="telnyxPublicKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxPublicKeyState"></small></label>
+              <label>Telnyx connection ID<input id="telnyxConnectionId" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxConnectionIdState"></small></label>
+              <label class="wide-field">Public base URL<input id="publicBaseUrl" type="url" placeholder="https://example.ngrok-free.app" /><small>Used for provider webhooks and secure media sockets.</small></label>
+            </div>
+          </section>
+          <section class="system-panel" data-system-panel="credits">
+            <div class="system-panel-heading"><h3>Trials and credit rates</h3><p>Default trial limits and how usage converts into token deductions.</p></div>
+            <div class="form-grid">
+              <label>Trial length (days)<input id="trialDays" type="number" min="1" required /></label>
+              <label>Claim link validity (days)<input id="claimLinkDays" type="number" min="1" required /></label>
+              <label>Trial credits<input id="trialCredits" type="number" min="0" required /></label>
+              <label>USD per token<input id="tokenUsd" type="number" min="0.000001" step="0.000001" required /></label>
+              <label>Low balance warning (tokens)<input id="lowBalanceTokens" type="number" min="0" required /></label>
+              <label>Voice minute credits<input id="voiceMinuteCredits" type="number" min="0" required /></label>
+              <label>AI voice minute credits<input id="geminiMinuteCredits" type="number" min="0" required /></label>
+              <label>Outbound call credits<input id="outboundCallCredits" type="number" min="0" required /></label>
+              <label>Message credits<input id="messageCredits" type="number" min="0" required /></label>
+              <label>Recording retention (days)<input id="recordingRetentionDays" type="number" min="1" required /></label>
+              <label>Businesses per demo number<input id="demoNumberCapacity" type="number" min="1" required /></label>
+              <label>Caller numbers per trial<input id="demoCallerLimit" type="number" min="1" required /></label>
+            </div>
+          </section>
+          <section class="system-panel" data-system-panel="messaging">
+            <div class="system-panel-heading"><h3>Text delivery</h3><p>Platform messaging providers, outbound send settings, and inbound reply webhooks.</p></div>
+            <div class="messaging-settings">
+              <div class="messaging-card">
+                <div class="messaging-card-heading">
+                  <h4>Provider routing</h4>
+                  <p>Choose the default sender and optional fallback for platform messages.</p>
+                </div>
+                <div class="form-grid secret-grid messaging-card-grid">
+                  <label>Primary provider<select id="messagePrimaryProvider"><option value="bluebubbles">BlueBubbles</option><option value="sentdm">Sent.dm</option><option value="none">None</option></select></label>
+                  <label>Failover provider<select id="messageFailoverProvider"><option value="sentdm">Sent.dm</option><option value="bluebubbles">BlueBubbles</option><option value="none">None</option></select></label>
+                </div>
+              </div>
+              <div class="messaging-card">
+                <div class="messaging-card-heading">
+                  <h4>BlueBubbles</h4>
+                  <p>Use BlueBubbles for iMessage/SMS sending and inbound customer replies.</p>
+                </div>
+                <div class="form-grid secret-grid messaging-card-grid">
+                  <label>Server URL<input id="blueBubblesBaseUrl" type="url" placeholder="https://your-bluebubbles-server" /></label>
+                  <label>Send path<input id="blueBubblesSendPath" placeholder="/api/v1/message/text" /></label>
+                  <label>Password<input id="blueBubblesPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="blueBubblesPasswordState"></small></label>
+                </div>
+                <div class="system-webhook-card">
+                  <div>
+                    <h4>Replies webhook</h4>
+                    <p>Paste this URL into BlueBubbles so customer replies can be routed back to onboarding calls and CRM context.</p>
+                  </div>
+                  <div class="system-webhook-controls">
+                    <input id="blueBubblesWebhookUrl" readonly placeholder="Set Public base URL and BlueBubbles password first" />
+                    <button id="copyBlueBubblesWebhookUrl" type="button"><i data-lucide="copy"></i> Copy</button>
+                  </div>
+                  <small>The copied URL includes ?password= when BlueBubbles password is configured.</small>
+                </div>
+                <div class="provider-diagnostic bluebubbles-diagnostic">
+                  <div class="form-grid messaging-card-grid">
+                    <label>Test phone<input id="blueBubblesTestPhone" type="tel" placeholder="+12245550123" /></label>
+                    <label class="wide-field">Test message<textarea id="blueBubblesTestMessage" rows="2">Test message from Receptionist admin.</textarea></label>
+                  </div>
+                  <div class="provider-diagnostic-actions">
+                    <button id="sendBlueBubblesTest" type="button"><i data-lucide="send"></i> Send test message</button>
+                    <button id="refreshBlueBubblesReplies" type="button"><i data-lucide="refresh-cw"></i> Refresh replies</button>
+                  </div>
+                  <div id="blueBubblesDiagnostics" class="provider-diagnostic-output"></div>
+                </div>
+                <div class="inbound-replies-panel">
+                  <div class="inbound-replies-heading">
+                    <h4>Last replies received</h4>
+                    <p>Recent inbound messages received from the BlueBubbles webhook.</p>
+                  </div>
+                  <div id="blueBubblesReplies" class="inbound-replies-list"></div>
+                </div>
+              </div>
+              <div class="messaging-card">
+                <div class="messaging-card-heading">
+                  <h4>Sent.dm</h4>
+                  <p>Template-based SMS provider settings and diagnostics.</p>
+                </div>
+                <div class="form-grid secret-grid messaging-card-grid">
+                  <label>API key<input id="sentDmApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="sentDmApiKeyState"></small></label>
+                  <label>Template ID<input id="sentDmTemplateId" /></label>
+                  <label>Template name<input id="sentDmTemplateName" /></label>
+                  <label>Profile ID<input id="sentDmProfileId" /></label>
+                </div>
+                <div class="provider-diagnostic">
+                  <button id="checkSentDm" type="button"><i data-lucide="list-checks"></i> Check Sent.dm</button>
+                  <div id="sentDmDiagnostics" class="provider-diagnostic-output"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="system-panel" data-system-panel="billing">
+            <div class="system-panel-heading"><h3>Stripe billing</h3><p>Global Stripe credentials and the default top-up pack shown to businesses.</p></div>
+            <div class="form-grid secret-grid">
+              <label>Stripe secret key<input id="stripeSecretKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="stripeSecretKeyState"></small></label>
+              <label>Stripe webhook secret<input id="stripeWebhookSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="stripeWebhookSecretState"></small></label>
+              <label>Default top-up credits<input id="stripeCreditPackCredits" type="number" min="1" required /></label>
+              <div class="system-webhook-card">
+                <div>
+                  <h4>Stripe webhook endpoint</h4>
+                  <p>Add this URL in Stripe so paid checkouts and subscriptions update credits automatically.</p>
+                </div>
+                <div class="system-webhook-controls">
+                  <input id="stripeWebhookUrl" readonly placeholder="Set Public base URL first" />
+                  <button id="copyStripeWebhookUrl" type="button"><i data-lucide="copy"></i> Copy</button>
+                </div>
+                <small>Enable events: checkout.session.completed, checkout.session.async_payment_succeeded, customer.subscription.updated, customer.subscription.deleted, invoice.paid, invoice.payment_succeeded.</small>
+              </div>
+            </div>
+          </section>
+          <section class="system-panel" data-system-panel="email">
+            <div class="system-panel-heading"><h3>Email delivery</h3><p>SMTP settings for claim links and account messages.</p></div>
+            <div class="form-grid secret-grid">
+              <label>SMTP host<input id="smtpHost" placeholder="smtp.example.com" /></label>
+              <label>SMTP port<input id="smtpPort" type="number" min="1" /></label>
+              <label>SMTP username<input id="smtpUsername" autocomplete="off" placeholder="Leave blank to keep current" /><small id="smtpUsernameState"></small></label>
+              <label>SMTP password<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="smtpPasswordState"></small></label>
+              <label>From email<input id="smtpFromEmail" type="email" placeholder="receptionist@example.com" /></label>
+              <label>From name<input id="smtpFromName" placeholder="AI Receptionist" /></label>
+              <label class="check-label"><input id="smtpSecure" type="checkbox" /> Use implicit TLS (usually port 465)</label>
+            </div>
+            <div class="provider-diagnostic email-diagnostic">
+              <label>Test recipient<input id="emailTestRecipient" type="email" placeholder="Send test to this email" /></label>
+              <div class="provider-diagnostic-actions">
+                <button id="checkSmtpConnection" type="button"><i data-lucide="plug-zap"></i> Test connection</button>
+                <button id="sendTestEmail" type="button"><i data-lucide="send"></i> Send test email</button>
+              </div>
+              <div id="emailDiagnostics" class="provider-diagnostic-output"></div>
+            </div>
+          </section>
+          <div class="system-save-row">
+            <button class="primary action-button" type="submit"><i data-lucide="save"></i> Save system settings</button>
           </div>
-          <h3>Credentials</h3>
-          <div class="form-grid secret-grid">
-            <label>Gemini API key<input id="geminiApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="geminiApiKeyState"></small></label>
-            <label>Telnyx API key<input id="telnyxApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxApiKeyState"></small></label>
-            <label>Telnyx public key<input id="telnyxPublicKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxPublicKeyState"></small></label>
-            <label>Telnyx connection ID<input id="telnyxConnectionId" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxConnectionIdState"></small></label>
-            <label>Public base URL<input id="publicBaseUrl" type="url" placeholder="https://example.ngrok-free.app" /><small>Used for provider webhooks and secure media sockets.</small></label>
-          </div>
-          <h3>Trials and credits</h3>
-          <div class="form-grid">
-            <label>Trial length (days)<input id="trialDays" type="number" min="1" required /></label>
-            <label>Claim link validity (days)<input id="claimLinkDays" type="number" min="1" required /></label>
-            <label>Trial credits<input id="trialCredits" type="number" min="0" required /></label>
-            <label>USD per token<input id="tokenUsd" type="number" min="0.000001" step="0.000001" required /></label>
-            <label>Low balance warning (tokens)<input id="lowBalanceTokens" type="number" min="0" required /></label>
-            <label>Voice minute credits<input id="voiceMinuteCredits" type="number" min="0" required /></label>
-            <label>Gemini minute credits<input id="geminiMinuteCredits" type="number" min="0" required /></label>
-            <label>Outbound call credits<input id="outboundCallCredits" type="number" min="0" required /></label>
-            <label>Message credits<input id="messageCredits" type="number" min="0" required /></label>
-            <label>Recording retention (days)<input id="recordingRetentionDays" type="number" min="1" required /></label>
-            <label>Businesses per demo number<input id="demoNumberCapacity" type="number" min="1" required /></label>
-            <label>Caller numbers per trial<input id="demoCallerLimit" type="number" min="1" required /></label>
-          </div>
-          <h3>Stripe billing</h3>
-          <div class="form-grid secret-grid">
-            <label>Stripe secret key<input id="stripeSecretKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="stripeSecretKeyState"></small></label>
-            <label>Stripe webhook secret<input id="stripeWebhookSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="stripeWebhookSecretState"></small></label>
-            <label>Credit pack size<input id="stripeCreditPackCredits" type="number" min="1" required /></label>
-            <label>Subscription monthly credits<input id="stripeSubscriptionCredits" type="number" min="0" required /></label>
-            <label class="wide-field">Subscription price ID<input id="stripeSubscriptionPriceId" placeholder="price_..." /></label>
-          </div>
-          <h3>Email delivery</h3>
-          <div class="form-grid secret-grid">
-            <label>SMTP host<input id="smtpHost" placeholder="smtp.example.com" /></label>
-            <label>SMTP port<input id="smtpPort" type="number" min="1" /></label>
-            <label>SMTP username<input id="smtpUsername" autocomplete="off" placeholder="Leave blank to keep current" /><small id="smtpUsernameState"></small></label>
-            <label>SMTP password<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="smtpPasswordState"></small></label>
-            <label>From email<input id="smtpFromEmail" type="email" placeholder="receptionist@example.com" /></label>
-            <label>From name<input id="smtpFromName" placeholder="AI Receptionist" /></label>
-            <label class="check-label"><input id="smtpSecure" type="checkbox" /> Use implicit TLS (usually port 465)</label>
-          </div>
-          <button class="primary action-button" type="submit"><i data-lucide="save"></i> Save system settings</button>
         </form>
+        <section class="system-panel plan-manager-panel" data-system-panel="plans">
+          <div class="section-heading">
+            <div><h3>Subscription plans</h3><p>Plans shown to businesses for monthly billing and included monthly tokens.</p></div>
+          </div>
+          <form id="planForm" class="settings-form" novalidate>
+            <input id="planId" type="hidden" />
+            <div class="form-grid">
+              <label>Plan name<input id="planName" required placeholder="Starter" /></label>
+              <label>Slug<input id="planSlug" placeholder="starter" /></label>
+              <label>Monthly price USD<input id="planMonthlyPrice" type="number" min="0" step="0.01" required /></label>
+              <label>Monthly tokens<input id="planMonthlyCredits" type="number" min="0" step="100" required /></label>
+              <label>Stripe price ID <span>optional</span><input id="planStripePriceId" placeholder="price_..." /></label>
+              <label>Sort order<input id="planSortOrder" type="number" step="1" value="0" /></label>
+              <label class="wide-field">Description<textarea id="planDescription" rows="3"></textarea></label>
+              <label class="check-label"><input id="planActive" type="checkbox" checked /> Active plan</label>
+            </div>
+            <div class="calendar-actions">
+              <button id="savePlanButton" class="primary" type="submit"><i data-lucide="save"></i> Save plan</button>
+              <button id="resetPlanButton" type="button">New plan</button>
+              <span class="form-message" id="planMessage"></span>
+            </div>
+          </form>
+          <div class="data-list" id="planList"></div>
+        </section>
+      </section>
+
+      <section class="admin-page-view" data-admin-view="health">
+        <div class="section-heading">
+          <div><h2>System health</h2><p>Platform readiness, providers, webhooks, billing, and recent call issues.</p></div>
+          <button id="refreshAdminHealth" type="button"><i data-lucide="refresh-cw"></i> Refresh</button>
+        </div>
+        <div class="data-list" id="adminHealthList"></div>
       </section>
 
       <section class="admin-page-view" data-admin-view="accounts">
@@ -138,22 +287,6 @@
             <label class="check-label"><input id="onboardingRecordCalls" type="checkbox" /> Record onboarding calls</label>
             <label class="check-label"><input id="onboardingTranscription" type="checkbox" /> Store call transcripts</label>
           </div>
-          <h3>Text delivery</h3>
-          <div class="form-grid secret-grid">
-            <label>Primary provider<select id="messagePrimaryProvider"><option value="bluebubbles">BlueBubbles</option><option value="sentdm">Sent.dm</option><option value="none">None</option></select></label>
-            <label>Failover provider<select id="messageFailoverProvider"><option value="sentdm">Sent.dm</option><option value="bluebubbles">BlueBubbles</option><option value="none">None</option></select></label>
-            <label>BlueBubbles server URL<input id="blueBubblesBaseUrl" type="url" placeholder="https://your-bluebubbles-server" /></label>
-            <label>BlueBubbles send path<input id="blueBubblesSendPath" placeholder="/api/v1/message/text" /></label>
-            <label>BlueBubbles password<input id="blueBubblesPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="blueBubblesPasswordState"></small></label>
-            <label>Sent.dm API key<input id="sentDmApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="sentDmApiKeyState"></small></label>
-            <label>Sent.dm template ID<input id="sentDmTemplateId" /></label>
-            <label>Sent.dm template name<input id="sentDmTemplateName" /></label>
-            <label>Sent.dm profile ID<input id="sentDmProfileId" /></label>
-            <div class="wide-field provider-diagnostic">
-              <button id="checkSentDm" type="button"><i data-lucide="list-checks"></i> Check Sent.dm</button>
-              <div id="sentDmDiagnostics" class="provider-diagnostic-output"></div>
-            </div>
-          </div>
           <button class="primary action-button" type="submit"><i data-lucide="save"></i> Save onboarding settings</button>
         </form>
         <div class="section-heading onboarding-history-heading">
@@ -165,19 +298,8 @@
 
       <section class="admin-page-view" data-admin-view="calls">
         <div class="section-heading">
-          <div><h2>Telnyx call logs</h2><p>Webhook delivery, media streaming, Gemini startup, and errors.</p></div>
+          <div><h2>Telnyx call logs</h2><p>Webhook delivery, media streaming, live agent startup, and errors.</p></div>
           <button id="refreshCalls" type="button"><i data-lucide="refresh-cw"></i> Refresh</button>
-        </div>
-        <div class="diagnostic-panel">
-          <h3>Audio diagnostics</h3>
-          <p>Start a live phone call, refresh logs, then run Telnyx native speak on that active call.</p>
-          <div class="form-grid">
-            <label class="wide-field">Test phrase<textarea id="diagnosticPhrase" rows="3">Telnyx diagnostic test. If you can hear this sentence clearly, Telnyx native audio is working on this phone call.</textarea></label>
-            <label>Voice<input id="diagnosticVoice" value="female" /><small>Use female/male for basic Telnyx TTS, or a provider voice like Telnyx.KokoroTTS.af.</small></label>
-            <label>Target leg<select id="diagnosticTargetLegs"><option value="self">self</option><option value="opposite">opposite</option><option value="both">both</option></select></label>
-            <label class="check-label"><input id="diagnosticStopStream" type="checkbox" checked /> Stop AI media stream before speaking</label>
-          </div>
-          <p class="form-message" id="diagnosticStatus"></p>
         </div>
         <div class="call-log-list" id="callLogList"></div>
       </section>

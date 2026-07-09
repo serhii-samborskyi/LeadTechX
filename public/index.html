@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Receptionist on Gemini Live</title>
+    <title>AI Receptionist</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -21,9 +21,9 @@
     <main class="shell auth-content" id="appShell" hidden>
       <section class="topbar" id="callScreen">
         <div>
-          <p class="eyebrow"><i data-lucide="sparkles"></i> Gemini Live receptionist</p>
+          <p class="eyebrow"><i data-lucide="sparkles"></i> AI receptionist</p>
           <h1 id="title">Virtual assistant for "Business Name"</h1>
-          <p class="header-copy">Live calls, business knowledge, and appointments in one place.</p>
+          <p class="header-copy">Test the receptionist, manage leads, and keep business details up to date.</p>
         </div>
         <div class="topbar-actions">
           <div class="status" id="status"><i data-lucide="circle"></i> Idle</div>
@@ -45,16 +45,16 @@
             <span class="number-dot" aria-hidden="true"></span>
             <div>
               <strong id="numberStatusTitle">Phone number not checked</strong>
-              <span id="numberStatusDetail">Open business setup to check assignment.</span>
+              <span id="numberStatusDetail">Open setup to check assignment.</span>
             </div>
           </div>
 
           <button id="talkButton" class="primary call-action" type="button"><i data-lucide="phone-call"></i><span>Talk with agent</span></button>
           <button id="stopButton" type="button" disabled><i data-lucide="phone-off"></i><span>Stop call</span></button>
           <button id="testSpeakerButton" type="button"><i data-lucide="volume-2"></i><span>Test speaker</span></button>
-          <button id="refreshButton" type="button"><i data-lucide="refresh-cw"></i><span>Refresh research</span></button>
+          <button id="refreshButton" type="button"><i data-lucide="refresh-cw"></i><span>Refresh profile</span></button>
 
-          <button id="openAdminButton" type="button"><i data-lucide="sliders-horizontal"></i><span>Business setup</span></button>
+          <button id="openAdminButton" type="button"><i data-lucide="sliders-horizontal"></i><span>Manage setup</span></button>
         </aside>
 
         <section class="panel call">
@@ -64,9 +64,9 @@
               <i data-lucide="audio-lines"></i>
             </div>
             <div>
-              <h2 id="callHeading">Ready to research the business</h2>
-              <p id="callSubheading">Start a call to build the cached business profile and connect to Gemini Live.</p>
-              <p class="diagnostics" id="diagnostics">Mic chunks: 0 | Gemini audio chunks: 0 | Audio seconds: 0.0</p>
+              <h2 id="callHeading">Ready to test the receptionist</h2>
+              <p id="callSubheading">Start a browser call to test how the agent answers customers.</p>
+              <p class="diagnostics" id="diagnostics">Mic chunks: 0 | Agent audio chunks: 0 | Audio seconds: 0.0</p>
             </div>
           </div>
 
@@ -79,7 +79,7 @@
         </section>
 
         <aside class="panel profile" id="profileScreen">
-          <h2>Cached business profile</h2>
+          <h2>Business snapshot</h2>
           <dl id="profileFields">
             <dt>Name</dt>
             <dd id="profileName">Not loaded</dd>
@@ -90,7 +90,7 @@
             <dt>Service area</dt>
             <dd id="profileArea">Not loaded</dd>
           </dl>
-          <h2>Demo records</h2>
+          <h2>Recent records</h2>
           <div class="records" id="records">No records yet</div>
         </aside>
       </section>
@@ -98,28 +98,28 @@
       <section class="panel admin-panel" id="businessAdmin">
         <div class="admin-header">
           <div>
-            <p class="eyebrow">Per-business configuration</p>
-            <h2>Business setup</h2>
+            <p class="eyebrow">Business tools</p>
+            <h2>Manage business</h2>
           </div>
           <div class="admin-status" id="adminStatus">Loading</div>
         </div>
 
-        <nav class="admin-tabs" role="tablist" aria-label="Business setup">
-          <button class="admin-tab active" data-tab="business-info" role="tab" aria-selected="true" type="button">Business</button>
-          <button class="admin-tab" data-tab="agent" role="tab" aria-selected="false" type="button">Agent</button>
-          <button class="admin-tab" data-tab="questions" role="tab" aria-selected="false" type="button">What to ask</button>
-          <button class="admin-tab" data-tab="knowledge" role="tab" aria-selected="false" type="button">Knowledge</button>
-          <button class="admin-tab" data-tab="prices" role="tab" aria-selected="false" type="button">Prices</button>
-          <button class="admin-tab" data-tab="instructions" role="tab" aria-selected="false" type="button">Instructions</button>
-          <button class="admin-tab" data-tab="appointments" role="tab" aria-selected="false" type="button">Appointments</button>
-          <button class="admin-tab" data-tab="crm" role="tab" aria-selected="false" type="button">CRM</button>
+        <nav class="admin-tabs" role="tablist" aria-label="Business tools">
+          <button class="admin-tab active" data-tab="setup" role="tab" aria-selected="true" type="button">Setup</button>
+          <button class="admin-tab" data-tab="content" role="tab" aria-selected="false" type="button">Content</button>
+          <button class="admin-tab" data-tab="automation" role="tab" aria-selected="false" type="button">Automation</button>
+          <button class="admin-tab" data-tab="calendar" role="tab" aria-selected="false" type="button">Calendar</button>
+          <button class="admin-tab" data-tab="leads" role="tab" aria-selected="false" type="button">Leads</button>
           <button class="admin-tab" data-tab="messages" role="tab" aria-selected="false" type="button">Messages</button>
-          <button class="admin-tab" data-tab="usage" role="tab" aria-selected="false" type="button">Usage</button>
-          <button class="admin-tab" data-tab="health" role="tab" aria-selected="false" type="button">Health</button>
+          <button class="admin-tab" data-tab="billing" role="tab" aria-selected="false" type="button">Billing</button>
         </nav>
 
         <div class="admin-content">
-          <section class="admin-view active" data-view="business-info">
+          <section class="admin-view active" data-view="setup">
+            <div class="admin-view-heading">
+              <h3>Business information</h3>
+              <p>These details tell the receptionist what the business does, where it works, and how customers can book.</p>
+            </div>
             <div class="form-grid business-info-grid">
               <label>Business name<input id="profileBusinessName" /></label>
               <label>Website<input id="profileWebsite" type="url" /></label>
@@ -137,19 +137,12 @@
             <button id="saveBusinessProfileButton" class="primary action-button" type="button">Save business information</button>
           </section>
 
-          <section class="admin-view" data-view="agent">
+          <section class="admin-view active" data-view="setup">
+            <div class="admin-view-heading">
+              <h3>Agent basics</h3>
+              <p>Choose the public-facing name, voice, and language for this business receptionist.</p>
+            </div>
             <div class="form-grid">
-              <label>Research model<input id="researchModel" list="researchModels" /></label>
-              <datalist id="researchModels">
-                <option value="gemini-3.1-pro-preview"></option>
-                <option value="gemini-3.5-flash"></option>
-                <option value="gemini-2.5-pro"></option>
-              </datalist>
-              <label>Live model<input id="liveModel" list="liveModels" /></label>
-              <datalist id="liveModels">
-                <option value="models/gemini-3.1-flash-live-preview"></option>
-                <option value="models/gemini-2.5-flash-native-audio-preview-09-2025"></option>
-              </datalist>
               <label>Voice<select id="voiceName"><option>Puck</option><option>Charon</option><option>Kore</option><option>Fenrir</option><option>Aoede</option></select></label>
               <label>Language<select id="language"><option>English</option><option>Spanish</option><option>French</option><option>German</option><option>Italian</option><option>Portuguese</option><option>Polish</option><option>Ukrainian</option><option>Russian</option><option>Arabic</option><option>Hindi</option><option>Japanese</option><option>Korean</option><option>Chinese</option></select></label>
               <label>Agent name<input id="agentName" placeholder="Alex" autocomplete="off" /></label>
@@ -157,7 +150,11 @@
             <button id="saveSettingsButton" class="primary action-button" type="button">Save agent settings</button>
           </section>
 
-          <section class="admin-view" data-view="questions">
+          <section class="admin-view" data-view="content">
+            <div class="admin-view-heading">
+              <h3>Questions to ask</h3>
+              <p>Fields the receptionist should collect from callers and form leads.</p>
+            </div>
             <div class="inline-editor intake-editor">
               <input id="intakeLabel" placeholder="Field label" />
               <input id="intakeKey" placeholder="field_key" />
@@ -169,7 +166,11 @@
             <div class="data-list" id="intakeList"></div>
           </section>
 
-          <section class="admin-view" data-view="knowledge">
+          <section class="admin-view" data-view="content">
+            <div class="admin-view-heading">
+              <h3>Knowledge base</h3>
+              <p>Answers the receptionist can use when customers ask common questions.</p>
+            </div>
             <div class="import-row">
               <input id="knowledgeFile" type="file" accept=".csv,.xlsx" />
               <button id="importKnowledgeButton" type="button">Import CSV/XLSX</button>
@@ -184,7 +185,11 @@
             <div class="data-list" id="knowledgeList"></div>
           </section>
 
-          <section class="admin-view" data-view="prices">
+          <section class="admin-view" data-view="content">
+            <div class="admin-view-heading">
+              <h3>Prices</h3>
+              <p>Service prices or pricing rules the receptionist can explain.</p>
+            </div>
             <div class="import-row">
               <input id="pricesFile" type="file" accept=".csv,.xlsx" />
               <button id="importPricesButton" type="button">Import CSV/XLSX</button>
@@ -203,8 +208,12 @@
             <div class="data-list" id="pricesList"></div>
           </section>
 
-          <section class="admin-view" data-view="instructions">
-            <label>Extra instructions<textarea id="extraInstructions" rows="10" placeholder="One instruction per line"></textarea></label>
+          <section class="admin-view" data-view="automation">
+            <div class="admin-view-heading">
+              <h3>Agent rules and follow-up</h3>
+              <p>Control qualification calls, review requests, missed-call follow-up, and complaint recovery.</p>
+            </div>
+            <label>Agent instructions<textarea id="extraInstructions" rows="10" placeholder="One instruction per line"></textarea></label>
             <div class="qualification-settings">
               <label><input id="qualificationEnabled" type="checkbox" /> Enable outbound qualification agent</label>
               <label>Launch mode<select id="qualificationLaunchMode"><option value="approval">After approval</option><option value="immediate">Immediately for new leads</option></select></label>
@@ -231,7 +240,11 @@
             <button id="saveInstructionsButton" class="primary action-button" type="button">Save instructions</button>
           </section>
 
-          <section class="admin-view" data-view="appointments">
+          <section class="admin-view" data-view="calendar">
+            <div class="admin-view-heading">
+              <h3>Calendar</h3>
+              <p>Set appointment rules and see booked or requested times.</p>
+            </div>
             <div class="form-grid calendar-settings">
               <label>Booking mode<select id="appointmentMode"><option value="instant">Book immediately</option><option value="request">Pending request</option></select></label>
               <label>Slot duration (minutes)<input id="slotDuration" type="number" min="5" step="5" /></label>
@@ -259,13 +272,13 @@
             </div>
           </section>
 
-          <section class="admin-view" data-view="crm">
+          <section class="admin-view" data-view="leads">
             <div class="section-heading crm-heading">
               <div>
-                <h3>CRM</h3>
+                <h3>Leads</h3>
                 <p>Incoming calls, captured leads, transcripts, recordings, and follow-up status.</p>
               </div>
-              <button id="refreshCrmButton" type="button">Refresh CRM</button>
+              <button id="refreshCrmButton" type="button">Refresh leads</button>
             </div>
             <div class="crm-webhook-card">
               <div>
@@ -276,6 +289,7 @@
                 <input id="crmWebhookUrl" readonly placeholder="Loading webhook URL" />
                 <button id="copyCrmWebhookButton" type="button">Copy</button>
                 <button id="rotateCrmWebhookButton" type="button">Rotate URL</button>
+                <a id="crmWebhookDocsLink" class="button-link" href="/lead-webhook-api.html" target="_blank" rel="noopener">API docs</a>
               </div>
               <small id="crmWebhookHelp">Accepted fields: name, phone, email, service, source, notes.</small>
             </div>
@@ -327,16 +341,12 @@
             <div class="section-heading">
               <div>
                 <h3>Messages</h3>
-                <p>Review requests, complaint escalations, setup links, reminders, and provider tests.</p>
+                <p>Review requests, complaint escalations, setup links, reminders, and test messages.</p>
               </div>
               <button id="refreshMessagesButton" type="button">Refresh messages</button>
             </div>
             <div class="inline-editor crm-editor">
-              <select id="testMessageProvider">
-                <option value="">Configured providers</option>
-                <option value="bluebubbles">BlueBubbles only</option>
-                <option value="sentdm">Sent.dm only</option>
-              </select>
+              <input id="testMessageProvider" type="hidden" value="" />
               <input id="testMessagePhone" placeholder="Test phone +15551234567" />
               <input id="testMessageBody" placeholder="Test message" />
               <button id="sendTestMessageButton" type="button">Send test</button>
@@ -344,10 +354,10 @@
             <div class="data-list" id="messageList"></div>
           </section>
 
-          <section class="admin-view" data-view="usage">
+          <section class="admin-view" data-view="billing">
             <div class="section-heading">
               <div>
-                <h3>Usage and credits</h3>
+                <h3>Billing and credits</h3>
                 <p>Call minutes, messages, credit deductions, and low-balance visibility.</p>
               </div>
               <button id="refreshUsageButton" type="button">Refresh usage</button>
@@ -360,23 +370,14 @@
               </div>
               <div class="inline-editor crm-editor billing-actions">
                 <input id="creditPackCredits" type="number" min="1" step="100" placeholder="Credits" />
+                <select id="billingPlanSelect" aria-label="Subscription plan"></select>
                 <button id="buyCreditsButton" type="button">Buy credits</button>
                 <button id="startSubscriptionButton" type="button">Start subscription</button>
               </div>
+              <div class="crm-summary-strip" id="billingPlanList"></div>
               <div class="data-list compact-list" id="billingHistory"></div>
             </div>
             <div class="data-list" id="usageList"></div>
-          </section>
-
-          <section class="admin-view" data-view="health">
-            <div class="section-heading">
-              <div>
-                <h3>Health</h3>
-                <p>Database, Gemini, Telnyx, messaging, public URL, and recent call health.</p>
-              </div>
-              <button id="refreshHealthButton" type="button">Refresh health</button>
-            </div>
-            <div class="data-list" id="healthList"></div>
           </section>
         </div>
       </section>

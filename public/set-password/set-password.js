@@ -3,6 +3,9 @@ const form = document.querySelector("#passwordForm");
 const title = document.querySelector("#setupTitle");
 const detail = document.querySelector("#setupDetail");
 const message = document.querySelector("#setupMessage");
+const ownerEmailLabel = document.querySelector("#ownerEmailLabel");
+const ownerEmail = document.querySelector("#ownerEmail");
+let emailRequired = false;
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -15,7 +18,13 @@ async function initialize() {
   try {
     const claim = await api(`/api/onboarding/claim?token=${encodeURIComponent(token)}`);
     title.textContent = `Keep ${claim.businessName}`;
-    detail.textContent = `Create the password for ${claim.email}.`;
+    emailRequired = Boolean(claim.emailRequired);
+    ownerEmail.value = claim.email || "";
+    ownerEmail.required = emailRequired;
+    ownerEmailLabel.hidden = !emailRequired;
+    detail.textContent = emailRequired
+      ? "Enter your email and create a password to finish setup."
+      : `Create the password for ${claim.email}.`;
     form.hidden = false;
   } catch (error) {
     title.textContent = "Setup link unavailable";
@@ -37,7 +46,12 @@ form.addEventListener("submit", async (event) => {
     await api("/api/onboarding/complete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, password, name: document.querySelector("#ownerName").value }),
+      body: JSON.stringify({
+        token,
+        password,
+        name: document.querySelector("#ownerName").value,
+        email: emailRequired ? ownerEmail.value : undefined,
+      }),
     });
     location.assign("/");
   } catch (error) {

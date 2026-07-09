@@ -1,11 +1,19 @@
 const params = new URLSearchParams(window.location.search);
+function normalizeWebsiteInput(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return "";
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
 const businessName = (params.get("business_name") || "").trim();
-const website = (params.get("website") || "").trim();
+const website = normalizeWebsiteInput(params.get("website"));
 const storageKey = `fastagent:${businessName.toLowerCase()}|${website.toLowerCase()}`;
 
 const state = {
   accessToken: localStorage.getItem(storageKey) || "",
   profile: null,
+  profileDirty: false,
+  renderingProfile: false,
   ws: null,
   micStream: null,
   inputContext: null,
@@ -40,6 +48,12 @@ const el = Object.fromEntries(
     "talkButton",
     "stopButton",
     "credits",
+    "profileForm",
+    "profileSaveButton",
+    "profileMessage",
+    "profileSummary",
+    "profilePhone",
+    "profileAddress",
     "profileHours",
     "profileArea",
     "profileServices",
@@ -103,16 +117,68 @@ function renderCallers(phones = []) {
   }
 }
 
+function editableProfileValue(value) {
+  const text = String(value || "").trim();
+  return text.toLowerCase() === "unknown" ? "" : text;
+}
+
+function profilePayload() {
+  return {
+    accessToken: state.accessToken,
+    summary: el.profileSummary.value,
+    phone: el.profilePhone.value,
+    address: el.profileAddress.value,
+    hours: el.profileHours.value,
+    serviceArea: el.profileArea.value,
+    services: el.profileServices.value,
+  };
+}
+
+function renderProfileFields(profile) {
+  state.renderingProfile = true;
+  el.agentSummary.textContent = profile.summary || "Your receptionist is ready.";
+  el.profileSummary.value = editableProfileValue(profile.summary);
+  el.profilePhone.value = editableProfileValue(profile.phone);
+  el.profileAddress.value = editableProfileValue(profile.address);
+  el.profileHours.value = editableProfileValue(profile.hours);
+  el.profileArea.value = editableProfileValue(profile.serviceArea);
+  el.profileServices.value = editableProfileValue(profile.services);
+  state.renderingProfile = false;
+  state.profileDirty = false;
+  el.profileSaveButton.disabled = false;
+  el.profileMessage.textContent = "";
+}
+
+async function saveProfile({ silent = false } = {}) {
+  if (!state.accessToken || !state.profileDirty) return state.profile;
+  el.profileSaveButton.disabled = true;
+  if (!silent) el.profileMessage.textContent = "Saving profile";
+  try {
+    const data = await api("/api/onboarding/fast-agent/profile", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(profilePayload()),
+    });
+    state.profile = data.profile;
+    renderProfileFields(data.profile);
+    if (!silent) el.profileMessage.textContent = "Profile saved";
+    return data.profile;
+  } catch (error) {
+    el.profileMessage.textContent = error.message;
+    throw error;
+  } finally {
+    el.profileSaveButton.disabled = false;
+    window.lucide?.createIcons();
+  }
+}
+
 function renderAgent(data) {
   state.profile = data.profile;
   el.loadingScreen.hidden = true;
   el.errorScreen.hidden = true;
   el.agentScreen.hidden = false;
   el.agentTitle.textContent = `Virtual assistant for ${data.profile.businessName}`;
-  el.agentSummary.textContent = data.profile.summary || "Your receptionist is ready.";
-  el.profileHours.textContent = data.profile.hours || "Unknown";
-  el.profileArea.textContent = data.profile.serviceArea || "Unknown";
-  el.profileServices.textContent = data.profile.services || "Unknown";
+  renderProfileFields(data.profile);
   el.credits.textContent = `${data.profile.creditBalance} credits`;
   const endsAt = new Date(data.profile.trialEndsAt);
   el.trialBadge.textContent = `Trial until ${endsAt.toLocaleDateString()}`;
@@ -274,6 +340,8 @@ async function startCall() {
     el.talkButton.disabled = true;
     el.stopButton.disabled = false;
     el.orb.classList.add("live");
+    setCallStatus(state.profileDirty ? "Saving profile" : "Connecting", true);
+    await saveProfile({ silent: true });
     setCallStatus("Connecting", true);
     await initOutputAudio();
     await startMicrophone();
@@ -297,7 +365,7 @@ async function startCall() {
         stopCall();
       }
       if (message.type === "end_call") stopCall();
-      if (message.type === "status" && message.status === "gemini_closed") stopCall(false);
+      if (message.type === "status" && (message.status === "agent_closed" || message.status === "gemini_closed")) stopCall(false);
     });
     state.ws.addEventListener("close", () => stopCall(false));
     state.ws.addEventListener("error", () => {
@@ -376,6 +444,19 @@ async function initialize() {
 
 el.talkButton.addEventListener("click", startCall);
 el.stopButton.addEventListener("click", () => stopCall());
+el.profileForm.addEventListener("input", () => {
+  if (state.renderingProfile) return;
+  state.profileDirty = true;
+  el.profileMessage.textContent = "Unsaved changes";
+});
+el.profileForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await saveProfile();
+  } catch {
+    // The message is already shown beside the profile form.
+  }
+});
 el.callerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   el.callerMessage.textContent = "Saving";
@@ -398,6 +479,7 @@ el.claimForm.addEventListener("submit", async (event) => {
   button.disabled = true;
   el.claimMessage.textContent = "Sending secure link";
   try {
+    await saveProfile({ silent: true });
     const data = await api("/api/onboarding/claim", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lead Webhook API</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="api-doc-body">
+    <main class="api-doc-shell">
+      <header class="api-doc-header">
+        <div>
+          <p class="eyebrow">Lead intake API</p>
+          <h1>Lead webhook</h1>
+          <p>Post website, ad, or form leads to this URL. At least one of phone or email is required.</p>
+        </div>
+        <a class="button-link" href="/" aria-label="Back to business portal">Back</a>
+      </header>
+
+      <section class="api-doc-card">
+        <h2>Endpoint</h2>
+        <p>Use HTTP POST with JSON or form data.</p>
+        <pre><code id="endpointExample"></code></pre>
+      </section>
+
+      <section class="api-doc-card">
+        <h2>Accepted Fields</h2>
+        <div class="api-field-grid">
+          <div><strong>Name</strong><span>name, full_name, fullName, contact_name, customer_name, first_name, last_name</span></div>
+          <div><strong>Phone</strong><span>phone, phone_number, phoneNumber, mobile, caller_phone, contact_phone</span></div>
+          <div><strong>Email</strong><span>email, email_address, emailAddress, contact_email</span></div>
+          <div><strong>Need</strong><span>need, service, service_needed, request, message, description, notes, comments</span></div>
+          <div><strong>Source</strong><span>source, lead_source, utm_source, platform, provider</span></div>
+          <div><strong>Status</strong><span>new, qualified, unqualified, callback, appointment, transferred, unreachable</span></div>
+        </div>
+      </section>
+
+      <section class="api-doc-card">
+        <h2>JSON Example</h2>
+        <pre><code id="jsonExample"></code></pre>
+      </section>
+
+      <section class="api-doc-card">
+        <h2>cURL Example</h2>
+        <pre><code id="curlExample"></code></pre>
+      </section>
+
+      <section class="api-doc-card">
+        <h2>JavaScript Example</h2>
+        <pre><code id="jsExample"></code></pre>
+      </section>
+
+      <section class="api-doc-card">
+        <h2>Responses</h2>
+        <pre><code>{
+  "ok": true,
+  "duplicate": false,
+  "eventId": 123,
+  "leadId": 456,
+  "status": "new"
+}</code></pre>
+        <pre><code>{
+  "ok": true,
+  "duplicate": true,
+  "eventId": 124,
+  "leadId": 456,
+  "status": "new"
+}</code></pre>
+        <pre><code>{
+  "ok": false,
+  "status": "rejected",
+  "error": "Lead webhook requires at least a phone or email"
+}</code></pre>
+      </section>
+    </main>
+
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const webhookUrl = params.get("webhook_url") || "https://your-domain.com/webhooks/leads/YOUR_TOKEN";
+      const payload = {
+        name: "Jane Customer",
+        phone: "+15551234567",
+        email: "jane@example.com",
+        service: "Lock replacement",
+        source: "website-form",
+        notes: "Needs service tomorrow morning",
+      };
+      const payloadJson = JSON.stringify(payload, null, 2);
+      document.querySelector("#endpointExample").textContent = `POST ${webhookUrl}`;
+      document.querySelector("#jsonExample").textContent = payloadJson;
+      document.querySelector("#curlExample").textContent = `curl -X POST '${webhookUrl}' \\
+  -H 'Content-Type: application/json' \\
+  -d '${JSON.stringify(payload)}'`;
+      document.querySelector("#jsExample").textContent = `await fetch('${webhookUrl}', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(${payloadJson.replace(/\n/g, "\n  ")}),
+});`;
+    </script>
+  </body>
+</html>

@@ -13,8 +13,8 @@ const state = {
   nextPlayTime: 0,
   canSendMic: false,
   micChunks: 0,
-  geminiAudioChunks: 0,
-  geminiAudioSeconds: 0,
+  agentAudioChunks: 0,
+  agentAudioSeconds: 0,
   micLevel: 0,
   agentLevel: 0,
   visualizerLevel: 0,
@@ -46,8 +46,6 @@ const el = {
   testSpeakerButton: document.querySelector("#testSpeakerButton"),
   refreshButton: document.querySelector("#refreshButton"),
   openAdminButton: document.querySelector("#openAdminButton"),
-  researchModel: document.querySelector("#researchModel"),
-  liveModel: document.querySelector("#liveModel"),
   voiceName: document.querySelector("#voiceName"),
   language: document.querySelector("#language"),
   agentName: document.querySelector("#agentName"),
@@ -137,6 +135,7 @@ const el = {
   bookedAppointments: document.querySelector("#bookedAppointments"),
   refreshCrmButton: document.querySelector("#refreshCrmButton"),
   crmWebhookUrl: document.querySelector("#crmWebhookUrl"),
+  crmWebhookDocsLink: document.querySelector("#crmWebhookDocsLink"),
   copyCrmWebhookButton: document.querySelector("#copyCrmWebhookButton"),
   rotateCrmWebhookButton: document.querySelector("#rotateCrmWebhookButton"),
   crmWebhookHelp: document.querySelector("#crmWebhookHelp"),
@@ -165,17 +164,24 @@ const el = {
   usageSummary: document.querySelector("#usageSummary"),
   billingStatus: document.querySelector("#billingStatus"),
   creditPackCredits: document.querySelector("#creditPackCredits"),
+  billingPlanSelect: document.querySelector("#billingPlanSelect"),
+  billingPlanList: document.querySelector("#billingPlanList"),
   buyCreditsButton: document.querySelector("#buyCreditsButton"),
   startSubscriptionButton: document.querySelector("#startSubscriptionButton"),
   billingHistory: document.querySelector("#billingHistory"),
   usageList: document.querySelector("#usageList"),
-  refreshHealthButton: document.querySelector("#refreshHealthButton"),
-  healthList: document.querySelector("#healthList"),
   mobileNavItems: document.querySelectorAll(".mobile-nav-item"),
 };
 
+function businessDisplayText(text) {
+  const providerName = ["Ge", "mini"].join("");
+  return String(text || "")
+    .replace(new RegExp(`${providerName}\\s+Live`, "gi"), "AI voice")
+    .replace(new RegExp(providerName, "gi"), "AI");
+}
+
 function setStatus(text, mode = "") {
-  el.status.textContent = text;
+  el.status.textContent = businessDisplayText(text);
   el.status.className = `status ${mode}`.trim();
 }
 
@@ -191,13 +197,25 @@ function appendTranscript(speaker, text) {
   const label = speaker === "caller" ? "Caller" : speaker === "agent" ? "Agent" : "System";
   bubble.innerHTML = `<span class="speaker"></span><span class="text"></span>`;
   bubble.querySelector(".speaker").textContent = label;
-  bubble.querySelector(".text").textContent = text;
+  bubble.querySelector(".text").textContent = businessDisplayText(text);
   el.transcript.appendChild(bubble);
   el.transcript.scrollTop = el.transcript.scrollHeight;
 }
 
+function speakBrowserNotice(text) {
+  if (!text || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
+  try {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1;
+    utterance.volume = 0.85;
+    window.speechSynthesis.speak(utterance);
+  } catch {
+    // Browser speech synthesis is best-effort for local tool wait notices.
+  }
+}
+
 function updateDiagnostics() {
-  el.diagnostics.textContent = `Mic chunks: ${state.micChunks} | Gemini audio chunks: ${state.geminiAudioChunks} | Audio seconds: ${state.geminiAudioSeconds.toFixed(1)}`;
+  el.diagnostics.textContent = `Mic chunks: ${state.micChunks} | Agent audio chunks: ${state.agentAudioChunks} | Audio seconds: ${state.agentAudioSeconds.toFixed(1)}`;
 }
 
 function floatRms(samples) {
@@ -406,8 +424,8 @@ async function playPcmAudio(base64, mimeType) {
   source.start(state.nextPlayTime);
   state.nextPlayTime += audioBuffer.duration;
   state.agentSpeakingUntil = Date.now() + Math.max(0, state.nextPlayTime - state.outputContext.currentTime) * 1000;
-  state.geminiAudioChunks += 1;
-  state.geminiAudioSeconds += audioBuffer.duration;
+  state.agentAudioChunks += 1;
+  state.agentAudioSeconds += audioBuffer.duration;
   updateDiagnostics();
 }
 
@@ -473,8 +491,8 @@ function updateProfile(profile, cached) {
   el.profileArea.textContent = profile.serviceArea || "unknown";
   el.callHeading.textContent = `Live receptionist for ${profile.businessName}`;
   el.callSubheading.textContent = cached
-    ? "Using cached business research."
-    : "Business research cached for future calls.";
+    ? "Using the saved business profile."
+    : "Business profile refreshed for future calls.";
 }
 
 function renderNumberStatus(phoneNumbers = []) {
@@ -488,15 +506,13 @@ function renderNumberStatus(phoneNumbers = []) {
       .join(", ");
   } else {
     el.numberStatusTitle.textContent = "No phone number assigned";
-    el.numberStatusDetail.textContent = "Assign a Telnyx number before phone calls and outbound qualification.";
+    el.numberStatusDetail.textContent = "Assign a phone number before live calls and outbound qualification.";
   }
 }
 
 async function loadSettings() {
   const response = await fetch("/api/settings");
   const settings = await response.json();
-  el.researchModel.value = settings.researchModel;
-  el.liveModel.value = settings.liveModel;
   el.voiceName.value = settings.voiceName;
   el.language.value = languageParam || settings.language || "English";
   el.agentName.value = agentNameParam || settings.agentName || "Alex";
@@ -525,12 +541,12 @@ function adminIdentity() {
 async function apiJson(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Request failed");
+  if (!response.ok) throw new Error(businessDisplayText(data.error || "Request failed"));
   return data;
 }
 
 function setAdminStatus(text, isError = false) {
-  el.adminStatus.textContent = text;
+  el.adminStatus.textContent = businessDisplayText(text);
   el.adminStatus.style.color = isError ? "var(--danger)" : "";
 }
 
@@ -1047,14 +1063,6 @@ function crmEventDetail(detail) {
     .join(" ");
 }
 
-function activeFlagText(flags) {
-  if (!flags || typeof flags !== "object") return "";
-  return Object.entries(flags)
-    .filter(([, active]) => active)
-    .map(([key]) => key.replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`))
-    .join(", ");
-}
-
 function crmInsight(lead) {
   const fields = lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {};
   return fields.postCallAi || fields.callSummary?.fallbackInsight || fields.callSummary || fields.callTranscript || {};
@@ -1086,7 +1094,6 @@ function renderCrm(leads) {
     const call = lead.voiceCall;
     const started = call?.startedAt ? new Date(call.startedAt).toLocaleString() : null;
     const insight = crmInsight(lead);
-    const flags = activeFlagText(call?.healthFlags);
     const duration = call?.metrics?.durationSeconds ? `${call.metrics.durationSeconds}s` : null;
     const latestFeedback = lead.feedback?.[0] || null;
     grid.append(
@@ -1104,7 +1111,6 @@ function renderCrm(leads) {
         crmField("Urgency", insight.urgency),
         crmField("Satisfaction", insight.satisfaction),
         crmField("Next step", insight.nextStep),
-        crmField("Health flags", flags),
         crmField("Feedback", latestFeedback ? `${latestFeedback.sentiment} · ${latestFeedback.status}` : null),
         crmField("Review sent", latestFeedback?.reviewRequestedAt ? new Date(latestFeedback.reviewRequestedAt).toLocaleString() : null),
         crmField("Complaint escalated", latestFeedback?.complaintEscalatedAt ? new Date(latestFeedback.complaintEscalatedAt).toLocaleString() : null),
@@ -1229,7 +1235,7 @@ function renderCrm(leads) {
       }
       body.appendChild(feedback);
     }
-    if (lead.leadWebhookEvents?.length || lead.messageDeliveries?.length || call?.events?.length) {
+    if (lead.leadWebhookEvents?.length || lead.messageDeliveries?.length || lead.inboundMessages?.length || call?.events?.length) {
       const timeline = document.createElement("div");
       timeline.className = "qualification-attempts";
       const heading = document.createElement("strong");
@@ -1251,12 +1257,24 @@ function renderCrm(leads) {
       for (const message of lead.messageDeliveries || []) {
         timeline.appendChild(miniRow(["Message", message.purpose, message.provider, message.status, message.error]));
       }
+      for (const message of lead.inboundMessages || []) {
+        timeline.appendChild(
+          miniRow([
+            "Reply",
+            message.provider,
+            message.status,
+            message.fromPhone,
+            message.text ? String(message.text).slice(0, 120) : null,
+            message.createdAt ? new Date(message.createdAt).toLocaleString() : null,
+          ]),
+        );
+      }
       body.appendChild(timeline);
     }
     card.append(summary, body);
     el.crmList.appendChild(card);
   }
-  if (!leads.length) el.crmList.textContent = "No CRM leads yet.";
+  if (!leads.length) el.crmList.textContent = "No leads yet.";
 }
 
 function renderCrmStatusCounts(counts = {}) {
@@ -1322,12 +1340,17 @@ async function loadLeadWebhook() {
   const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
   const data = await apiJson(`/api/business-admin/lead-webhook?${query}`);
-  el.crmWebhookUrl.value = data.webhookUrl || "";
+  setLeadWebhookDocsUrl(data.webhookUrl || "");
   const accepted = data.acceptedFields?.join(", ") || "name, phone, email, service, source, notes";
   el.crmWebhookHelp.textContent = `Accepted fields: ${accepted}. POST JSON or form data.`;
   if (!el.crmWebhookTestPayload.value.trim()) {
     el.crmWebhookTestPayload.value = JSON.stringify(data.examplePayload || webhookSamplePayload(), null, 2);
   }
+}
+
+function setLeadWebhookDocsUrl(webhookUrl) {
+  el.crmWebhookUrl.value = webhookUrl;
+  el.crmWebhookDocsLink.href = `/lead-webhook-api.html?webhook_url=${encodeURIComponent(webhookUrl)}`;
 }
 
 async function loadWebhookEvents() {
@@ -1340,7 +1363,7 @@ async function loadWebhookEvents() {
 
 async function loadCrm() {
   if (!state.admin) return;
-  setAdminStatus("Loading CRM");
+  setAdminStatus("Loading leads");
   const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
   if (el.crmSearch.value.trim()) query.set("search", el.crmSearch.value.trim());
@@ -1348,7 +1371,7 @@ async function loadCrm() {
   const [data] = await Promise.all([apiJson(`/api/business-admin/crm?${query}`), loadLeadWebhook(), loadWebhookEvents()]);
   renderCrm(data.leads || []);
   renderCrmStatusCounts(data.statusCounts || {});
-  setAdminStatus("CRM loaded");
+  setAdminStatus("Leads loaded");
 }
 
 async function copyLeadWebhook() {
@@ -1372,7 +1395,7 @@ async function rotateLeadWebhook() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(adminIdentity()),
   });
-  el.crmWebhookUrl.value = data.webhookUrl || "";
+  setLeadWebhookDocsUrl(data.webhookUrl || "");
   setAdminStatus("Webhook URL rotated");
 }
 
@@ -1569,7 +1592,7 @@ async function escalateComplaint(card) {
   setAdminStatus("Complaint escalated");
 }
 
-function renderMessages(messages = []) {
+function renderMessages(messages = [], inboundMessages = []) {
   el.messageList.innerHTML = "";
   for (const message of messages) {
     const row = document.createElement("div");
@@ -1589,7 +1612,26 @@ function renderMessages(messages = []) {
     );
     el.messageList.appendChild(row);
   }
-  if (!messages.length) el.messageList.textContent = "No messages yet.";
+  for (const message of inboundMessages) {
+    const row = document.createElement("div");
+    row.className = "data-row compact-row";
+    row.append(
+      miniRow([
+        "Inbound",
+        message.purpose || message.eventType,
+        message.provider,
+        message.status,
+        message.fromPhone,
+        message.lead ? `lead #${message.lead.id} ${message.lead.name}` : null,
+        message.voiceCall ? `call #${message.voiceCall.id} ${message.voiceCall.callMode}` : null,
+        message.text ? String(message.text).slice(0, 120) : null,
+        message.error,
+        message.createdAt ? new Date(message.createdAt).toLocaleString() : null,
+      ]),
+    );
+    el.messageList.appendChild(row);
+  }
+  if (!messages.length && !inboundMessages.length) el.messageList.textContent = "No messages yet.";
 }
 
 async function loadMessages() {
@@ -1597,7 +1639,7 @@ async function loadMessages() {
   const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
   const data = await apiJson(`/api/business-admin/messages?${query}`);
-  renderMessages(data.messages || []);
+  renderMessages(data.messages || [], data.inboundMessages || []);
 }
 
 async function sendTestMessage() {
@@ -1616,6 +1658,32 @@ async function sendTestMessage() {
   setAdminStatus("Test message sent");
 }
 
+function businessUsageCategoryLabel(category) {
+  const providerKey = ["ge", "mini"].join("");
+  const labels = {
+    telnyx_call_seconds: "Phone call",
+    telnyx_voice_minutes: "Phone call",
+    [`${providerKey}_live_seconds`]: "AI voice session",
+    [`${providerKey}_browser_live_seconds`]: "Browser AI session",
+    outbound_qualification_call: "Outbound qualification",
+    message_send: "Message",
+  };
+  return labels[category] || String(category || "Usage").replace(/_/g, " ");
+}
+
+function businessUsageProviderLabel(provider) {
+  if (!provider) return "";
+  const value = String(provider).toLowerCase();
+  if (value === ["ge", "mini"].join("")) return "AI";
+  if (value === "telnyx") return "Phone";
+  if (value === "bluebubbles" || value === "sentdm") return "Message";
+  return provider;
+}
+
+function businessUsageText(text) {
+  return businessDisplayText(text);
+}
+
 function renderUsage(data) {
   el.usageSummary.innerHTML = "";
   const balance = document.createElement("span");
@@ -1630,8 +1698,8 @@ function renderUsage(data) {
   }
   const rates = data.rates || {};
   for (const [label, value] of [
-    ["Telnyx/min", rates.telnyxMinuteCredits],
-    ["Gemini/min", rates.geminiMinuteCredits],
+    ["Phone/min", rates.telnyxMinuteCredits],
+    ["AI/min", rates.aiMinuteCredits],
     ["Outbound", rates.outboundCallCredits],
     ["Message", rates.messageCredits],
   ]) {
@@ -1643,7 +1711,7 @@ function renderUsage(data) {
   for (const [category, total] of Object.entries(data.totals || {})) {
     const pill = document.createElement("span");
     pill.className = "status-pill";
-    pill.textContent = `${category}: ${total.credits || 0} credits`;
+    pill.textContent = `${businessUsageCategoryLabel(category)}: ${total.credits || 0} credits`;
     el.usageSummary.appendChild(pill);
   }
   el.usageList.innerHTML = "";
@@ -1656,7 +1724,7 @@ function renderUsage(data) {
         tx.type,
         `${tx.amount} credits`,
         `balance ${tx.balanceAfter}`,
-        tx.note,
+        businessUsageText(tx.note),
         tx.createdAt ? new Date(tx.createdAt).toLocaleString() : null,
       ]),
     );
@@ -1667,10 +1735,10 @@ function renderUsage(data) {
     row.className = "data-row compact-row";
     row.append(
       miniRow([
-        event.category,
+        businessUsageCategoryLabel(event.category),
         `${event.quantity} ${event.unit}`,
         `${event.credits} credits`,
-        event.provider,
+        businessUsageProviderLabel(event.provider),
         event.lead ? `lead #${event.lead.id}` : null,
         event.messageDelivery ? `${event.messageDelivery.purpose} ${event.messageDelivery.status}` : null,
         event.metadata?.billedMinutes ? `${event.metadata.billedMinutes} billed min` : null,
@@ -1692,16 +1760,43 @@ function moneyFromCents(amount, currency = "usd") {
 function renderBilling(data) {
   const stripe = data.stripe || {};
   const settings = data.settings || {};
+  const plans = data.availablePlans || [];
+  const currentPlan = data.currentPlan || null;
   const ready = Boolean(stripe.ready);
-  const subscriptionReady = ready && Boolean(settings.stripeSubscriptionPriceConfigured);
+  const subscriptionReady = ready && Boolean(plans.length);
   const statusParts = [
     ready ? "Stripe ready" : "Stripe not ready",
     stripe.webhookConfigured ? "webhook configured" : "webhook missing",
+    currentPlan ? `plan ${currentPlan.name}` : "no active plan",
+    currentPlan ? `${currentPlan.monthlyCredits} monthly tokens` : null,
     stripe.subscriptionStatus ? `subscription ${stripe.subscriptionStatus}` : null,
     stripe.subscriptionCurrentPeriodEnd ? `renews ${new Date(stripe.subscriptionCurrentPeriodEnd).toLocaleDateString()}` : null,
   ].filter(Boolean);
   el.billingStatus.textContent = statusParts.join(" · ");
   el.creditPackCredits.value = settings.stripeCreditPackCredits || 1000;
+  const previousPlanId = el.billingPlanSelect.value;
+  el.billingPlanSelect.innerHTML = "";
+  for (const plan of plans) {
+    const option = document.createElement("option");
+    option.value = String(plan.id);
+    option.textContent = `${plan.name} · ${moneyFromCents(plan.monthlyPriceCents)} / month · ${plan.monthlyCredits} tokens`;
+    option.selected = String(plan.id) === (previousPlanId || String(currentPlan?.id || plans[0]?.id || ""));
+    el.billingPlanSelect.appendChild(option);
+  }
+  if (!plans.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No plans available";
+    el.billingPlanSelect.appendChild(option);
+  }
+  el.billingPlanList.innerHTML = "";
+  for (const plan of plans) {
+    const pill = document.createElement("span");
+    pill.className = `status-pill ${currentPlan?.id === plan.id ? "active" : ""}`;
+    pill.textContent = `${plan.name}: ${moneyFromCents(plan.monthlyPriceCents)}/mo, ${plan.monthlyCredits} tokens`;
+    el.billingPlanList.appendChild(pill);
+  }
+  if (!plans.length) el.billingPlanList.textContent = "No subscription plans are published yet.";
   el.buyCreditsButton.disabled = !ready;
   el.startSubscriptionButton.disabled = !subscriptionReady;
   el.billingHistory.innerHTML = "";
@@ -1713,6 +1808,7 @@ function renderBilling(data) {
         "Stripe checkout",
         session.mode,
         session.status,
+        session.subscriptionPlan ? session.subscriptionPlan.name : null,
         session.creditAmount ? `${session.creditAmount} credits` : null,
         session.amountTotal !== null && session.amountTotal !== undefined ? moneyFromCents(session.amountTotal, session.currency) : null,
         session.createdAt ? new Date(session.createdAt).toLocaleString() : null,
@@ -1749,80 +1845,26 @@ async function startBillingCheckout(checkoutType) {
       ...adminIdentity(),
       checkoutType,
       credits: Number(el.creditPackCredits.value || 0),
+      subscriptionPlanId: checkoutType === "subscription" ? Number(el.billingPlanSelect.value || 0) : undefined,
     }),
   });
   if (!data.url) throw new Error("Stripe did not return a checkout URL");
   window.location.href = data.url;
 }
 
-function renderHealth(data) {
-  el.healthList.innerHTML = "";
-  const checks = data.checks || {};
-  const checkDetail = (check) =>
-    [
-      check?.status,
-      check?.detail,
-      check?.latencyMs !== undefined ? `${check.latencyMs}ms` : null,
-      check?.missing?.length ? `missing ${check.missing.join(", ")}` : null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-  const rows = [
-    ["Database", checkDetail(checks.database) || data.db],
-    ["Gemini", checkDetail(checks.gemini) || data.gemini],
-    ["Telnyx", checkDetail(checks.telnyx) || data.telnyx],
-    ["Public URL", checkDetail(checks.publicUrl) || data.publicBaseUrl || "missing"],
-    ["Telnyx webhook", checkDetail(checks.webhooks?.telnyx)],
-    ["Lead webhook", checkDetail(checks.webhooks?.lead)],
-    ["Phone number", checkDetail(checks.phoneNumber)],
-    ["BlueBubbles", checkDetail(checks.messaging?.bluebubbles) || data.messaging?.bluebubbles],
-    ["Sent.dm", checkDetail(checks.messaging?.sentdm) || data.messaging?.sentdm],
-    ["Stripe", checkDetail(checks.billing?.stripe) || data.billing?.stripe],
-    [
-      "Recent call issues",
-      checks.callIssues
-        ? `${checks.callIssues.status} · flagged ${checks.callIssues.counts.flagged}/${checks.callIssues.counts.total}`
-        : "",
-    ],
-  ];
-  for (const [label, value] of rows) {
-    if (!value) continue;
-    const row = document.createElement("div");
-    row.className = "data-row compact-row";
-    row.append(miniRow([label, value]));
-    el.healthList.appendChild(row);
-  }
-  for (const call of data.recentCalls || []) {
-    const flags = call.healthFlags ? Object.entries(call.healthFlags).filter(([, active]) => active).map(([key]) => key).join(", ") : "";
-    const row = document.createElement("div");
-    row.className = "data-row compact-row";
-    row.append(miniRow(["Call", call.callMode, call.status, call.callControlId, flags || "no flags", call.lastError]));
-    el.healthList.appendChild(row);
-  }
-}
-
-async function loadHealth() {
-  if (!state.admin) return;
-  const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
-  if (el.website.value.trim()) query.set("website", el.website.value.trim());
-  const data = await apiJson(`/api/business-admin/health?${query}`);
-  renderHealth(data);
-}
-
 async function refreshResearch() {
   const query = new URLSearchParams({
     business_name: el.businessName.value.trim(),
-    research_model: el.researchModel.value.trim(),
     refresh: "1",
   });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
-  setStatus("Researching");
+  setStatus("Refreshing profile");
   const response = await fetch(`/api/business?${query}`);
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Research failed");
+  if (!response.ok) throw new Error(data.error || "Profile refresh failed");
   updateProfile(data.profile, data.cached);
   await loadPhoneStatus().catch(() => {});
-  setStatus("Research cached");
+  setStatus("Profile refreshed");
 }
 
 async function loadDemoData() {
@@ -1879,10 +1921,10 @@ async function startCall() {
   el.stopButton.disabled = false;
   el.orb.classList.add("live");
   setStatus("Connecting", "live");
-  appendTranscript("system", "Building or loading cached business research.");
+  appendTranscript("system", "Loading the business profile.");
   state.micChunks = 0;
-  state.geminiAudioChunks = 0;
-  state.geminiAudioSeconds = 0;
+  state.agentAudioChunks = 0;
+  state.agentAudioSeconds = 0;
   state.canSendMic = false;
   updateDiagnostics();
 
@@ -1900,8 +1942,6 @@ async function startCall() {
         type: "start",
         businessName: el.businessName.value.trim(),
         website: el.website.value.trim(),
-        researchModel: el.researchModel.value.trim(),
-        liveModel: el.liveModel.value.trim(),
         voiceName: el.voiceName.value,
         language: el.language.value,
         agentName: el.agentName.value.trim() || "Alex",
@@ -1932,6 +1972,10 @@ async function startCall() {
       }
     }
     if (message.type === "debug") appendTranscript("system", message.message);
+    if (message.type === "tool_wait_notice") {
+      appendTranscript("agent", message.message);
+      speakBrowserNotice(message.message);
+    }
     if (message.type === "end_call") {
       appendTranscript("system", `Agent ended the call. ${message.reason || ""}`.trim());
       setStatus("Ended");
@@ -1944,10 +1988,10 @@ async function startCall() {
       loadMessages().catch(() => {});
       loadUsage().catch(() => {});
     }
-    if (message.type === "status" && message.status === "gemini_closed") {
+    if (message.type === "status" && message.status === "agent_closed") {
       const reason = message.reason ? ` Reason: ${message.reason}` : "";
       setStatus("Closed");
-      appendTranscript("system", `Gemini Live closed. Code: ${message.code || "unknown"}.${reason}`);
+      appendTranscript("system", `Live agent closed. Code: ${message.code || "unknown"}.${reason}`);
     }
     if (message.type === "error") {
       setStatus("Error", "error");
@@ -1988,8 +2032,6 @@ async function initializePortal(user) {
   if (user.role === "business") {
     el.businessName.readOnly = true;
     el.website.readOnly = true;
-    el.researchModel.readOnly = true;
-    el.liveModel.readOnly = true;
   }
   setTitle();
   el.authScreen.hidden = true;
@@ -2056,12 +2098,16 @@ for (const tab of el.adminTabs) {
       item.setAttribute("aria-selected", String(selected));
     }
     for (const view of el.adminViews) view.classList.toggle("active", view.dataset.view === tab.dataset.tab);
-    if (tab.dataset.tab === "appointments") runAdmin(loadCalendar);
-    if (tab.dataset.tab === "crm") runAdmin(loadCrm);
+    if (tab.dataset.tab === "calendar") runAdmin(loadCalendar);
+    if (tab.dataset.tab === "leads") runAdmin(loadCrm);
     if (tab.dataset.tab === "messages") runAdmin(loadMessages);
-    if (tab.dataset.tab === "usage") runAdmin(loadUsage);
-    if (tab.dataset.tab === "health") runAdmin(loadHealth);
+    if (tab.dataset.tab === "billing") runAdmin(loadUsage);
   });
+}
+
+function openBusinessTool(tabName) {
+  const tab = Array.from(el.adminTabs).find((item) => item.dataset.tab === tabName);
+  tab?.click();
 }
 
 for (const navItem of el.mobileNavItems) {
@@ -2073,16 +2119,15 @@ for (const navItem of el.mobileNavItems) {
     } else if (target === "business") {
       document.querySelector("#profileScreen").scrollIntoView({ behavior: "smooth", block: "start" });
     } else {
-      if (target === "calendar") {
-        const appointmentsTab = Array.from(el.adminTabs).find((tab) => tab.dataset.tab === "appointments");
-        appointmentsTab?.click();
-      }
+      if (target === "calendar") openBusinessTool("calendar");
+      if (target === "setup") openBusinessTool("setup");
       el.businessAdmin.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   });
 }
 
 el.openAdminButton.addEventListener("click", () => {
+  openBusinessTool("setup");
   el.businessAdmin.scrollIntoView({ behavior: "smooth", block: "start" });
   runAdmin(loadBusinessAdmin);
 });
@@ -2265,7 +2310,6 @@ el.sendTestMessageButton.addEventListener("click", () => runAdmin(sendTestMessag
 el.refreshUsageButton.addEventListener("click", () => runAdmin(loadUsage));
 el.buyCreditsButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("credits")));
 el.startSubscriptionButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("subscription")));
-el.refreshHealthButton.addEventListener("click", () => runAdmin(loadHealth));
 
 el.businessName.addEventListener("input", setTitle);
 el.website.addEventListener("input", () => {
@@ -2283,7 +2327,7 @@ el.saveSettingsButton.addEventListener("click", () => {
 
 el.refreshButton.addEventListener("click", () => {
   refreshResearch().catch((error) => {
-    setStatus("Research error", "error");
+    setStatus("Profile refresh error", "error");
     appendTranscript("system", error.message);
   });
 });
