@@ -7,10 +7,13 @@ function normalizeWebsiteInput(value) {
 
 const businessName = (params.get("business_name") || "").trim();
 const website = normalizeWebsiteInput(params.get("website"));
-const storageKey = `fastagent:${businessName.toLowerCase()}|${website.toLowerCase()}`;
+const accessTokenFromUrl = (params.get("token") || params.get("access_token") || "").trim();
+const claimToken = (params.get("claim_token") || "").trim();
+const storageKey = businessName || website ? `fastagent:${businessName.toLowerCase()}|${website.toLowerCase()}` : "";
 
 const state = {
-  accessToken: localStorage.getItem(storageKey) || "",
+  accessToken: accessTokenFromUrl || (storageKey ? localStorage.getItem(storageKey) || "" : ""),
+  claimToken,
   profile: null,
   profileDirty: false,
   renderingProfile: false,
@@ -64,6 +67,8 @@ const el = Object.fromEntries(
     "callerPhone",
     "callerPhones",
     "callerMessage",
+    "claimIntro",
+    "finishSetupLink",
     "claimForm",
     "claimEmail",
     "claimMessage",
@@ -192,6 +197,18 @@ function renderAgent(data) {
   }
   el.phoneLimit.textContent = data.demoCallerLimit ? `Up to ${data.demoCallerLimit} callers` : "";
   renderCallers(data.callerPhones);
+  if (state.claimToken) {
+    el.claimIntro.textContent = "Review the details, test the receptionist, then finish account setup.";
+    el.claimForm.hidden = true;
+    el.finishSetupLink.hidden = false;
+    el.finishSetupLink.href = `/set-password/?token=${encodeURIComponent(state.claimToken)}`;
+    el.claimMessage.textContent = "Save any edits before finishing setup.";
+  } else {
+    el.claimIntro.textContent = "Set your password from the secure link sent to your email.";
+    el.claimForm.hidden = false;
+    el.finishSetupLink.hidden = true;
+    el.claimMessage.textContent = "";
+  }
   window.lucide?.createIcons();
 }
 
@@ -410,7 +427,7 @@ function drawVisualizer() {
 }
 
 async function initialize() {
-  if (!businessName) {
+  if (!businessName && !state.accessToken) {
     el.loadingScreen.hidden = true;
     el.entryScreen.hidden = false;
     el.trialBadge.textContent = "Live demo";
@@ -422,18 +439,22 @@ async function initialize() {
     if (state.accessToken) {
       try {
         data = await api(`/api/onboarding/fast-agent?token=${encodeURIComponent(state.accessToken)}`);
-      } catch {
-        localStorage.removeItem(storageKey);
+      } catch (error) {
+        if (accessTokenFromUrl || !businessName) throw error;
+        if (storageKey) localStorage.removeItem(storageKey);
         state.accessToken = "";
       }
     }
     if (!data) {
+      if (!businessName) throw new Error("This setup link is invalid or expired");
       data = await api("/api/onboarding/fast-agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ businessName, website }),
       });
       state.accessToken = data.accessToken;
+    }
+    if (storageKey && state.accessToken) {
       localStorage.setItem(storageKey, state.accessToken);
     }
     renderAgent(data);
@@ -496,6 +517,17 @@ el.claimForm.addEventListener("submit", async (event) => {
     el.claimMessage.textContent = error.message;
   } finally {
     button.disabled = false;
+  }
+});
+el.finishSetupLink.addEventListener("click", async (event) => {
+  if (!state.profileDirty) return;
+  event.preventDefault();
+  el.claimMessage.textContent = "Saving profile";
+  try {
+    await saveProfile({ silent: true });
+    location.assign(el.finishSetupLink.href);
+  } catch (error) {
+    el.claimMessage.textContent = error.message;
   }
 });
 

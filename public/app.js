@@ -119,6 +119,12 @@ const el = {
   managerNotificationPhone: document.querySelector("#managerNotificationPhone"),
   reviewPromptInstructions: document.querySelector("#reviewPromptInstructions"),
   reviewRequestTemplate: document.querySelector("#reviewRequestTemplate"),
+  reviewDirectoryLink: document.querySelector("#reviewDirectoryLink"),
+  reviewServiceName: document.querySelector("#reviewServiceName"),
+  reviewServiceUrl: document.querySelector("#reviewServiceUrl"),
+  reviewServiceSort: document.querySelector("#reviewServiceSort"),
+  addReviewLinkButton: document.querySelector("#addReviewLinkButton"),
+  reviewLinkList: document.querySelector("#reviewLinkList"),
   complaintRecoveryInstructions: document.querySelector("#complaintRecoveryInstructions"),
   complaintEscalationTemplate: document.querySelector("#complaintEscalationTemplate"),
   missedCallFollowupTemplate: document.querySelector("#missedCallFollowupTemplate"),
@@ -133,6 +139,16 @@ const el = {
   refreshCalendarButton: document.querySelector("#refreshCalendarButton"),
   availableSlots: document.querySelector("#availableSlots"),
   bookedAppointments: document.querySelector("#bookedAppointments"),
+  appointmentId: document.querySelector("#appointmentId"),
+  appointmentCustomerName: document.querySelector("#appointmentCustomerName"),
+  appointmentPhone: document.querySelector("#appointmentPhone"),
+  appointmentEmail: document.querySelector("#appointmentEmail"),
+  appointmentStart: document.querySelector("#appointmentStart"),
+  appointmentReason: document.querySelector("#appointmentReason"),
+  appointmentStatus: document.querySelector("#appointmentStatus"),
+  appointmentSendSummary: document.querySelector("#appointmentSendSummary"),
+  saveAppointmentButton: document.querySelector("#saveAppointmentButton"),
+  resetAppointmentButton: document.querySelector("#resetAppointmentButton"),
   refreshCrmButton: document.querySelector("#refreshCrmButton"),
   crmWebhookUrl: document.querySelector("#crmWebhookUrl"),
   crmWebhookDocsLink: document.querySelector("#crmWebhookDocsLink"),
@@ -635,6 +651,59 @@ function calendarTimeLabel(value, timezone) {
   }).format(new Date(value));
 }
 
+function calendarDateTimeLocal(value, timezone) {
+  if (!value) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone || el.calendarTimezone.value || "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(value));
+  const data = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${data.year}-${data.month}-${data.day}T${data.hour}:${data.minute}`;
+}
+
+function resetAppointmentForm() {
+  el.appointmentId.value = "";
+  el.appointmentCustomerName.value = "";
+  el.appointmentPhone.value = "";
+  el.appointmentEmail.value = "";
+  el.appointmentStart.value = "";
+  el.appointmentReason.value = "";
+  el.appointmentStatus.value = "confirmed";
+  el.appointmentSendSummary.checked = true;
+  el.saveAppointmentButton.textContent = "Save appointment";
+}
+
+function fillAppointmentForm(appointment, timezone) {
+  el.appointmentId.value = appointment.id || "";
+  el.appointmentCustomerName.value = appointment.customerName || "";
+  el.appointmentPhone.value = appointment.phone || "";
+  el.appointmentEmail.value = appointment.email || "";
+  el.appointmentStart.value = calendarDateTimeLocal(appointment.scheduledStart || appointment.requestedAt, timezone);
+  el.appointmentReason.value = appointment.reason || "";
+  el.appointmentStatus.value = appointment.status === "requested" ? "requested" : "confirmed";
+  el.appointmentSendSummary.checked = false;
+  el.saveAppointmentButton.textContent = "Update appointment";
+}
+
+function appointmentPayload() {
+  return {
+    ...adminIdentity(),
+    customerName: el.appointmentCustomerName.value.trim(),
+    phone: el.appointmentPhone.value.trim(),
+    email: el.appointmentEmail.value.trim(),
+    start: el.appointmentStart.value,
+    reason: el.appointmentReason.value.trim(),
+    status: el.appointmentStatus.value,
+    durationMinutes: Number(el.slotDuration.value || 30),
+    sendSummary: el.appointmentSendSummary.checked,
+  };
+}
+
 function renderSchedule(data) {
   const days = new Map();
   const addItem = (dateKey, item) => {
@@ -671,7 +740,11 @@ function renderSchedule(data) {
     for (const item of items.sort((left, right) => new Date(left.start) - new Date(right.start))) {
       const square = document.createElement(item.type === "available" ? "button" : "div");
       square.className = `slot ${item.type}`;
-      if (square instanceof HTMLButtonElement) square.type = "button";
+      if (square instanceof HTMLButtonElement) {
+        square.type = "button";
+        square.dataset.action = "select-slot";
+        square.dataset.start = item.start;
+      }
       const time = document.createElement("strong");
       time.textContent = item.label;
       const detail = document.createElement("span");
@@ -772,6 +845,36 @@ function renderPrices(entries) {
   }
 }
 
+function renderReviewLinks(entries = [], profile = null) {
+  el.reviewLinkList.innerHTML = "";
+  if (profile?.cacheKey) {
+    el.reviewDirectoryLink.hidden = false;
+    el.reviewDirectoryLink.href = `/reviews/${encodeURIComponent(profile.cacheKey)}/`;
+  } else {
+    el.reviewDirectoryLink.hidden = true;
+  }
+  for (const entry of entries) {
+    const row = document.createElement("div");
+    row.className = "data-row review-link-row";
+    row.dataset.id = entry.id;
+    const active = document.createElement("label");
+    active.className = "check-label";
+    const activeInput = input("row-active", "", "checkbox");
+    activeInput.checked = entry.active !== false;
+    active.append(activeInput, "Active");
+    row.append(
+      input("row-service-name", entry.serviceName),
+      input("row-review-url", entry.reviewUrl, "url"),
+      input("row-sort-order", entry.sortOrder ?? 0, "number"),
+      active,
+      rowButton("save-review-link", "Save"),
+      rowButton("delete-review-link", "Delete", true),
+    );
+    el.reviewLinkList.appendChild(row);
+  }
+  if (!entries.length) el.reviewLinkList.textContent = "No review services yet. Add Google, Yelp, Facebook, or another review page.";
+}
+
 function renderAvailability(rules) {
   const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   el.availabilityRules.innerHTML = "";
@@ -835,6 +938,7 @@ function applyAdminData(data) {
   renderIntakeFields(data.config.intakeFields);
   renderKnowledge(data.config.knowledgeEntries);
   renderPrices(data.config.priceEntries);
+  renderReviewLinks(data.reviewLinks || [], data.profile);
   renderAvailability(data.config.availabilityRules);
   setAdminStatus(`Loaded for ${data.profile.businessName}`);
 }
@@ -1001,7 +1105,25 @@ async function loadCalendar() {
     reminder.dataset.id = appointment.id;
     reminder.disabled = !appointment.phone;
     reminder.textContent = "Send reminder";
-    actions.appendChild(reminder);
+    const summaryButton = document.createElement("button");
+    summaryButton.type = "button";
+    summaryButton.dataset.action = "send-appointment-summary";
+    summaryButton.dataset.id = appointment.id;
+    summaryButton.disabled = !appointment.phone && !appointment.email;
+    summaryButton.textContent = "Send summary";
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.dataset.action = "edit-appointment";
+    editButton.dataset.appointment = JSON.stringify(appointment);
+    editButton.textContent = "Edit";
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.dataset.action = "cancel-appointment";
+    cancelButton.dataset.id = appointment.id;
+    cancelButton.className = "danger-button";
+    cancelButton.disabled = appointment.status === "cancelled";
+    cancelButton.textContent = "Cancel";
+    actions.append(reminder, summaryButton, editButton, cancelButton);
     row.append(summary, details, actions);
     el.bookedAppointments.appendChild(row);
   }
@@ -1019,6 +1141,94 @@ async function sendAppointmentReminder(button) {
   });
   await Promise.all([loadMessages(), loadUsage()]);
   setAdminStatus("Appointment reminder sent");
+}
+
+async function saveManualAppointment() {
+  const payload = appointmentPayload();
+  const id = el.appointmentId.value;
+  if (!payload.customerName || !payload.start) throw new Error("Customer name and appointment time are required");
+  setAdminStatus(id ? "Updating appointment" : "Booking appointment");
+  await apiJson(id ? `/api/business-admin/appointments/${id}` : "/api/business-admin/appointments", {
+    method: id ? "PATCH" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  resetAppointmentForm();
+  await Promise.all([loadCalendar(), loadMessages(), loadUsage()]);
+  setAdminStatus(id ? "Appointment updated" : "Appointment booked");
+}
+
+async function cancelAppointment(button) {
+  const appointmentId = button.dataset.id;
+  if (!appointmentId) throw new Error("Appointment was not found");
+  setAdminStatus("Cancelling appointment");
+  await apiJson(`/api/business-admin/appointments/${appointmentId}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...adminIdentity(), sendSummary: true }),
+  });
+  await Promise.all([loadCalendar(), loadMessages(), loadUsage()]);
+  setAdminStatus("Appointment cancelled");
+}
+
+async function sendAppointmentSummary(button) {
+  const appointmentId = button.dataset.id;
+  if (!appointmentId) throw new Error("Appointment was not found");
+  setAdminStatus("Sending appointment summary");
+  await apiJson(`/api/business-admin/appointments/${appointmentId}/summary`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  await Promise.all([loadMessages(), loadUsage()]);
+  setAdminStatus("Appointment summary sent");
+}
+
+async function addReviewLink() {
+  const payload = {
+    ...adminIdentity(),
+    serviceName: el.reviewServiceName.value.trim(),
+    reviewUrl: el.reviewServiceUrl.value.trim(),
+    sortOrder: Number(el.reviewServiceSort.value || 0),
+    active: true,
+  };
+  setAdminStatus("Saving review service");
+  const data = await apiJson("/api/business-admin/review-links", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  applyAdminData(data);
+  el.reviewServiceName.value = "";
+  el.reviewServiceUrl.value = "";
+  el.reviewServiceSort.value = "";
+  setAdminStatus("Review service added");
+}
+
+async function saveReviewLink(row) {
+  const data = await apiJson(`/api/business-admin/review-links/${row.dataset.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      serviceName: row.querySelector(".row-service-name").value,
+      reviewUrl: row.querySelector(".row-review-url").value,
+      sortOrder: Number(row.querySelector(".row-sort-order").value || 0),
+      active: row.querySelector(".row-active").checked,
+    }),
+  });
+  applyAdminData(data);
+  setAdminStatus("Review service saved");
+}
+
+async function deleteReviewLink(row) {
+  const data = await apiJson(`/api/business-admin/review-links/${row.dataset.id}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  applyAdminData(data);
+  setAdminStatus("Review service deleted");
 }
 
 const crmStatusOptions = ["new", "qualified", "unqualified", "callback", "appointment", "transferred", "unreachable"];
@@ -2243,12 +2453,34 @@ el.importPricesButton.addEventListener("click", () => {
 });
 
 el.saveInstructionsButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
+el.addReviewLinkButton.addEventListener("click", () => runAdmin(addReviewLink));
+el.reviewLinkList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const row = button.closest(".data-row");
+  if (button.dataset.action === "save-review-link") runAdmin(() => saveReviewLink(row));
+  if (button.dataset.action === "delete-review-link") runAdmin(() => deleteReviewLink(row));
+});
 el.saveBusinessProfileButton.addEventListener("click", () => runAdmin(saveBusinessProfile));
 el.saveCalendarButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.refreshCalendarButton.addEventListener("click", () => runAdmin(loadCalendar));
+el.saveAppointmentButton.addEventListener("click", () => runAdmin(saveManualAppointment));
+el.resetAppointmentButton.addEventListener("click", resetAppointmentForm);
+el.availableSlots.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action='select-slot']");
+  if (!button) return;
+  el.appointmentStart.value = calendarDateTimeLocal(button.dataset.start, el.calendarTimezone.value);
+  el.appointmentCustomerName.focus();
+});
 el.bookedAppointments.addEventListener("click", (event) => {
   const reminderButton = event.target.closest("button[data-action='send-appointment-reminder']");
   if (reminderButton) runAdmin(() => sendAppointmentReminder(reminderButton));
+  const summaryButton = event.target.closest("button[data-action='send-appointment-summary']");
+  if (summaryButton) runAdmin(() => sendAppointmentSummary(summaryButton));
+  const editButton = event.target.closest("button[data-action='edit-appointment']");
+  if (editButton) fillAppointmentForm(JSON.parse(editButton.dataset.appointment), el.calendarTimezone.value);
+  const cancelButton = event.target.closest("button[data-action='cancel-appointment']");
+  if (cancelButton) runAdmin(() => cancelAppointment(cancelButton));
 });
 el.refreshCrmButton.addEventListener("click", () => runAdmin(loadCrm));
 el.copyCrmWebhookButton.addEventListener("click", () => runAdmin(copyLeadWebhook));

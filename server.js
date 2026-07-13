@@ -1186,6 +1186,85 @@ function formatAppointmentTime(appointment, timezone = "America/Chicago") {
     .toFormat("ccc, LLL d 'at' h:mm a ZZZZ");
 }
 
+function htmlEscape(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function publicBaseUrlFromSettings(settings) {
+  const baseUrl = String(settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+  if (!/^https?:\/\//i.test(baseUrl)) throw new Error("Public base URL is not configured");
+  return baseUrl;
+}
+
+function appointmentActionToken(appointment, expiresDays = 30) {
+  const payload = {
+    appointmentId: appointment.id,
+    exp: Date.now() + Math.max(1, Number(expiresDays || 30)) * 86400000,
+  };
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = crypto.createHmac("sha256", encryptionKey()).update(encoded).digest("base64url");
+  return `${encoded}.${signature}`;
+}
+
+function verifyAppointmentActionToken(token) {
+  const [encoded, signature] = String(token || "").split(".");
+  if (!encoded || !signature) throw new Error("Appointment link is invalid");
+  const expected = crypto.createHmac("sha256", encryptionKey()).update(encoded).digest("base64url");
+  if (
+    expected.length !== signature.length ||
+    !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature))
+  ) {
+    throw new Error("Appointment link is invalid");
+  }
+  const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  if (!payload.appointmentId || Number(payload.exp || 0) < Date.now()) throw new Error("Appointment link is expired");
+  return payload;
+}
+
+function appointmentManageUrl({ settings, appointment }) {
+  const url = new URL("/appointment/", publicBaseUrlFromSettings(settings));
+  url.searchParams.set("token", appointmentActionToken(appointment, settings.claimLinkDays || 30));
+  return url.toString();
+}
+
+function appointmentSummaryLines({ profile, appointment, config, manageUrl = "" }) {
+  const appointmentTime = formatAppointmentTime(appointment, config?.timezone);
+  const statusLabel =
+    appointment.status === "confirmed"
+      ? "confirmed"
+      : appointment.status === "cancelled"
+        ? "cancelled"
+        : appointment.status === "requested"
+          ? "requested"
+          : String(appointment.status || "requested");
+  return [
+    `${profile.businessName} appointment ${statusLabel}`,
+    `When: ${appointmentTime}`,
+    `Customer: ${appointment.customerName || "Customer"}`,
+    appointment.phone ? `Phone: ${appointment.phone}` : "",
+    appointment.email ? `Email: ${appointment.email}` : "",
+    appointment.reason ? `Reason: ${appointment.reason}` : "",
+    `Confirmation: ${appointmentConfirmationLabel(appointment)}`,
+    manageUrl ? `Reschedule or cancel: ${manageUrl}` : "",
+  ].filter(Boolean);
+}
+
+function appointmentSummaryText({ profile, appointment, config, manageUrl = "" }) {
+  return appointmentSummaryLines({ profile, appointment, config, manageUrl }).join("\n");
+}
+
+function appointmentSummaryHtml({ profile, appointment, config, manageUrl = "" }) {
+  const rows = appointmentSummaryLines({ profile, appointment, config, manageUrl }).map((line) => `<li>${htmlEscape(line)}</li>`);
+  const statusLabel = appointment.status === "confirmed" ? "confirmed" : appointment.status === "cancelled" ? "cancelled" : "requested";
+  return `<p>Your appointment with <strong>${htmlEscape(profile.businessName)}</strong> is ${
+    statusLabel
+  }.</p><ul>${rows.join("")}</ul>`;
+}
+
 function complaintEscalationMessage({ config, profile, customerName = "", customerPhone = "", complaint = "" }) {
   return templateText(config.complaintEscalationTemplate, {
     business_name: profile.businessName,
@@ -2240,10 +2319,247 @@ async function sendClaimEmail({ settings, email, setupUrl, businessName }) {
     from: { name: settings.smtpFromName || "AI Receptionist", address: settings.smtpFromEmail },
     to: email,
     subject: `Finish setting up ${businessName}`,
-    text: `Your AI receptionist is ready. Set your password and finish your account here:\n\n${setupUrl}\n\nThis link expires in ${settings.claimLinkDays} days.`,
-    html: `<p>Your AI receptionist for <strong>${String(businessName).replace(/[<>&"]/g, "")}</strong> is ready.</p><p><a href="${setupUrl}">Set your password and finish your account</a></p><p>This link expires in ${settings.claimLinkDays} days.</p>`,
+    text: `Your AI receptionist is ready. Review it, test it, and finish your account here:\n\n${setupUrl}\n\nThis link expires in ${settings.claimLinkDays} days.`,
+    html: `<p>Your AI receptionist for <strong>${String(businessName).replace(/[<>&"]/g, "")}</strong> is ready.</p><p><a href="${setupUrl}">Review it and finish your account</a></p><p>This link expires in ${settings.claimLinkDays} days.</p>`,
   });
   return true;
+}
+
+async function sendTrackedEmail({
+  settings,
+  profile = null,
+  toEmail,
+  subject,
+  text,
+  html = "",
+  purpose = "email",
+  leadId = null,
+  voiceCallId = null,
+  appointmentId = null,
+  customerFeedbackId = null,
+  metadata = {},
+}) {
+  const email = String(toEmail || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("A valid email address is required");
+  const delivery = await prisma.messageDelivery.create({
+    data: {
+      provider: "smtp",
+      purpose,
+      toPhone: email,
+      status: "queued",
+      businessProfileId: profile?.id || null,
+      leadId,
+      voiceCallId,
+      appointmentId,
+      customerFeedbackId,
+      detail: { metadata, subject },
+    },
+  });
+  try {
+    const smtpUser = await systemSecret("smtp_username", "SMTP_USERNAME");
+    const smtpPassword = await systemSecret("smtp_password", "SMTP_PASSWORD");
+    if (!settings.smtpHost || !settings.smtpFromEmail) throw new Error("SMTP is not configured");
+    const transporter = nodemailer.createTransport({
+      host: settings.smtpHost,
+      port: settings.smtpPort,
+      secure: settings.smtpSecure,
+      auth: smtpUser ? { user: smtpUser, pass: smtpPassword } : undefined,
+    });
+    const result = await transporter.sendMail({
+      from: { name: settings.smtpFromName || "AI Receptionist", address: settings.smtpFromEmail },
+      to: email,
+      subject,
+      text,
+      html: html || text.replace(/\n/g, "<br />"),
+    });
+    const updated = await prisma.messageDelivery.update({
+      where: { id: delivery.id },
+      data: {
+        status: "sent",
+        providerMessageId: result.messageId || null,
+        detail: { metadata, subject, response: result.response || null },
+      },
+    });
+    return { provider: "smtp", delivery: updated };
+  } catch (error) {
+    await prisma.messageDelivery.update({
+      where: { id: delivery.id },
+      data: { status: "failed", error: error.message, detail: { metadata, subject } },
+    });
+    throw error;
+  }
+}
+
+async function sendAppointmentSummary({ settings, profile, config, appointment, lead = null, voiceCallId = null, source = "agent_tool" }) {
+  const manageUrl = appointmentManageUrl({ settings, appointment });
+  const message = appointmentSummaryText({ profile, appointment, config, manageUrl });
+  const metadata = {
+    source,
+    appointmentTime: formatAppointmentTime(appointment, config?.timezone),
+    confirmationCode: appointmentConfirmationLabel(appointment),
+    manageUrl,
+  };
+  const result = {
+    manageUrl,
+    textSent: false,
+    emailSent: false,
+    textError: null,
+    emailError: null,
+    textDeliveryId: null,
+    emailDeliveryId: null,
+  };
+  if (appointment.phone) {
+    try {
+      const textDelivery = await deliverBusinessMessage({
+        settings,
+        profile,
+        toPhone: appointment.phone,
+        message,
+        purpose: "appointment_summary",
+        leadId: lead?.id || null,
+        voiceCallId,
+        appointmentId: appointment.id,
+        metadata,
+      });
+      result.textSent = true;
+      result.textDeliveryId = textDelivery.delivery.id;
+      result.textProvider = textDelivery.provider;
+    } catch (error) {
+      result.textError = error.message;
+    }
+  }
+  if (appointment.email) {
+    try {
+      const emailDelivery = await sendTrackedEmail({
+        settings,
+        profile,
+        toEmail: appointment.email,
+        subject: `${profile.businessName} appointment ${appointment.status === "confirmed" ? "confirmation" : "request"}`,
+        text: message,
+        html: appointmentSummaryHtml({ profile, appointment, config, manageUrl }),
+        purpose: "appointment_summary_email",
+        leadId: lead?.id || null,
+        voiceCallId,
+        appointmentId: appointment.id,
+        metadata,
+      });
+      result.emailSent = true;
+      result.emailDeliveryId = emailDelivery.delivery.id;
+    } catch (error) {
+      result.emailError = error.message;
+    }
+  }
+  return result;
+}
+
+async function reviewRequestUrl({ settings, profile, config }) {
+  const activeLinks = await prisma.businessReviewLink.count({
+    where: { businessProfileId: profile.id, active: true },
+  });
+  if (activeLinks > 0) {
+    const url = new URL(`/reviews/${encodeURIComponent(profile.cacheKey)}/`, publicBaseUrlFromSettings(settings));
+    return url.toString();
+  }
+  return String(config.reviewLink || "").trim();
+}
+
+async function profileForAppointment(appointment) {
+  if (!appointment) return null;
+  return prisma.businessProfile.findFirst({
+    where: {
+      businessName: appointment.businessName,
+      website: appointment.website || null,
+    },
+  });
+}
+
+async function rescheduleExistingAppointment({ appointment, profile, config, start, durationMinutes, status }) {
+  const zone = config.timezone || appointment.timezone || "America/Chicago";
+  const requestedStart = DateTime.fromISO(String(start || ""), { zone });
+  if (!requestedStart.isValid) throw new Error("A valid appointment start time is required");
+  const duration = Math.max(5, Number(durationMinutes || appointment.durationMinutes || config.slotDurationMinutes || 30));
+  const availability = await listCalendarSlots({
+    prisma,
+    profile,
+    config,
+    fromDate: requestedStart.toISODate(),
+    days: 1,
+    durationMinutes: duration,
+  });
+  const matched = availability.slots.find(
+    (slot) => Math.abs(DateTime.fromISO(slot.start).toMillis() - requestedStart.toMillis()) < 60_000,
+  );
+  if (!matched) throw new Error("That appointment time is not available");
+  const startUtc = DateTime.fromISO(matched.start).toUTC();
+  const updateStatus = status || appointment.status || (config.appointmentMode === "instant" ? "confirmed" : "requested");
+  try {
+    return await prisma.appointment.update({
+      where: { id: appointment.id },
+      data: {
+        requestedAt: matched.start,
+        scheduledStart: startUtc.toJSDate(),
+        scheduledEnd: DateTime.fromISO(matched.end).toUTC().toJSDate(),
+        durationMinutes: duration,
+        timezone: zone,
+        status: updateStatus,
+        bookingKey: `${profile.cacheKey}:${startUtc.toISO()}`,
+      },
+    });
+  } catch (error) {
+    if (error.code === "P2002") throw new Error("That appointment slot was just booked by someone else");
+    throw error;
+  }
+}
+
+function friendlyKnownName(value) {
+  const name = String(value || "").trim();
+  if (!name || /^unknown/i.test(name) || /^caller\s+\+?\d+/i.test(name)) return "";
+  return name;
+}
+
+async function callerHistoryPrompt(profile, callerPhone) {
+  const phone = normalizeE164Phone(callerPhone);
+  if (!profile?.id || !phone) return "";
+  const [leads, calls, appointments, feedback] = await Promise.all([
+    prisma.lead.findMany({
+      where: { AND: [leadWhereForProfile(profile), { phone }] },
+      orderBy: { updatedAt: "desc" },
+      take: 3,
+    }),
+    prisma.voiceCall.findMany({
+      where: { businessProfileId: profile.id, fromNumber: phone, callMode: "business" },
+      orderBy: { startedAt: "desc" },
+      take: 3,
+      select: { id: true, status: true, startedAt: true, endedAt: true, transcript: true, hangupCause: true },
+    }),
+    prisma.appointment.findMany({
+      where: { businessName: profile.businessName, website: profile.website, phone },
+      orderBy: { createdAt: "desc" },
+      take: 3,
+    }),
+    prisma.customerFeedback.findMany({
+      where: { businessProfileId: profile.id, phone },
+      orderBy: { updatedAt: "desc" },
+      take: 2,
+    }),
+  ]);
+  const knownName = friendlyKnownName(leads.find((lead) => friendlyKnownName(lead.name))?.name || appointments.find((item) => friendlyKnownName(item.customerName))?.customerName);
+  const latestLead = leads[0];
+  const latestAppointment = appointments[0];
+  const latestFeedback = feedback[0];
+  const parts = [
+    `Caller phone: ${phone}.`,
+    knownName ? `Known caller name: ${knownName}. Greet them by first name naturally if it fits.` : "",
+    latestLead?.summary ? `Latest CRM summary: ${latestLead.summary}` : "",
+    latestLead?.need ? `Known need: ${latestLead.need}` : "",
+    latestLead?.status ? `CRM status: ${latestLead.status}` : "",
+    latestAppointment
+      ? `Latest appointment: ${appointmentConfirmationLabel(latestAppointment)} ${latestAppointment.status} ${formatAppointmentTime(latestAppointment)} for ${latestAppointment.reason || "unspecified reason"}.`
+      : "",
+    latestFeedback ? `Latest satisfaction: ${latestFeedback.sentiment}${latestFeedback.feedbackText ? ` - ${latestFeedback.feedbackText}` : ""}.` : "",
+    calls.length ? `Previous calls with this number: ${calls.length}.` : "",
+  ].filter(Boolean);
+  return parts.join("\n");
 }
 
 async function provisionTrialBusiness({ businessName, website, settings }) {
@@ -2731,7 +3047,7 @@ async function deliverBusinessMessage({
 }
 
 async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, profile = null }) {
-  const message = `Your AI receptionist for ${businessName} is ready: ${setupUrl}`;
+  const message = `Your AI receptionist for ${businessName} is ready. Review it and finish setup: ${setupUrl}`;
   return deliverBusinessMessage({
     settings,
     profile,
@@ -2752,20 +3068,40 @@ async function createPhoneClaimLink({ profile, email, settings }) {
   }
   await prisma.accountClaimToken.deleteMany({ where: { businessProfileId: profile.id, usedAt: null } });
   const claim = issueToken();
+  const claimExpiresAt = new Date(Date.now() + settings.claimLinkDays * 86400000);
   await prisma.accountClaimToken.create({
     data: {
       tokenHash: claim.tokenHash,
       email: hasEmail ? normalizedEmail : null,
       businessProfileId: profile.id,
-      expiresAt: new Date(Date.now() + settings.claimLinkDays * 86400000),
+      expiresAt: claimExpiresAt,
     },
   });
   const baseUrl = String(settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
   if (!/^https?:\/\//i.test(baseUrl)) throw new Error("Public base URL is not configured");
+  await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
+  const access = issueToken();
+  const trialEndsAt = profile.trialEndsAt instanceof Date ? profile.trialEndsAt : profile.trialEndsAt ? new Date(profile.trialEndsAt) : null;
+  const fastAgentExpiresAt = trialEndsAt && trialEndsAt > claimExpiresAt ? trialEndsAt : claimExpiresAt;
+  await prisma.fastAgentSession.create({
+    data: {
+      tokenHash: access.tokenHash,
+      businessProfileId: profile.id,
+      expiresAt: fastAgentExpiresAt,
+    },
+  });
+  const setupUrl = new URL("/fastagent/", baseUrl);
+  setupUrl.searchParams.set("token", access.token);
+  setupUrl.searchParams.set("claim_token", claim.token);
+  setupUrl.searchParams.set("business_name", profile.businessName);
+  if (profile.website) setupUrl.searchParams.set("website", profile.website);
+  const passwordSetupUrl = `${baseUrl}/set-password/?token=${encodeURIComponent(claim.token)}`;
   return {
     email: hasEmail ? normalizedEmail : null,
     emailRequired: !hasEmail,
-    setupUrl: `${baseUrl}/set-password/?token=${encodeURIComponent(claim.token)}`,
+    setupUrl: setupUrl.toString(),
+    passwordSetupUrl,
+    accessToken: access.token,
   };
 }
 
@@ -3341,6 +3677,12 @@ async function runToolCall(profile, config, functionCall, context = {}) {
     const intakeData = Object.fromEntries(
       config.intakeFields.map((field) => [field.fieldKey, args[field.fieldKey] ?? null]),
     );
+    const appointmentPhone = normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null;
+    const appointmentEmail = args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null;
+    const appointmentName = args.name || args.customer_name || args.customerName || contextLead?.name || "unknown";
+    if (appointmentPhone) intakeData.phone = intakeData.phone || appointmentPhone;
+    if (appointmentEmail) intakeData.email = intakeData.email || appointmentEmail;
+    if (appointmentName) intakeData.name = intakeData.name || appointmentName;
     const appointment = await bookCalendarAppointment({
       prisma,
       profile,
@@ -3348,14 +3690,48 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       start: args.start,
       durationMinutes: args.durationMinutes,
       customer: {
-        name: args.name || args.customer_name || args.customerName,
-        phone: args.phone,
-        email: args.email,
+        name: appointmentName,
+        phone: appointmentPhone,
+        email: appointmentEmail,
       },
       intakeData,
       reason: args.reason,
     });
     const confirmationCode = appointmentConfirmationCode(appointment.id);
+    const settings = await getSettings();
+    const summaryDelivery = await sendAppointmentSummary({
+      settings,
+      profile,
+      config,
+      appointment,
+      lead: contextLead,
+      voiceCallId: context.voiceCallId || null,
+      source: context.channel === "phone" ? "phone_agent_booking" : "browser_agent_booking",
+    });
+    if (contextLead?.id) {
+      await prisma.lead.update({
+        where: { id: contextLead.id },
+        data: {
+          status: "appointment",
+          phone: contextLead.phone || appointmentPhone || null,
+          email: contextLead.email || appointmentEmail || null,
+          need: contextLead.need || args.reason || null,
+          extractedFields: {
+            ...(contextLead.extractedFields && typeof contextLead.extractedFields === "object" ? contextLead.extractedFields : {}),
+            latestAppointment: {
+              appointmentId: appointment.id,
+              confirmationCode,
+              status: appointment.status,
+              start: appointment.scheduledStart,
+              summaryTextSent: summaryDelivery.textSent,
+              summaryEmailSent: summaryDelivery.emailSent,
+              manageUrl: summaryDelivery.manageUrl,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        },
+      });
+    }
     return {
       ok: true,
       recorded: true,
@@ -3367,10 +3743,21 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       start: appointment.scheduledStart,
       end: appointment.scheduledEnd,
       timezone: appointment.timezone,
+      summarySent: summaryDelivery.textSent || summaryDelivery.emailSent,
+      textSent: summaryDelivery.textSent,
+      emailSent: summaryDelivery.emailSent,
+      manageUrl: summaryDelivery.manageUrl,
+      summaryDelivery,
       message:
         appointment.status === "confirmed"
-          ? `Appointment ${confirmationCode} is saved and confirmed.`
-          : `Appointment request ${confirmationCode} is saved and pending confirmation.`,
+          ? `Appointment ${confirmationCode} is saved and confirmed. Summary sent by ${[
+              summaryDelivery.textSent ? "text" : "",
+              summaryDelivery.emailSent ? "email" : "",
+            ].filter(Boolean).join(" and ") || "no delivery channel"}.`
+          : `Appointment request ${confirmationCode} is saved and pending confirmation. Summary sent by ${[
+              summaryDelivery.textSent ? "text" : "",
+              summaryDelivery.emailSent ? "email" : "",
+            ].filter(Boolean).join(" and ") || "no delivery channel"}.`,
     };
   }
 
@@ -3476,7 +3863,9 @@ async function runToolCall(profile, config, functionCall, context = {}) {
 
   if (functionCall.name === "send_review_request") {
     if (!config.reviewRequestsEnabled) throw new Error("Review requests are disabled for this business");
-    if (!String(config.reviewLink || "").trim()) throw new Error("Review link is not configured");
+    const settings = await getSettings();
+    const reviewUrl = await reviewRequestUrl({ settings, profile, config });
+    if (!reviewUrl) throw new Error("Review link is not configured");
     const phone = args.phone ? String(args.phone) : context.fromNumber || contextLead?.phone || null;
     const feedbackLead = contextLead || (context.qualificationLeadId ? await prisma.lead.findUnique({ where: { id: context.qualificationLeadId } }) : null);
     const feedback = await upsertCustomerFeedback({
@@ -3490,14 +3879,13 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       rating: args.rating,
       feedbackText: args.feedback ? String(args.feedback) : "",
       status: "review_pending",
-      reviewLink: config.reviewLink,
+      reviewLink: reviewUrl,
       metadata: { source: "agent_tool", tool: functionCall.name },
     });
-    const settings = await getSettings();
     const message = templateText(config.reviewRequestTemplate, {
       business_name: profile.businessName,
       customer_name: args.name || contextLead?.name || "there",
-      review_link: config.reviewLink,
+      review_link: reviewUrl,
     }).trim();
     const delivery = await deliverBusinessMessage({
       settings,
@@ -3508,7 +3896,7 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       leadId: contextLead?.id || context.qualificationLeadId || null,
       voiceCallId: context.voiceCallId || null,
       customerFeedbackId: feedback.id,
-      reviewLink: config.reviewLink,
+      reviewLink: reviewUrl,
       metadata: { source: "agent_tool" },
     });
     const sentFeedback = await prisma.customerFeedback.update({
@@ -4036,6 +4424,14 @@ app.get("/api/auth/me", requireAuth, (req, res) => {
   });
 });
 
+app.get("/reviews/:cacheKey", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public/reviews/index.html"));
+});
+
+app.get("/reviews/:cacheKey/", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public/reviews/index.html"));
+});
+
 app.post("/webhooks/telnyx", async (req, res) => {
   try {
     if (!(await verifyTelnyxWebhook(req))) return res.status(401).json({ error: "Invalid Telnyx signature" });
@@ -4361,6 +4757,113 @@ async function handleBlueBubblesWebhook(req, res) {
 
 app.post("/webhooks/bluebubbles", handleBlueBubblesWebhook);
 app.post("/bluebubbles-webhook", handleBlueBubblesWebhook);
+
+async function publicAppointmentContext(token) {
+  const payload = verifyAppointmentActionToken(token);
+  const appointment = await prisma.appointment.findUnique({ where: { id: Number(payload.appointmentId) } });
+  if (!appointment) throw new Error("Appointment was not found");
+  const profile = await profileForAppointment(appointment);
+  if (!profile) throw new Error("Business profile was not found");
+  const config = await ensureBusinessConfig(profile);
+  return { appointment, profile, config };
+}
+
+function publicAppointmentPayload({ appointment, profile, config, settings, availability = null }) {
+  const manageUrl = appointmentManageUrl({ settings, appointment });
+  return {
+    appointment,
+    business: { name: profile.businessName, website: profile.website },
+    confirmationCode: appointmentConfirmationLabel(appointment),
+    appointmentTime: formatAppointmentTime(appointment, config.timezone),
+    manageUrl,
+    summary: appointmentSummaryText({ profile, appointment, config, manageUrl }),
+    slots: availability?.slots?.slice(0, 60) || [],
+    timezone: config.timezone,
+    durationMinutes: appointment.durationMinutes || config.slotDurationMinutes,
+  };
+}
+
+app.get("/api/public/appointments/:token", async (req, res) => {
+  try {
+    const { appointment, profile, config } = await publicAppointmentContext(req.params.token);
+    const settings = await getSettings();
+    const availability = await listCalendarSlots({
+      prisma,
+      profile,
+      config,
+      fromDate: req.query.from,
+      days: Math.min(30, Number(req.query.days || 14)),
+      durationMinutes: appointment.durationMinutes || config.slotDurationMinutes,
+    });
+    res.json(publicAppointmentPayload({ appointment, profile, config, settings, availability }));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/public/appointments/:token/cancel", async (req, res) => {
+  try {
+    const { appointment, profile, config } = await publicAppointmentContext(req.params.token);
+    const updated = await prisma.appointment.update({
+      where: { id: appointment.id },
+      data: { status: "cancelled", bookingKey: null },
+    });
+    const settings = await getSettings();
+    const summaryDelivery = await sendAppointmentSummary({
+      settings,
+      profile,
+      config,
+      appointment: updated,
+      source: "customer_cancel_link",
+    });
+    res.json({ ok: true, appointment: updated, summaryDelivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/public/appointments/:token/reschedule", async (req, res) => {
+  try {
+    const { appointment, profile, config } = await publicAppointmentContext(req.params.token);
+    if (appointment.status === "cancelled") throw new Error("Cancelled appointments cannot be rescheduled from this link");
+    const updated = await rescheduleExistingAppointment({
+      appointment,
+      profile,
+      config,
+      start: req.body.start,
+      durationMinutes: req.body.durationMinutes,
+      status: config.appointmentMode === "instant" ? "confirmed" : "requested",
+    });
+    const settings = await getSettings();
+    const summaryDelivery = await sendAppointmentSummary({
+      settings,
+      profile,
+      config,
+      appointment: updated,
+      source: "customer_reschedule_link",
+    });
+    res.json({ ok: true, appointment: updated, summaryDelivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/public/reviews/:cacheKey", async (req, res) => {
+  try {
+    const profile = await prisma.businessProfile.findUnique({ where: { cacheKey: req.params.cacheKey } });
+    if (!profile) return res.status(404).json({ error: "Business was not found" });
+    const links = await prisma.businessReviewLink.findMany({
+      where: { businessProfileId: profile.id, active: true },
+      orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+    });
+    res.json({
+      businessName: profile.businessName,
+      links: links.map((link) => ({ id: link.id, serviceName: link.serviceName, reviewUrl: link.reviewUrl })),
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
 
 app.use("/api/business-admin", requireAuth);
 app.use("/api/demo-data", requireAuth);
@@ -5087,8 +5590,14 @@ async function businessPhoneNumbers(profileId) {
 }
 
 async function businessAdminResponse(profile, config) {
-  const phoneNumbers = await businessPhoneNumbers(profile.id);
-  return { profile, config, phoneNumbers };
+  const [phoneNumbers, reviewLinks] = await Promise.all([
+    businessPhoneNumbers(profile.id),
+    prisma.businessReviewLink.findMany({
+      where: { businessProfileId: profile.id },
+      orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+    }),
+  ]);
+  return { profile, config, phoneNumbers, reviewLinks };
 }
 
 function adminRequestIdentity(req) {
@@ -5451,6 +5960,191 @@ app.get("/api/business-admin/calendar", async (req, res) => {
       durationMinutes: req.query.duration,
     });
     res.json(availability);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/appointments", async (req, res) => {
+  try {
+    const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const customerName = String(req.body.customerName || req.body.name || "").trim();
+    if (!customerName) throw new Error("Customer name is required");
+    const appointment = await bookCalendarAppointment({
+      prisma,
+      profile,
+      config,
+      start: req.body.start,
+      durationMinutes: req.body.durationMinutes,
+      customer: {
+        name: customerName,
+        phone: normalizeE164Phone(req.body.phone) || String(req.body.phone || "").trim() || null,
+        email: req.body.email ? String(req.body.email).trim().toLowerCase() : null,
+      },
+      intakeData: {
+        name: customerName,
+        phone: normalizeE164Phone(req.body.phone) || String(req.body.phone || "").trim() || null,
+        email: req.body.email ? String(req.body.email).trim().toLowerCase() : null,
+        reason: req.body.reason ? String(req.body.reason).trim() : null,
+      },
+      reason: req.body.reason,
+    });
+    const status = ["confirmed", "requested"].includes(String(req.body.status || "")) ? String(req.body.status) : appointment.status;
+    const updated = status === appointment.status ? appointment : await prisma.appointment.update({ where: { id: appointment.id }, data: { status } });
+    const settings = await getSettings();
+    const summaryDelivery = req.body.sendSummary === false
+      ? null
+      : await sendAppointmentSummary({ settings, profile, config, appointment: updated, source: "manual_calendar_create" });
+    res.status(201).json({ appointment: updated, summaryDelivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.patch("/api/business-admin/appointments/:id", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const existing = await prisma.appointment.findFirst({
+      where: { id: Number(req.params.id), businessName: profile.businessName, website: profile.website },
+    });
+    if (!existing) throw new Error("Appointment was not found for this business");
+    let appointment = existing;
+    const startChanged = Boolean(req.body.start);
+    const status = ["confirmed", "requested", "cancelled"].includes(String(req.body.status || "")) ? String(req.body.status) : existing.status;
+    if (startChanged && status !== "cancelled") {
+      appointment = await rescheduleExistingAppointment({
+        appointment: existing,
+        profile,
+        config,
+        start: req.body.start,
+        durationMinutes: req.body.durationMinutes,
+        status,
+      });
+    }
+    const intakeData = appointment.intakeData && typeof appointment.intakeData === "object" ? appointment.intakeData : {};
+    appointment = await prisma.appointment.update({
+      where: { id: appointment.id },
+      data: {
+        customerName: req.body.customerName === undefined ? undefined : String(req.body.customerName || "Customer").trim() || "Customer",
+        phone: req.body.phone === undefined ? undefined : normalizeE164Phone(req.body.phone) || String(req.body.phone || "").trim() || null,
+        email: req.body.email === undefined ? undefined : String(req.body.email || "").trim().toLowerCase() || null,
+        reason: req.body.reason === undefined ? undefined : String(req.body.reason || "").trim() || null,
+        status,
+        bookingKey: status === "cancelled" ? null : undefined,
+        intakeData: {
+          ...intakeData,
+          name: req.body.customerName === undefined ? intakeData.name : String(req.body.customerName || "").trim() || null,
+          phone: req.body.phone === undefined ? intakeData.phone : normalizeE164Phone(req.body.phone) || String(req.body.phone || "").trim() || null,
+          email: req.body.email === undefined ? intakeData.email : String(req.body.email || "").trim().toLowerCase() || null,
+          reason: req.body.reason === undefined ? intakeData.reason : String(req.body.reason || "").trim() || null,
+        },
+      },
+    });
+    const settings = await getSettings();
+    const summaryDelivery = req.body.sendSummary
+      ? await sendAppointmentSummary({ settings, profile, config, appointment, source: "manual_calendar_update" })
+      : null;
+    res.json({ appointment, summaryDelivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/appointments/:id/cancel", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const existing = await prisma.appointment.findFirst({
+      where: { id: Number(req.params.id), businessName: profile.businessName, website: profile.website },
+    });
+    if (!existing) throw new Error("Appointment was not found for this business");
+    const appointment = await prisma.appointment.update({
+      where: { id: existing.id },
+      data: { status: "cancelled", bookingKey: null },
+    });
+    const settings = await getSettings();
+    const summaryDelivery = req.body.sendSummary === false
+      ? null
+      : await sendAppointmentSummary({ settings, profile, config, appointment, source: "manual_calendar_cancel" });
+    res.json({ appointment, summaryDelivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/appointments/:id/summary", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const appointment = await prisma.appointment.findFirst({
+      where: { id: Number(req.params.id), businessName: profile.businessName, website: profile.website },
+    });
+    if (!appointment) throw new Error("Appointment was not found for this business");
+    const settings = await getSettings();
+    const summaryDelivery = await sendAppointmentSummary({ settings, profile, config, appointment, source: "manual_calendar_summary" });
+    res.status(201).json({ appointment, summaryDelivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/review-links", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const serviceName = String(req.body.serviceName || "").trim();
+    const reviewUrl = String(req.body.reviewUrl || "").trim();
+    if (!serviceName) throw new Error("Review service name is required");
+    if (!/^https?:\/\//i.test(reviewUrl)) throw new Error("Review URL must start with http:// or https://");
+    await prisma.businessReviewLink.create({
+      data: {
+        businessProfileId: profile.id,
+        serviceName,
+        reviewUrl,
+        active: req.body.active === undefined ? true : Boolean(req.body.active),
+        sortOrder: Number(req.body.sortOrder || 0),
+      },
+    });
+    const config = await ensureBusinessConfig(profile);
+    res.status(201).json(await businessAdminResponse(profile, config));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.put("/api/business-admin/review-links/:id", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const existing = await prisma.businessReviewLink.findFirst({
+      where: { id: Number(req.params.id), businessProfileId: profile.id },
+    });
+    if (!existing) throw new Error("Review link was not found for this business");
+    const serviceName = String(req.body.serviceName ?? existing.serviceName).trim();
+    const reviewUrl = String(req.body.reviewUrl ?? existing.reviewUrl).trim();
+    if (!serviceName) throw new Error("Review service name is required");
+    if (!/^https?:\/\//i.test(reviewUrl)) throw new Error("Review URL must start with http:// or https://");
+    await prisma.businessReviewLink.update({
+      where: { id: existing.id },
+      data: {
+        serviceName,
+        reviewUrl,
+        active: req.body.active === undefined ? existing.active : Boolean(req.body.active),
+        sortOrder: Number(req.body.sortOrder ?? existing.sortOrder),
+      },
+    });
+    res.json(await businessAdminResponse(profile, config));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete("/api/business-admin/review-links/:id", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await prisma.businessReviewLink.deleteMany({ where: { id: Number(req.params.id), businessProfileId: profile.id } });
+    res.json(await businessAdminResponse(profile, config));
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -6844,7 +7538,9 @@ app.post("/api/business-admin/crm/:id/review-request", async (req, res) => {
     });
     if (!lead) throw new Error("CRM lead was not found for this business");
     if (!config.reviewRequestsEnabled) throw new Error("Review requests are disabled for this business");
-    if (!config.reviewLink) throw new Error("Review link is not configured");
+    const settings = await getSettings();
+    const reviewUrl = await reviewRequestUrl({ settings, profile, config });
+    if (!reviewUrl) throw new Error("Review link is not configured");
     const phone = String(req.body.phone || lead.phone || lead.voiceCall?.fromNumber || "").trim();
     const feedback = await upsertCustomerFeedback({
       profile,
@@ -6856,15 +7552,14 @@ app.post("/api/business-admin/crm/:id/review-request", async (req, res) => {
       sentiment: "happy",
       rating: req.body.rating,
       status: "review_pending",
-      reviewLink: config.reviewLink,
+      reviewLink: reviewUrl,
       feedbackText: req.body.feedback ? String(req.body.feedback) : "",
       metadata: { source: "manual_crm" },
     });
-    const settings = await getSettings();
     const message = templateText(config.reviewRequestTemplate, {
       business_name: profile.businessName,
       customer_name: lead.name || "there",
-      review_link: config.reviewLink,
+      review_link: reviewUrl,
     }).trim();
     const delivery = await deliverBusinessMessage({
       settings,
@@ -6875,7 +7570,7 @@ app.post("/api/business-admin/crm/:id/review-request", async (req, res) => {
       leadId: lead.id,
       voiceCallId: lead.voiceCallId || null,
       customerFeedbackId: feedback.id,
-      reviewLink: config.reviewLink,
+      reviewLink: reviewUrl,
       metadata: { source: "manual_crm" },
     });
     const updatedFeedback = await prisma.customerFeedback.update({
@@ -8647,6 +9342,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
     geminiWs.on("open", async () => {
       await logVoiceCallEvent(callControlId, "gemini.connected");
       const identity = sessionIdentity(config?.agentName || settings.agentName, config?.language || settings.language);
+      const callerHistory = !isOnboarding && profile ? await callerHistoryPrompt(profile, call.fromNumber) : "";
       const onboardingPrompt = `${onboardingInstructionsForPrompt(settings.onboardingInstructions)}
 
 Phone onboarding context:
@@ -8698,6 +9394,8 @@ Live session identity and language:
 - Speak in ${identity.language}.
 - Introduce yourself as ${identity.agentName}.
 - Follow the platform-wide language rules above.
+- Caller history available for this phone number: ${callerHistory || "No previous history found."}
+- If caller history includes a known name, you may greet them by first name naturally, but do not pretend to remember facts not listed here.
 - Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, or asks to disconnect.`;
       const setup = {
         setup: {

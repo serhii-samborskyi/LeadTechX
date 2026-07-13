@@ -228,7 +228,7 @@
             </div>
             <div class="qualification-settings review-settings">
               <label><input id="reviewRequestsEnabled" type="checkbox" /> Enable smart review and complaint recovery</label>
-              <label>Review link<input id="reviewLink" type="url" placeholder="https://g.page/r/..." /></label>
+              <label>Fallback review link<input id="reviewLink" type="url" placeholder="https://g.page/r/..." /></label>
               <label>Manager notification phone<input id="managerNotificationPhone" type="tel" placeholder="+15551234567" /></label>
               <label>Review behavior instructions<textarea id="reviewPromptInstructions" rows="5"></textarea></label>
               <label>Review request message<textarea id="reviewRequestTemplate" rows="3"></textarea></label>
@@ -236,6 +236,20 @@
               <label>Manager complaint message<textarea id="complaintEscalationTemplate" rows="3"></textarea></label>
               <label>Missed-call follow-up message<textarea id="missedCallFollowupTemplate" rows="3"></textarea></label>
               <label>Appointment reminder message<textarea id="appointmentReminderTemplate" rows="3"></textarea></label>
+            </div>
+            <div class="crm-webhook-card review-directory-card">
+              <div>
+                <h4>Review service buttons</h4>
+                <p>Customers receive one review page and choose the service they prefer.</p>
+                <a id="reviewDirectoryLink" class="button-link" href="#" target="_blank" rel="noopener" hidden>Open review page</a>
+              </div>
+              <div class="inline-editor review-link-editor">
+                <input id="reviewServiceName" placeholder="Google Maps, Yelp, Facebook" />
+                <input id="reviewServiceUrl" type="url" placeholder="https://..." />
+                <input id="reviewServiceSort" type="number" step="1" placeholder="Order" />
+                <button id="addReviewLinkButton" type="button">Add service</button>
+              </div>
+              <div class="data-list compact-list" id="reviewLinkList"></div>
             </div>
             <button id="saveInstructionsButton" class="primary action-button" type="button">Save instructions</button>
           </section>
@@ -252,6 +266,24 @@
               <label>Timezone<input id="calendarTimezone" value="America/Chicago" /></label>
             </div>
             <div class="availability-list" id="availabilityRules"></div>
+            <div class="crm-webhook-card appointment-editor-card">
+              <div>
+                <h4>Book or edit an appointment</h4>
+                <p>Choose an open time from the schedule or enter a time manually.</p>
+              </div>
+              <div class="inline-editor appointment-editor">
+                <input id="appointmentId" type="hidden" />
+                <input id="appointmentCustomerName" placeholder="Customer name" />
+                <input id="appointmentPhone" type="tel" placeholder="+15551234567" />
+                <input id="appointmentEmail" type="email" placeholder="customer@email.com" />
+                <input id="appointmentStart" type="datetime-local" />
+                <input id="appointmentReason" placeholder="Reason" />
+                <select id="appointmentStatus"><option value="confirmed">Confirmed</option><option value="requested">Requested</option></select>
+                <label class="check-label"><input id="appointmentSendSummary" type="checkbox" checked /> Send summary</label>
+                <button id="saveAppointmentButton" class="primary" type="button">Save appointment</button>
+                <button id="resetAppointmentButton" type="button">Clear</button>
+              </div>
+            </div>
             <div class="calendar-actions">
               <button id="saveCalendarButton" class="primary" type="button">Save calendar settings</button>
               <button id="refreshCalendarButton" type="button">Refresh calendar</button>

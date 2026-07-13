@@ -487,6 +487,13 @@ body {
   color: #bed0c9;
 }
 
+.fast-claim .button-link {
+  border-color: transparent;
+  background: #fff;
+  color: #20352e;
+  font-weight: 800;
+}
+
 .fast-claim .form-message {
   color: #d9e8e2;
 }
@@ -567,6 +574,7 @@ body {
   .fast-profile-grid { grid-template-columns: 1fr; }
   .fast-profile-grid .wide { grid-column: auto; }
   .fast-inline-form { flex-wrap: wrap; }
+  .fast-claim .button-link { width: 100%; }
   .fast-claim .fast-inline-form button { width: 100%; }
 }
 
@@ -1990,6 +1998,14 @@ dd {
   grid-template-columns: 1.1fr 1.3fr 1fr 0.8fr 0.8fr 0.6fr 0.8fr auto;
 }
 
+.review-link-editor {
+  grid-template-columns: 1fr 1.7fr 0.45fr auto;
+}
+
+.appointment-editor {
+  grid-template-columns: 1fr 0.9fr 1fr 1fr 1fr 0.8fr auto auto auto;
+}
+
 .check-label {
   display: flex;
   min-height: 42px;
@@ -2297,6 +2313,10 @@ dd {
   grid-template-columns: 1fr 1.2fr 0.8fr 0.7fr 0.7fr 0.55fr 0.7fr auto auto;
 }
 
+.data-row.review-link-row {
+  grid-template-columns: 1fr minmax(0, 1.7fr) 0.45fr auto auto auto;
+}
+
 .data-row.appointment-row {
   display: block;
   padding: 14px 0;
@@ -2333,6 +2353,8 @@ dd {
 
 .appointment-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: flex-end;
   margin-top: 12px;
 }
@@ -2410,6 +2432,11 @@ a.appointment-field-value {
 .calendar-board h3 {
   margin: 0 0 10px;
   font-size: 1rem;
+}
+
+.appointment-editor-card,
+.review-directory-card {
+  margin-bottom: 18px;
 }
 
 .schedule-heading {
@@ -2517,6 +2544,58 @@ a.appointment-field-value {
   border-radius: 8px;
 }
 
+.public-flow-body {
+  min-height: 100vh;
+  background: linear-gradient(180deg, #f3fbf7, #ffffff);
+}
+
+.public-flow-shell {
+  width: min(760px, calc(100% - 28px));
+  margin: 0 auto;
+  padding: 42px 0;
+}
+
+.public-flow-card {
+  padding: 26px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+.public-flow-card h1 {
+  margin: 8px 0;
+  font-size: 2.6rem;
+}
+
+.public-summary {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7fbf9;
+  white-space: pre-wrap;
+}
+
+.public-flow-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+
+.review-button-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.review-service-button {
+  min-height: 56px;
+  justify-content: flex-start;
+  padding-inline: 18px;
+  font-weight: 800;
+}
+
 .slot.booked {
   border-color: #f0a08a;
   background: #fff0eb;
@@ -2550,7 +2629,8 @@ a.appointment-field-value {
   .inline-editor,
   .data-row.intake-row,
   .data-row.knowledge-row,
-  .data-row.price-row {
+  .data-row.price-row,
+  .data-row.review-link-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2754,6 +2834,8 @@ a.appointment-field-value {
   .form-grid,
   .calendar-board,
   .inline-editor,
+  .review-link-editor,
+  .appointment-editor,
   .crm-webhook-controls,
   .crm-filter-row,
   .crm-editor,
@@ -2763,8 +2845,17 @@ a.appointment-field-value {
   .data-row.intake-row,
   .data-row.knowledge-row,
   .data-row.price-row,
+  .data-row.review-link-row,
   .data-row.appointment-row {
     grid-template-columns: 1fr;
+  }
+
+  .public-flow-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .public-flow-card h1 {
+    font-size: 2rem;
   }
 
   .crm-lead-editor .wide-field {

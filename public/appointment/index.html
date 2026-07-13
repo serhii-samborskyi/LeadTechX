@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Manage appointment</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="public-flow-body">
+    <main class="public-flow-shell">
+      <section class="public-flow-card">
+        <p class="eyebrow"><i data-lucide="calendar-check"></i> Appointment</p>
+        <h1 id="appointmentTitle">Checking appointment</h1>
+        <p id="appointmentDetail"></p>
+        <div class="public-summary" id="appointmentSummary"></div>
+        <div class="public-flow-actions">
+          <select id="slotSelect" aria-label="Available times"></select>
+          <button id="rescheduleButton" class="primary" type="button">Reschedule</button>
+          <button id="cancelButton" class="danger-button" type="button">Cancel appointment</button>
+        </div>
+        <p class="form-message" id="appointmentMessage"></p>
+      </section>
+    </main>
+    <script src="/vendor/lucide/lucide.min.js"></script>
+    <script src="/appointment/appointment.js" type="module"></script>
+  </body>
+</html>
