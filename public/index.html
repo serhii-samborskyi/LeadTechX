@@ -108,6 +108,7 @@
           <button class="admin-tab active" data-tab="setup" role="tab" aria-selected="true" type="button">Setup</button>
           <button class="admin-tab" data-tab="content" role="tab" aria-selected="false" type="button">Content</button>
           <button class="admin-tab" data-tab="automation" role="tab" aria-selected="false" type="button">Automation</button>
+          <button class="admin-tab" data-tab="transfers" role="tab" aria-selected="false" type="button">Transfers</button>
           <button class="admin-tab" data-tab="calendar" role="tab" aria-selected="false" type="button">Calendar</button>
           <button class="admin-tab" data-tab="leads" role="tab" aria-selected="false" type="button">Leads</button>
           <button class="admin-tab" data-tab="messages" role="tab" aria-selected="false" type="button">Messages</button>
@@ -210,48 +211,102 @@
 
           <section class="admin-view" data-view="automation">
             <div class="admin-view-heading">
-              <h3>Agent rules and follow-up</h3>
-              <p>Control qualification calls, review requests, missed-call follow-up, and complaint recovery.</p>
+              <h3>Automation</h3>
+              <p>Control outbound qualification, smart review recovery, and customer follow-up messages.</p>
             </div>
-            <label>Agent instructions<textarea id="extraInstructions" rows="10" placeholder="One instruction per line"></textarea></label>
-            <div class="qualification-settings">
-              <label><input id="qualificationEnabled" type="checkbox" /> Enable outbound qualification agent</label>
-              <label>Launch mode<select id="qualificationLaunchMode"><option value="approval">After approval</option><option value="immediate">Immediately for new leads</option></select></label>
-              <label>Qualification instructions<textarea id="qualificationInstructions" rows="8" placeholder="What the outbound agent should ask, how to qualify leads, and what outcomes to use"></textarea></label>
-              <div class="form-grid">
-                <label>Natural delay min seconds<input id="qualificationDelayMinSeconds" type="number" min="0" step="1" /></label>
-                <label>Natural delay max seconds<input id="qualificationDelayMaxSeconds" type="number" min="0" step="1" /></label>
-                <label>Max attempts<input id="qualificationMaxAttempts" type="number" min="1" step="1" /></label>
-                <label>Retry delay minutes<input id="qualificationRetryDelayMinutes" type="number" min="1" step="15" /></label>
-                <label>Webhook dedupe hours<input id="leadWebhookDedupeWindowHours" type="number" min="0" step="1" /></label>
+
+            <div class="automation-subnav" role="tablist" aria-label="Automation sections">
+              <button class="automation-menu-button active" data-automation-target="rules" type="button" role="tab" aria-selected="true">Agent rules</button>
+              <button class="automation-menu-button" data-automation-target="qualification" type="button" role="tab" aria-selected="false">Outbound qualification</button>
+              <button class="automation-menu-button" data-automation-target="reviews" type="button" role="tab" aria-selected="false">Reviews & complaints</button>
+              <button class="automation-menu-button" data-automation-target="followup" type="button" role="tab" aria-selected="false">Follow-up messages</button>
+            </div>
+
+            <div class="automation-section active" data-automation-section="rules" role="tabpanel">
+              <div class="automation-section-heading">
+                <h4>Agent rules and follow-up</h4>
+                <p>Global behavior the receptionist follows during calls.</p>
+              </div>
+              <label>Agent instructions<textarea id="extraInstructions" rows="8" placeholder="One instruction per line"></textarea></label>
+            </div>
+
+            <div class="automation-section" data-automation-section="qualification" role="tabpanel">
+              <div class="automation-section-heading">
+                <h4>Outbound qualification agent</h4>
+                <p>Rules for calling new leads, retrying no-answer calls, and updating CRM outcomes.</p>
+              </div>
+              <div class="qualification-settings">
+                <label><input id="qualificationEnabled" type="checkbox" /> Enable outbound qualification agent</label>
+                <label>Launch mode<select id="qualificationLaunchMode"><option value="approval">After approval</option><option value="immediate">Immediately for new leads</option></select></label>
+                <label>Qualification instructions<textarea id="qualificationInstructions" rows="8" placeholder="What the outbound agent should ask, how to qualify leads, and what outcomes to use"></textarea></label>
+                <div class="form-grid">
+                  <label>Natural delay min seconds<input id="qualificationDelayMinSeconds" type="number" min="0" step="1" /></label>
+                  <label>Natural delay max seconds<input id="qualificationDelayMaxSeconds" type="number" min="0" step="1" /></label>
+                  <label>Max attempts<input id="qualificationMaxAttempts" type="number" min="1" step="1" /></label>
+                  <label>Retry delay minutes<input id="qualificationRetryDelayMinutes" type="number" min="1" step="15" /></label>
+                  <label>Webhook dedupe hours<input id="leadWebhookDedupeWindowHours" type="number" min="0" step="1" /></label>
+                </div>
               </div>
             </div>
-            <div class="qualification-settings review-settings">
-              <label><input id="reviewRequestsEnabled" type="checkbox" /> Enable smart review and complaint recovery</label>
-              <label>Fallback review link<input id="reviewLink" type="url" placeholder="https://g.page/r/..." /></label>
-              <label>Manager notification phone<input id="managerNotificationPhone" type="tel" placeholder="+15551234567" /></label>
-              <label>Review behavior instructions<textarea id="reviewPromptInstructions" rows="5"></textarea></label>
-              <label>Review request message<textarea id="reviewRequestTemplate" rows="3"></textarea></label>
-              <label>Complaint recovery instructions<textarea id="complaintRecoveryInstructions" rows="5"></textarea></label>
-              <label>Manager complaint message<textarea id="complaintEscalationTemplate" rows="3"></textarea></label>
-              <label>Missed-call follow-up message<textarea id="missedCallFollowupTemplate" rows="3"></textarea></label>
-              <label>Appointment reminder message<textarea id="appointmentReminderTemplate" rows="3"></textarea></label>
-            </div>
-            <div class="crm-webhook-card review-directory-card">
-              <div>
-                <h4>Review service buttons</h4>
-                <p>Customers receive one review page and choose the service they prefer.</p>
-                <a id="reviewDirectoryLink" class="button-link" href="#" target="_blank" rel="noopener" hidden>Open review page</a>
+
+            <div class="automation-section" data-automation-section="reviews" role="tabpanel">
+              <div class="automation-section-heading">
+                <h4>Smart review and complaint recovery</h4>
+                <p>Ask satisfied customers for reviews and route unhappy customers to management.</p>
               </div>
-              <div class="inline-editor review-link-editor">
-                <input id="reviewServiceName" placeholder="Google Maps, Yelp, Facebook" />
-                <input id="reviewServiceUrl" type="url" placeholder="https://..." />
-                <input id="reviewServiceSort" type="number" step="1" placeholder="Order" />
-                <button id="addReviewLinkButton" type="button">Add service</button>
+              <div class="qualification-settings review-settings">
+                <label><input id="reviewRequestsEnabled" type="checkbox" /> Enable smart review and complaint recovery</label>
+                <label>Fallback review link<input id="reviewLink" type="url" placeholder="https://g.page/r/..." /></label>
+                <label>Manager notification phone<input id="managerNotificationPhone" type="tel" placeholder="+15551234567" /></label>
+                <label>Review behavior instructions<textarea id="reviewPromptInstructions" rows="5"></textarea></label>
+                <label>Review request message<textarea id="reviewRequestTemplate" rows="3"></textarea></label>
+                <label>Complaint recovery instructions<textarea id="complaintRecoveryInstructions" rows="5"></textarea></label>
+                <label>Manager complaint message<textarea id="complaintEscalationTemplate" rows="3"></textarea></label>
               </div>
-              <div class="data-list compact-list" id="reviewLinkList"></div>
+              <div class="crm-webhook-card review-directory-card">
+                <div>
+                  <h4>Review service buttons</h4>
+                  <p>Customers receive one review page and choose the service they prefer.</p>
+                  <a id="reviewDirectoryLink" class="button-link" href="#" target="_blank" rel="noopener" hidden>Open review page</a>
+                </div>
+                <div class="inline-editor review-link-editor">
+                  <input id="reviewServiceName" placeholder="Google Maps, Yelp, Facebook" />
+                  <input id="reviewServiceUrl" type="url" placeholder="https://..." />
+                  <input id="reviewServiceSort" type="number" step="1" placeholder="Order" />
+                  <button id="addReviewLinkButton" type="button">Add service</button>
+                </div>
+                <div class="data-list compact-list" id="reviewLinkList"></div>
+              </div>
             </div>
+
+            <div class="automation-section" data-automation-section="followup" role="tabpanel">
+              <div class="automation-section-heading">
+                <h4>Follow-up messages</h4>
+                <p>Templates for missed-call follow-up and appointment reminder texts.</p>
+              </div>
+              <div class="qualification-settings follow-up-settings">
+                <label>Missed-call follow-up message<textarea id="missedCallFollowupTemplate" rows="3"></textarea></label>
+                <label>Appointment reminder message<textarea id="appointmentReminderTemplate" rows="3"></textarea></label>
+              </div>
+            </div>
+
             <button id="saveInstructionsButton" class="primary action-button" type="button">Save instructions</button>
+          </section>
+
+          <section class="admin-view" data-view="transfers">
+            <div class="admin-view-heading">
+              <h3>Call transfers</h3>
+              <p>Add departments or people the receptionist can offer when a caller needs a human or asks something outside the configured answers.</p>
+            </div>
+            <div class="inline-editor transfer-target-editor">
+              <input id="transferLabel" placeholder="Sales, dispatch, manager" />
+              <input id="transferPhone" type="tel" placeholder="+15551234567" />
+              <input id="transferDescription" placeholder="What this person or team handles" />
+              <input id="transferSortOrder" type="number" step="1" placeholder="Order" />
+              <label class="check-label"><input id="transferActive" type="checkbox" checked /> Active</label>
+              <button id="addTransferTargetButton" type="button">Add transfer</button>
+            </div>
+            <div class="data-list compact-list" id="transferTargetList"></div>
           </section>
 
           <section class="admin-view" data-view="calendar">
@@ -373,15 +428,15 @@
             <div class="section-heading">
               <div>
                 <h3>Messages</h3>
-                <p>Review requests, complaint escalations, setup links, reminders, and test messages.</p>
+                <p>Customer text threads, review requests, complaint escalations, setup links, and reminders.</p>
               </div>
               <button id="refreshMessagesButton" type="button">Refresh messages</button>
             </div>
             <div class="inline-editor crm-editor">
               <input id="testMessageProvider" type="hidden" value="" />
-              <input id="testMessagePhone" placeholder="Test phone +15551234567" />
-              <input id="testMessageBody" placeholder="Test message" />
-              <button id="sendTestMessageButton" type="button">Send test</button>
+              <input id="testMessagePhone" placeholder="Phone +15551234567" />
+              <input id="testMessageBody" placeholder="Type a text message" />
+              <button id="sendTestMessageButton" type="button">Send text</button>
             </div>
             <div class="data-list" id="messageList"></div>
           </section>

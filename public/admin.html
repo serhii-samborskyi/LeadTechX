@@ -81,7 +81,7 @@
               <label>Claim link validity (days)<input id="claimLinkDays" type="number" min="1" required /></label>
               <label>Trial credits<input id="trialCredits" type="number" min="0" required /></label>
               <label>USD per token<input id="tokenUsd" type="number" min="0.000001" step="0.000001" required /></label>
-              <label>Low balance warning (tokens)<input id="lowBalanceTokens" type="number" min="0" required /></label>
+              <label>Low balance warning (credits)<input id="lowBalanceTokens" type="number" min="0" required /></label>
               <label>Voice minute credits<input id="voiceMinuteCredits" type="number" min="0" required /></label>
               <label>AI voice minute credits<input id="geminiMinuteCredits" type="number" min="0" required /></label>
               <label>Outbound call credits<input id="outboundCallCredits" type="number" min="0" required /></label>
@@ -207,7 +207,7 @@
         </form>
         <section class="system-panel plan-manager-panel" data-system-panel="plans">
           <div class="section-heading">
-            <div><h3>Subscription plans</h3><p>Plans shown to businesses for monthly billing and included monthly tokens.</p></div>
+            <div><h3>Subscription plans</h3><p>Plans shown to businesses for monthly billing, included monthly credits, and feature access.</p></div>
           </div>
           <form id="planForm" class="settings-form" novalidate>
             <input id="planId" type="hidden" />
@@ -215,10 +215,22 @@
               <label>Plan name<input id="planName" required placeholder="Starter" /></label>
               <label>Slug<input id="planSlug" placeholder="starter" /></label>
               <label>Monthly price USD<input id="planMonthlyPrice" type="number" min="0" step="0.01" required /></label>
-              <label>Monthly tokens<input id="planMonthlyCredits" type="number" min="0" step="100" required /></label>
+              <label>Monthly credits<input id="planMonthlyCredits" type="number" min="0" step="100" required /></label>
+              <label>Phone numbers included<input id="planMaxPhoneNumbers" type="number" min="1" step="1" value="1" /></label>
+              <label>Call transfer contacts<input id="planMaxTransferTargets" type="number" min="0" step="1" value="1" /></label>
+              <label>Business users<input id="planMaxUsers" type="number" min="1" step="1" value="1" /></label>
+              <label>Support level<select id="planSupportLevel"><option value="standard">Standard</option><option value="priority">Priority</option><option value="managed">Managed</option></select></label>
               <label>Stripe price ID <span>optional</span><input id="planStripePriceId" placeholder="price_..." /></label>
               <label>Sort order<input id="planSortOrder" type="number" step="1" value="0" /></label>
               <label class="wide-field">Description<textarea id="planDescription" rows="3"></textarea></label>
+              <label class="check-label"><input id="planOutboundQualificationEnabled" type="checkbox" /> Outbound qualification</label>
+              <label class="check-label"><input id="planSmartReviewsEnabled" type="checkbox" /> Smart reviews</label>
+              <label class="check-label"><input id="planCallTransfersEnabled" type="checkbox" /> Call transfers</label>
+              <label class="check-label"><input id="planLeadWebhookEnabled" type="checkbox" checked /> Lead webhook</label>
+              <label class="check-label"><input id="planMessageInboxEnabled" type="checkbox" checked /> Message inbox</label>
+              <label class="check-label"><input id="planAppointmentRemindersEnabled" type="checkbox" /> Appointment reminders</label>
+              <label class="check-label"><input id="planPrioritySupport" type="checkbox" /> Priority support</label>
+              <label class="check-label"><input id="planAllowCreditTopups" type="checkbox" checked /> Allow credit top-ups</label>
               <label class="check-label"><input id="planActive" type="checkbox" checked /> Active plan</label>
             </div>
             <div class="calendar-actions">

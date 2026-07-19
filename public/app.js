@@ -22,6 +22,8 @@ const state = {
   visualizerFrame: null,
   admin: null,
   crmSearchTimer: null,
+  selectedMessageThreadKey: "",
+  messageData: { messages: [], inboundMessages: [] },
   businessName: params.get("business_name") || "Business Name",
   website: params.get("website") || "",
 };
@@ -67,6 +69,8 @@ const el = {
   adminStatus: document.querySelector("#adminStatus"),
   adminTabs: document.querySelectorAll(".admin-tab"),
   adminViews: document.querySelectorAll(".admin-view"),
+  automationMenuButtons: document.querySelectorAll(".automation-menu-button"),
+  automationSections: document.querySelectorAll(".automation-section"),
   profileBusinessName: document.querySelector("#profileBusinessName"),
   profileWebsite: document.querySelector("#profileWebsite"),
   profileSummary: document.querySelector("#profileSummary"),
@@ -130,6 +134,13 @@ const el = {
   missedCallFollowupTemplate: document.querySelector("#missedCallFollowupTemplate"),
   appointmentReminderTemplate: document.querySelector("#appointmentReminderTemplate"),
   saveInstructionsButton: document.querySelector("#saveInstructionsButton"),
+  transferLabel: document.querySelector("#transferLabel"),
+  transferPhone: document.querySelector("#transferPhone"),
+  transferDescription: document.querySelector("#transferDescription"),
+  transferSortOrder: document.querySelector("#transferSortOrder"),
+  transferActive: document.querySelector("#transferActive"),
+  addTransferTargetButton: document.querySelector("#addTransferTargetButton"),
+  transferTargetList: document.querySelector("#transferTargetList"),
   appointmentMode: document.querySelector("#appointmentMode"),
   slotDuration: document.querySelector("#slotDuration"),
   bufferMinutes: document.querySelector("#bufferMinutes"),
@@ -875,6 +886,33 @@ function renderReviewLinks(entries = [], profile = null) {
   if (!entries.length) el.reviewLinkList.textContent = "No review services yet. Add Google, Yelp, Facebook, or another review page.";
 }
 
+function renderTransferTargets(entries = []) {
+  el.transferTargetList.innerHTML = "";
+  for (const entry of entries) {
+    const row = document.createElement("div");
+    row.className = "data-row transfer-target-row";
+    row.dataset.id = entry.id;
+    const active = document.createElement("label");
+    active.className = "check-label";
+    const activeInput = input("row-active", "", "checkbox");
+    activeInput.checked = entry.active !== false;
+    active.append(activeInput, "Active");
+    row.append(
+      input("row-label", entry.label),
+      input("row-phone", entry.phone, "tel"),
+      input("row-description", entry.description || ""),
+      input("row-sort-order", entry.sortOrder ?? 0, "number"),
+      active,
+      rowButton("save-transfer-target", "Save"),
+      rowButton("delete-transfer-target", "Delete", true),
+    );
+    el.transferTargetList.appendChild(row);
+  }
+  if (!entries.length) {
+    el.transferTargetList.textContent = "No transfer destinations yet. Add a manager, dispatch line, sales team, or other human contact.";
+  }
+}
+
 function renderAvailability(rules) {
   const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   el.availabilityRules.innerHTML = "";
@@ -939,6 +977,7 @@ function applyAdminData(data) {
   renderKnowledge(data.config.knowledgeEntries);
   renderPrices(data.config.priceEntries);
   renderReviewLinks(data.reviewLinks || [], data.profile);
+  renderTransferTargets(data.config.transferTargets || []);
   renderAvailability(data.config.availabilityRules);
   setAdminStatus(`Loaded for ${data.profile.businessName}`);
 }
@@ -1229,6 +1268,57 @@ async function deleteReviewLink(row) {
   });
   applyAdminData(data);
   setAdminStatus("Review service deleted");
+}
+
+async function addTransferTarget() {
+  const payload = {
+    ...adminIdentity(),
+    label: el.transferLabel.value.trim(),
+    phone: el.transferPhone.value.trim(),
+    description: el.transferDescription.value.trim(),
+    sortOrder: Number(el.transferSortOrder.value || 0),
+    active: el.transferActive.checked,
+  };
+  setAdminStatus("Saving transfer destination");
+  const data = await apiJson("/api/business-admin/transfer-targets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  applyAdminData(data);
+  el.transferLabel.value = "";
+  el.transferPhone.value = "";
+  el.transferDescription.value = "";
+  el.transferSortOrder.value = "";
+  el.transferActive.checked = true;
+  setAdminStatus("Transfer destination added");
+}
+
+async function saveTransferTarget(row) {
+  const data = await apiJson(`/api/business-admin/transfer-targets/${row.dataset.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      label: row.querySelector(".row-label").value,
+      phone: row.querySelector(".row-phone").value,
+      description: row.querySelector(".row-description").value,
+      sortOrder: Number(row.querySelector(".row-sort-order").value || 0),
+      active: row.querySelector(".row-active").checked,
+    }),
+  });
+  applyAdminData(data);
+  setAdminStatus("Transfer destination saved");
+}
+
+async function deleteTransferTarget(row) {
+  const data = await apiJson(`/api/business-admin/transfer-targets/${row.dataset.id}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  applyAdminData(data);
+  setAdminStatus("Transfer destination deleted");
 }
 
 const crmStatusOptions = ["new", "qualified", "unqualified", "callback", "appointment", "transferred", "unreachable"];
@@ -1802,46 +1892,198 @@ async function escalateComplaint(card) {
   setAdminStatus("Complaint escalated");
 }
 
-function renderMessages(messages = [], inboundMessages = []) {
-  el.messageList.innerHTML = "";
+function usefulContactName(value) {
+  const text = String(value || "").trim();
+  if (!text || /^unknown/i.test(text) || /^caller\s+\+?\d+/i.test(text)) return "";
+  return text;
+}
+
+function messageContactName(message) {
+  return (
+    usefulContactName(message.lead?.name) ||
+    usefulContactName(message.appointment?.customerName) ||
+    usefulContactName(message.customerFeedback?.customerName) ||
+    ""
+  );
+}
+
+function messageTime(value) {
+  const date = new Date(value || Date.now());
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  const sameDay = date.toDateString() === today.toDateString();
+  return sameDay
+    ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function messageBodyPreview(value, max = 120) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max - 1)}...` : text;
+}
+
+function normalizeMessageThreads(messages = [], inboundMessages = []) {
+  const items = [];
   for (const message of messages) {
-    const row = document.createElement("div");
-    row.className = "data-row compact-row";
-    row.append(
-      miniRow([
-        message.purpose,
-        message.provider,
-        message.status,
-        message.toPhone,
-        message.lead ? `lead #${message.lead.id} ${message.lead.name}` : null,
-        message.appointment ? `appt ${appointmentCode(message.appointment.id)} ${message.appointment.customerName}` : null,
-        message.detail?.message ? String(message.detail.message).slice(0, 90) : null,
-        message.error,
-        message.createdAt ? new Date(message.createdAt).toLocaleString() : null,
-      ]),
-    );
-    el.messageList.appendChild(row);
+    const contact = String(message.toPhone || "").trim();
+    if (!contact) continue;
+    const channel = message.provider === "smtp" || contact.includes("@") ? "email" : "text";
+    const body = message.detail?.message || message.detail?.metadata?.message || message.error || "";
+    items.push({
+      id: `out-${message.id}`,
+      direction: "outbound",
+      channel,
+      contact,
+      threadKey: `${channel}:${contact.toLowerCase()}`,
+      displayName: messageContactName(message) || contact,
+      body,
+      status: message.status,
+      purpose: message.purpose,
+      provider: message.provider,
+      error: message.error,
+      createdAt: message.createdAt,
+      appointment: message.appointment,
+      lead: message.lead,
+    });
   }
   for (const message of inboundMessages) {
-    const row = document.createElement("div");
-    row.className = "data-row compact-row";
-    row.append(
-      miniRow([
-        "Inbound",
-        message.purpose || message.eventType,
-        message.provider,
-        message.status,
-        message.fromPhone,
-        message.lead ? `lead #${message.lead.id} ${message.lead.name}` : null,
-        message.voiceCall ? `call #${message.voiceCall.id} ${message.voiceCall.callMode}` : null,
-        message.text ? String(message.text).slice(0, 120) : null,
-        message.error,
-        message.createdAt ? new Date(message.createdAt).toLocaleString() : null,
-      ]),
-    );
-    el.messageList.appendChild(row);
+    const contact = String(message.fromPhone || message.chatGuid || "").trim();
+    if (!contact) continue;
+    items.push({
+      id: `in-${message.id}`,
+      direction: "inbound",
+      channel: "text",
+      contact,
+      threadKey: `text:${contact.toLowerCase()}`,
+      displayName: messageContactName(message) || contact,
+      body: message.text || message.error || "",
+      status: message.status,
+      purpose: message.purpose || message.eventType,
+      provider: message.provider,
+      error: message.error,
+      createdAt: message.createdAt,
+      appointment: message.appointment,
+      lead: message.lead,
+      voiceCall: message.voiceCall,
+    });
   }
-  if (!messages.length && !inboundMessages.length) el.messageList.textContent = "No messages yet.";
+
+  const threadMap = new Map();
+  for (const item of items) {
+    if (!threadMap.has(item.threadKey)) {
+      threadMap.set(item.threadKey, {
+        key: item.threadKey,
+        contact: item.contact,
+        channel: item.channel,
+        displayName: item.displayName,
+        messages: [],
+        latestAt: item.createdAt,
+      });
+    }
+    const thread = threadMap.get(item.threadKey);
+    if (!thread.displayName || thread.displayName === thread.contact) thread.displayName = item.displayName;
+    thread.messages.push(item);
+    if (new Date(item.createdAt) > new Date(thread.latestAt || 0)) thread.latestAt = item.createdAt;
+  }
+
+  const threads = [...threadMap.values()].map((thread) => {
+    thread.messages.sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt));
+    thread.latest = thread.messages.at(-1);
+    return thread;
+  });
+  threads.sort((left, right) => new Date(right.latestAt) - new Date(left.latestAt));
+  return threads;
+}
+
+function renderMessages(messages = [], inboundMessages = []) {
+  state.messageData = { messages, inboundMessages };
+  const threads = normalizeMessageThreads(messages, inboundMessages);
+  el.messageList.innerHTML = "";
+  if (!threads.length) {
+    el.messageList.className = "message-inbox empty";
+    el.messageList.textContent = "No messages yet.";
+    state.selectedMessageThreadKey = "";
+    return;
+  }
+
+  el.messageList.className = "message-inbox";
+  if (!threads.some((thread) => thread.key === state.selectedMessageThreadKey)) {
+    state.selectedMessageThreadKey = threads[0].key;
+  }
+  const selected = threads.find((thread) => thread.key === state.selectedMessageThreadKey) || threads[0];
+
+  const threadList = document.createElement("div");
+  threadList.className = "message-thread-list";
+  for (const thread of threads) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `message-thread ${thread.key === selected.key ? "active" : ""}`;
+    button.dataset.threadKey = thread.key;
+    const avatar = document.createElement("span");
+    avatar.className = "message-avatar";
+    avatar.textContent = (thread.displayName || thread.contact).slice(0, 1).toUpperCase();
+    const main = document.createElement("span");
+    main.className = "message-thread-main";
+    const title = document.createElement("strong");
+    title.textContent = thread.displayName || thread.contact;
+    const preview = document.createElement("span");
+    preview.textContent = messageBodyPreview(thread.latest?.body || thread.latest?.error || thread.latest?.purpose || "", 76);
+    main.append(title, preview);
+    const meta = document.createElement("span");
+    meta.className = "message-thread-meta";
+    meta.textContent = messageTime(thread.latestAt);
+    button.append(avatar, main, meta);
+    threadList.appendChild(button);
+  }
+
+  const conversation = document.createElement("section");
+  conversation.className = "message-conversation";
+  const header = document.createElement("div");
+  header.className = "message-conversation-header";
+  const title = document.createElement("strong");
+  title.textContent = selected.displayName || selected.contact;
+  const detail = document.createElement("span");
+  detail.textContent = [selected.contact, selected.channel === "email" ? "Email" : "Text/iMessage"].filter(Boolean).join(" - ");
+  header.append(title, detail);
+
+  const chain = document.createElement("div");
+  chain.className = "message-chain";
+  for (const message of selected.messages) {
+    const bubble = document.createElement("article");
+    bubble.className = `message-bubble ${message.direction}`;
+    const text = document.createElement("p");
+    text.textContent = message.body || message.error || "(No message body)";
+    const meta = document.createElement("span");
+    meta.textContent = [
+      message.direction === "inbound" ? "Received" : message.status || "sent",
+      message.purpose,
+      message.appointment ? appointmentCode(message.appointment.id) : null,
+      message.error ? "failed" : null,
+      message.createdAt ? new Date(message.createdAt).toLocaleString() : null,
+    ]
+      .filter(Boolean)
+      .join(" - ");
+    bubble.append(text, meta);
+    chain.appendChild(bubble);
+  }
+  conversation.append(header, chain);
+  if (selected.channel === "text" && selected.contact.startsWith("+")) {
+    const composer = document.createElement("form");
+    composer.className = "message-composer";
+    composer.dataset.contact = selected.contact;
+    const inputNode = document.createElement("input");
+    inputNode.placeholder = `Text ${selected.displayName || selected.contact}`;
+    inputNode.autocomplete = "off";
+    inputNode.required = true;
+    const button = document.createElement("button");
+    button.className = "primary";
+    button.type = "submit";
+    button.textContent = "Send";
+    composer.append(inputNode, button);
+    conversation.appendChild(composer);
+  }
+  el.messageList.append(threadList, conversation);
 }
 
 async function loadMessages() {
@@ -1852,20 +2094,27 @@ async function loadMessages() {
   renderMessages(data.messages || [], data.inboundMessages || []);
 }
 
-async function sendTestMessage() {
-  setAdminStatus("Sending test message");
-  await apiJson("/api/business-admin/messages/test", {
+async function sendManualMessage({ toPhone, message }) {
+  setAdminStatus("Sending message");
+  await apiJson("/api/business-admin/messages/manual", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       ...adminIdentity(),
       provider: el.testMessageProvider.value,
-      toPhone: el.testMessagePhone.value,
-      message: el.testMessageBody.value || "Test message from your AI receptionist.",
+      toPhone,
+      message,
     }),
   });
   await Promise.all([loadMessages(), loadUsage()]);
-  setAdminStatus("Test message sent");
+  setAdminStatus("Message sent");
+}
+
+async function sendManualMessageFromBar() {
+  const toPhone = el.testMessagePhone.value.trim();
+  const message = el.testMessageBody.value.trim();
+  await sendManualMessage({ toPhone, message });
+  el.testMessageBody.value = "";
 }
 
 function businessUsageCategoryLabel(category) {
@@ -1900,6 +2149,7 @@ function renderUsage(data) {
   balance.className = `status-pill ${data.lowBalance ? "warning" : ""}`;
   balance.textContent = `${data.creditBalance ?? 0} credits`;
   el.usageSummary.appendChild(balance);
+  renderCreditBucketSummary(el.usageSummary, data.creditBuckets);
   if (data.lowBalance) {
     const warning = document.createElement("span");
     warning.className = "status-pill warning";
@@ -1960,11 +2210,49 @@ function renderUsage(data) {
   if (!(data.events || []).length) el.usageList.textContent = "No usage events yet.";
 }
 
+function creditBucketPill(container, text, className = "") {
+  if (!text) return;
+  const pill = document.createElement("span");
+  pill.className = `status-pill ${className}`.trim();
+  pill.textContent = text;
+  container.appendChild(pill);
+}
+
+function renderCreditBucketSummary(container, creditBuckets = {}) {
+  const summary = creditBuckets.summary || {};
+  const monthly = summary.monthlyIncluded || {};
+  if ((monthly.total || monthly.remaining) > 0) {
+    const expiry = monthly.expiresAt ? `, expires ${new Date(monthly.expiresAt).toLocaleDateString()}` : "";
+    creditBucketPill(container, `monthly included: ${monthly.remaining || 0}/${monthly.total || 0}${expiry}`, "active");
+  }
+  if (summary.topUpCredits) creditBucketPill(container, `top-up credits: ${summary.topUpCredits}`);
+  if (summary.trialCredits) creditBucketPill(container, `trial credits: ${summary.trialCredits}`);
+  if (summary.legacyCredits) creditBucketPill(container, `legacy credits: ${summary.legacyCredits}`);
+  if (summary.overageCredits < 0) creditBucketPill(container, `overage: ${summary.overageCredits}`, "warning");
+}
+
 function moneyFromCents(amount, currency = "usd") {
   if (amount === null || amount === undefined) return "";
   return new Intl.NumberFormat(undefined, { style: "currency", currency: String(currency || "usd").toUpperCase() }).format(
     Number(amount) / 100,
   );
+}
+
+function planFeatureLabels(plan) {
+  return [
+    `${plan.monthlyCredits || 0} monthly credits`,
+    `${plan.maxPhoneNumbers || 1} phone number${Number(plan.maxPhoneNumbers || 1) === 1 ? "" : "s"}`,
+    `${plan.maxTransferTargets ?? 0} transfer contact${Number(plan.maxTransferTargets ?? 0) === 1 ? "" : "s"}`,
+    `${plan.maxUsers || 1} user${Number(plan.maxUsers || 1) === 1 ? "" : "s"}`,
+    plan.outboundQualificationEnabled ? "Outbound qualification" : null,
+    plan.smartReviewsEnabled ? "Smart reviews" : null,
+    plan.callTransfersEnabled ? "Call transfers" : null,
+    plan.leadWebhookEnabled !== false ? "Lead webhook" : null,
+    plan.messageInboxEnabled !== false ? "Message inbox" : null,
+    plan.appointmentRemindersEnabled ? "Appointment reminders" : null,
+    plan.allowCreditTopups !== false ? "Credit top-ups" : null,
+    plan.prioritySupport ? "Priority support" : null,
+  ].filter(Boolean);
 }
 
 function renderBilling(data) {
@@ -1978,18 +2266,19 @@ function renderBilling(data) {
     ready ? "Stripe ready" : "Stripe not ready",
     stripe.webhookConfigured ? "webhook configured" : "webhook missing",
     currentPlan ? `plan ${currentPlan.name}` : "no active plan",
-    currentPlan ? `${currentPlan.monthlyCredits} monthly tokens` : null,
+    currentPlan ? `${currentPlan.monthlyCredits} monthly credits` : null,
     stripe.subscriptionStatus ? `subscription ${stripe.subscriptionStatus}` : null,
     stripe.subscriptionCurrentPeriodEnd ? `renews ${new Date(stripe.subscriptionCurrentPeriodEnd).toLocaleDateString()}` : null,
   ].filter(Boolean);
   el.billingStatus.textContent = statusParts.join(" · ");
   el.creditPackCredits.value = settings.stripeCreditPackCredits || 1000;
+  el.buyCreditsButton.disabled = !ready || currentPlan?.allowCreditTopups === false;
   const previousPlanId = el.billingPlanSelect.value;
   el.billingPlanSelect.innerHTML = "";
   for (const plan of plans) {
     const option = document.createElement("option");
     option.value = String(plan.id);
-    option.textContent = `${plan.name} · ${moneyFromCents(plan.monthlyPriceCents)} / month · ${plan.monthlyCredits} tokens`;
+    option.textContent = `${plan.name} · ${moneyFromCents(plan.monthlyPriceCents)} / month · ${plan.monthlyCredits} credits`;
     option.selected = String(plan.id) === (previousPlanId || String(currentPlan?.id || plans[0]?.id || ""));
     el.billingPlanSelect.appendChild(option);
   }
@@ -2000,14 +2289,18 @@ function renderBilling(data) {
     el.billingPlanSelect.appendChild(option);
   }
   el.billingPlanList.innerHTML = "";
+  renderCreditBucketSummary(el.billingPlanList, data.creditBuckets);
   for (const plan of plans) {
-    const pill = document.createElement("span");
-    pill.className = `status-pill ${currentPlan?.id === plan.id ? "active" : ""}`;
-    pill.textContent = `${plan.name}: ${moneyFromCents(plan.monthlyPriceCents)}/mo, ${plan.monthlyCredits} tokens`;
-    el.billingPlanList.appendChild(pill);
+    const card = document.createElement("div");
+    card.className = `billing-plan-card ${currentPlan?.id === plan.id ? "active" : ""}`;
+    const title = document.createElement("strong");
+    title.textContent = `${plan.name} · ${moneyFromCents(plan.monthlyPriceCents)}/mo`;
+    const detail = document.createElement("span");
+    detail.textContent = planFeatureLabels(plan).join(" · ");
+    card.append(title, detail);
+    el.billingPlanList.appendChild(card);
   }
   if (!plans.length) el.billingPlanList.textContent = "No subscription plans are published yet.";
-  el.buyCreditsButton.disabled = !ready;
   el.startSubscriptionButton.disabled = !subscriptionReady;
   el.billingHistory.innerHTML = "";
   for (const session of data.checkoutSessions || []) {
@@ -2315,6 +2608,21 @@ for (const tab of el.adminTabs) {
   });
 }
 
+function selectAutomationSection(sectionName) {
+  for (const button of el.automationMenuButtons) {
+    const selected = button.dataset.automationTarget === sectionName;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+  }
+  for (const section of el.automationSections) {
+    section.classList.toggle("active", section.dataset.automationSection === sectionName);
+  }
+}
+
+for (const button of el.automationMenuButtons) {
+  button.addEventListener("click", () => selectAutomationSection(button.dataset.automationTarget));
+}
+
 function openBusinessTool(tabName) {
   const tab = Array.from(el.adminTabs).find((item) => item.dataset.tab === tabName);
   tab?.click();
@@ -2461,6 +2769,14 @@ el.reviewLinkList.addEventListener("click", (event) => {
   if (button.dataset.action === "save-review-link") runAdmin(() => saveReviewLink(row));
   if (button.dataset.action === "delete-review-link") runAdmin(() => deleteReviewLink(row));
 });
+el.addTransferTargetButton.addEventListener("click", () => runAdmin(addTransferTarget));
+el.transferTargetList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const row = button.closest(".data-row");
+  if (button.dataset.action === "save-transfer-target") runAdmin(() => saveTransferTarget(row));
+  if (button.dataset.action === "delete-transfer-target") runAdmin(() => deleteTransferTarget(row));
+});
 el.saveBusinessProfileButton.addEventListener("click", () => runAdmin(saveBusinessProfile));
 el.saveCalendarButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.refreshCalendarButton.addEventListener("click", () => runAdmin(loadCalendar));
@@ -2538,7 +2854,23 @@ el.crmList.addEventListener("click", (event) => {
   if (complaintButton) runAdmin(() => escalateComplaint(complaintButton.closest(".crm-card")));
 });
 el.refreshMessagesButton.addEventListener("click", () => runAdmin(loadMessages));
-el.sendTestMessageButton.addEventListener("click", () => runAdmin(sendTestMessage));
+el.messageList.addEventListener("click", (event) => {
+  const threadButton = event.target.closest(".message-thread");
+  if (!threadButton) return;
+  state.selectedMessageThreadKey = threadButton.dataset.threadKey;
+  renderMessages(state.messageData.messages, state.messageData.inboundMessages);
+});
+el.messageList.addEventListener("submit", (event) => {
+  const form = event.target.closest(".message-composer");
+  if (!form) return;
+  event.preventDefault();
+  const inputNode = form.querySelector("input");
+  runAdmin(async () => {
+    await sendManualMessage({ toPhone: form.dataset.contact, message: inputNode.value.trim() });
+    inputNode.value = "";
+  });
+});
+el.sendTestMessageButton.addEventListener("click", () => runAdmin(sendManualMessageFromBar));
 el.refreshUsageButton.addEventListener("click", () => runAdmin(loadUsage));
 el.buyCreditsButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("credits")));
 el.startSubscriptionButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("subscription")));

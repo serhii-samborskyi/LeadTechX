@@ -314,6 +314,11 @@ function planInputData(body, existing = null) {
   const name = String(body.name ?? existing?.name ?? "").trim();
   if (!name) throw new Error("Plan name is required");
   const monthlyCredits = Math.max(0, Math.round(Number(body.monthlyCredits ?? existing?.monthlyCredits ?? 0)));
+  const entitlementNumber = (key, fallback, min = 0) => {
+    const parsed = Number(body[key] ?? existing?.[key] ?? fallback);
+    return Math.max(min, Math.round(Number.isFinite(parsed) ? parsed : fallback));
+  };
+  const entitlementFlag = (key, fallback) => (typeof body[key] === "boolean" ? body[key] : existing?.[key] ?? fallback);
   const monthlyPriceCents =
     body.monthlyPriceCents !== undefined
       ? planPriceCentsFromInput(body.monthlyPriceCents, existing?.monthlyPriceCents ?? 0)
@@ -324,6 +329,18 @@ function planInputData(body, existing = null) {
     description: String(body.description ?? existing?.description ?? "").trim() || null,
     monthlyPriceCents,
     monthlyCredits,
+    maxPhoneNumbers: entitlementNumber("maxPhoneNumbers", 1, 1),
+    maxTransferTargets: entitlementNumber("maxTransferTargets", 1, 0),
+    maxUsers: entitlementNumber("maxUsers", 1, 1),
+    outboundQualificationEnabled: entitlementFlag("outboundQualificationEnabled", false),
+    smartReviewsEnabled: entitlementFlag("smartReviewsEnabled", false),
+    callTransfersEnabled: entitlementFlag("callTransfersEnabled", false),
+    leadWebhookEnabled: entitlementFlag("leadWebhookEnabled", true),
+    messageInboxEnabled: entitlementFlag("messageInboxEnabled", true),
+    appointmentRemindersEnabled: entitlementFlag("appointmentRemindersEnabled", false),
+    prioritySupport: entitlementFlag("prioritySupport", false),
+    allowCreditTopups: entitlementFlag("allowCreditTopups", true),
+    supportLevel: String(body.supportLevel ?? existing?.supportLevel ?? "standard").trim() || "standard",
     stripePriceId: String(body.stripePriceId ?? existing?.stripePriceId ?? "").trim() || null,
     active: typeof body.active === "boolean" ? body.active : existing?.active ?? true,
     sortOrder: Math.round(Number(body.sortOrder ?? existing?.sortOrder ?? 0)),
@@ -339,6 +356,18 @@ function publicSubscriptionPlan(plan) {
     description: plan.description || "",
     monthlyPriceCents: plan.monthlyPriceCents,
     monthlyCredits: plan.monthlyCredits,
+    maxPhoneNumbers: plan.maxPhoneNumbers,
+    maxTransferTargets: plan.maxTransferTargets,
+    maxUsers: plan.maxUsers,
+    outboundQualificationEnabled: Boolean(plan.outboundQualificationEnabled),
+    smartReviewsEnabled: Boolean(plan.smartReviewsEnabled),
+    callTransfersEnabled: Boolean(plan.callTransfersEnabled),
+    leadWebhookEnabled: Boolean(plan.leadWebhookEnabled),
+    messageInboxEnabled: Boolean(plan.messageInboxEnabled),
+    appointmentRemindersEnabled: Boolean(plan.appointmentRemindersEnabled),
+    prioritySupport: Boolean(plan.prioritySupport),
+    allowCreditTopups: Boolean(plan.allowCreditTopups),
+    supportLevel: plan.supportLevel || "standard",
     stripePriceConfigured: Boolean(plan.stripePriceId),
     active: plan.active,
     sortOrder: plan.sortOrder,
@@ -1345,6 +1374,253 @@ function summarizeSentDmApiResult(result) {
   };
 }
 
+function activeCreditBucketWhere(businessProfileId, now = new Date()) {
+  return {
+    businessProfileId,
+    OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+  };
+}
+
+function creditBucketSortValue(bucket) {
+  return bucket.expiresAt ? new Date(bucket.expiresAt).getTime() : Number.MAX_SAFE_INTEGER;
+}
+
+function sortSpendableCreditBuckets(left, right) {
+  const expiryDiff = creditBucketSortValue(left) - creditBucketSortValue(right);
+  if (expiryDiff) return expiryDiff;
+  return new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
+}
+
+async function availableCreditBalance(client, businessProfileId, now = new Date()) {
+  const result = await client.creditBucket.aggregate({
+    where: activeCreditBucketWhere(businessProfileId, now),
+    _sum: { remainingCredits: true },
+  });
+  return Math.round(Number(result._sum.remainingCredits || 0));
+}
+
+async function syncCreditBalance(client, businessProfileId, now = new Date()) {
+  const balance = await availableCreditBalance(client, businessProfileId, now);
+  await client.businessProfile.update({
+    where: { id: businessProfileId },
+    data: { creditBalance: balance },
+    select: { id: true },
+  });
+  return balance;
+}
+
+async function ensureLegacyCreditBucket(client, businessProfileId) {
+  const bucketCount = await client.creditBucket.count({ where: { businessProfileId } });
+  if (bucketCount) return null;
+  const profile = await client.businessProfile.findUnique({
+    where: { id: businessProfileId },
+    select: { creditBalance: true },
+  });
+  const currentBalance = Math.round(Number(profile?.creditBalance || 0));
+  if (!currentBalance) return null;
+  if (currentBalance < 0) {
+    const bucket = await client.creditBucket.create({
+      data: {
+        businessProfileId,
+        sourceType: "overage",
+        totalCredits: 0,
+        remainingCredits: currentBalance,
+        metadata: { source: "legacy_negative_balance_backfill" },
+      },
+    });
+    await client.creditTransaction.create({
+      data: {
+        businessProfileId,
+        creditBucketId: bucket.id,
+        type: "legacy_overage",
+        amount: currentBalance,
+        balanceAfter: currentBalance,
+        note: "Legacy negative credit balance",
+        metadata: { creditBucketId: bucket.id, source: "legacy_negative_balance_backfill" },
+      },
+    });
+    return bucket;
+  }
+  const amount = currentBalance;
+  const bucket = await client.creditBucket.create({
+    data: {
+      businessProfileId,
+      sourceType: "legacy_balance",
+      totalCredits: amount,
+      remainingCredits: amount,
+      metadata: { source: "legacy_credit_balance_backfill" },
+    },
+  });
+  await client.creditTransaction.create({
+    data: {
+      businessProfileId,
+      creditBucketId: bucket.id,
+      type: "legacy_balance",
+      amount,
+      balanceAfter: amount,
+      note: "Legacy credit balance",
+      metadata: { creditBucketId: bucket.id, source: "legacy_credit_balance_backfill" },
+    },
+  });
+  return bucket;
+}
+
+async function expireCreditBuckets(client, businessProfileId, now = new Date()) {
+  const expired = await client.creditBucket.findMany({
+    where: { businessProfileId, remainingCredits: { gt: 0 }, expiresAt: { lte: now } },
+    orderBy: { expiresAt: "asc" },
+  });
+  if (!expired.length) return [];
+  for (const bucket of expired) {
+    await client.creditBucket.update({
+      where: { id: bucket.id },
+      data: { remainingCredits: 0 },
+    });
+  }
+  const balanceAfter = await syncCreditBalance(client, businessProfileId, now);
+  for (const bucket of expired) {
+    await client.creditTransaction.create({
+      data: {
+        businessProfileId,
+        creditBucketId: bucket.id,
+        type: "expiration",
+        amount: -bucket.remainingCredits,
+        balanceAfter,
+        note: "Monthly credits expired",
+        metadata: {
+          creditBucketId: bucket.id,
+          sourceType: bucket.sourceType,
+          expiresAt: bucket.expiresAt?.toISOString?.() || bucket.expiresAt,
+        },
+      },
+    });
+  }
+  return expired;
+}
+
+async function prepareCreditBuckets(client, businessProfileId, now = new Date()) {
+  await ensureLegacyCreditBucket(client, businessProfileId);
+  await expireCreditBuckets(client, businessProfileId, now);
+  return syncCreditBalance(client, businessProfileId, now);
+}
+
+async function createCreditBucketGrant(
+  client,
+  {
+    businessProfileId,
+    amount,
+    type = "grant",
+    sourceType = "grant",
+    note = "Credit grant",
+    metadata = {},
+    periodStart = null,
+    expiresAt = null,
+    subscriptionPlanId = null,
+    stripeInvoiceId = null,
+    stripeCheckoutSessionId = null,
+  },
+) {
+  const creditAmount = Math.max(0, Math.round(Number(amount || 0)));
+  if (!businessProfileId || !creditAmount) return null;
+  if (stripeInvoiceId) {
+    const existing = await client.creditBucket.findUnique({ where: { stripeInvoiceId } });
+    if (existing) return existing;
+  }
+  if (stripeCheckoutSessionId) {
+    const existing = await client.creditBucket.findUnique({ where: { stripeCheckoutSessionId } });
+    if (existing) return existing;
+  }
+  const bucket = await client.creditBucket.create({
+    data: {
+      businessProfileId,
+      subscriptionPlanId,
+      sourceType,
+      totalCredits: creditAmount,
+      remainingCredits: creditAmount,
+      periodStart,
+      expiresAt,
+      stripeInvoiceId,
+      stripeCheckoutSessionId,
+      metadata,
+    },
+  });
+  const balanceAfter = await syncCreditBalance(client, businessProfileId);
+  return client.creditTransaction.create({
+    data: {
+      businessProfileId,
+      creditBucketId: bucket.id,
+      type,
+      amount: creditAmount,
+      balanceAfter,
+      note,
+      metadata: {
+        ...metadata,
+        creditBucketId: bucket.id,
+        sourceType,
+        periodStart: periodStart?.toISOString?.() || periodStart,
+        expiresAt: expiresAt?.toISOString?.() || expiresAt,
+      },
+    },
+  });
+}
+
+async function creditBucketBreakdown(businessProfileId, now = new Date()) {
+  return prisma.$transaction(async (tx) => {
+    const creditBalance = await prepareCreditBuckets(tx, businessProfileId, now);
+    const recentCutoff = new Date(now.getTime() - 45 * 86400000);
+    const buckets = await tx.creditBucket.findMany({
+      where: {
+        businessProfileId,
+        OR: [{ remainingCredits: { not: 0 } }, { createdAt: { gte: recentCutoff } }],
+      },
+      orderBy: [{ expiresAt: "asc" }, { createdAt: "desc" }],
+      take: 40,
+    });
+    const summary = {
+      monthlyIncluded: { remaining: 0, total: 0, expiresAt: null },
+      topUpCredits: 0,
+      trialCredits: 0,
+      legacyCredits: 0,
+      overageCredits: 0,
+    };
+    for (const bucket of buckets) {
+      const active = !bucket.expiresAt || new Date(bucket.expiresAt) > now;
+      if (!active) continue;
+      if (bucket.sourceType === "subscription_monthly") {
+        summary.monthlyIncluded.remaining += bucket.remainingCredits;
+        summary.monthlyIncluded.total += bucket.totalCredits;
+        if (
+          bucket.expiresAt &&
+          (!summary.monthlyIncluded.expiresAt || new Date(bucket.expiresAt) < new Date(summary.monthlyIncluded.expiresAt))
+        ) {
+          summary.monthlyIncluded.expiresAt = bucket.expiresAt;
+        }
+      } else if (bucket.sourceType === "topup") {
+        summary.topUpCredits += bucket.remainingCredits;
+      } else if (bucket.sourceType === "trial") {
+        summary.trialCredits += bucket.remainingCredits;
+      } else if (bucket.sourceType === "legacy_balance") {
+        summary.legacyCredits += bucket.remainingCredits;
+      } else if (bucket.sourceType === "overage") {
+        summary.overageCredits += bucket.remainingCredits;
+      }
+    }
+    return {
+      creditBalance,
+      summary,
+      buckets: buckets.map((bucket) => ({
+        id: bucket.id,
+        sourceType: bucket.sourceType,
+        totalCredits: bucket.totalCredits,
+        remainingCredits: bucket.remainingCredits,
+        periodStart: bucket.periodStart,
+        expiresAt: bucket.expiresAt,
+        createdAt: bucket.createdAt,
+      })),
+    };
+  });
+}
+
 async function recordUsageEvent({
   businessProfileId,
   leadId = null,
@@ -1361,6 +1637,8 @@ async function recordUsageEvent({
   if (!businessProfileId || !category) return null;
   const creditAmount = Math.max(0, Math.round(Number(credits || 0)));
   return prisma.$transaction(async (tx) => {
+    const now = new Date();
+    await prepareCreditBuckets(tx, businessProfileId, now);
     const usage = await tx.usageEvent.create({
       data: {
         businessProfileId,
@@ -1376,59 +1654,119 @@ async function recordUsageEvent({
       },
     });
     if (!creditAmount) return usage;
-    const profile = await tx.businessProfile.update({
-      where: { id: businessProfileId },
-      data: { creditBalance: { decrement: creditAmount } },
-      select: { creditBalance: true },
+    const buckets = await tx.creditBucket.findMany({
+      where: {
+        businessProfileId,
+        remainingCredits: { gt: 0 },
+        NOT: { sourceType: "overage" },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      },
     });
+    const allocations = [];
+    let remaining = creditAmount;
+    for (const bucket of buckets.sort(sortSpendableCreditBuckets)) {
+      if (remaining <= 0) break;
+      const spent = Math.min(bucket.remainingCredits, remaining);
+      if (!spent) continue;
+      await tx.creditBucket.update({
+        where: { id: bucket.id },
+        data: { remainingCredits: { decrement: spent } },
+      });
+      allocations.push({
+        creditBucketId: bucket.id,
+        sourceType: bucket.sourceType,
+        credits: spent,
+        expiresAt: bucket.expiresAt?.toISOString?.() || bucket.expiresAt,
+      });
+      remaining -= spent;
+    }
+    const uncoveredCredits = Math.max(0, remaining);
+    if (uncoveredCredits) {
+      const overage = await tx.creditBucket.findFirst({
+        where: { businessProfileId, sourceType: "overage", expiresAt: null },
+        orderBy: { createdAt: "desc" },
+      });
+      const updatedOverage = overage
+        ? await tx.creditBucket.update({
+            where: { id: overage.id },
+            data: { remainingCredits: { decrement: uncoveredCredits } },
+          })
+        : await tx.creditBucket.create({
+            data: {
+              businessProfileId,
+              sourceType: "overage",
+              totalCredits: 0,
+              remainingCredits: -uncoveredCredits,
+              metadata: { source: "usage_overage" },
+            },
+          });
+      allocations.push({
+        creditBucketId: updatedOverage.id,
+        sourceType: "overage",
+        credits: uncoveredCredits,
+      });
+    }
+    const balanceAfter = await syncCreditBalance(tx, businessProfileId, now);
     await tx.creditTransaction.create({
       data: {
         businessProfileId,
         usageEventId: usage.id,
         type: "usage",
         amount: -creditAmount,
-        balanceAfter: profile.creditBalance,
+        balanceAfter,
         note: note || category,
-        metadata,
+        metadata: { ...metadata, allocations, uncoveredCredits },
       },
     });
     return usage;
   });
 }
 
-async function recordCreditGrant({ businessProfileId, amount, balanceAfter = amount, note = "credit grant", metadata = {} }) {
+async function recordCreditGrant({ businessProfileId, amount, note = "credit grant", metadata = {}, sourceType = "grant", expiresAt = null }) {
   const creditAmount = Math.max(0, Math.round(Number(amount || 0)));
   if (!businessProfileId || !creditAmount) return null;
-  return prisma.creditTransaction.create({
-    data: {
+  return prisma.$transaction((tx) =>
+    createCreditBucketGrant(tx, {
       businessProfileId,
       type: "grant",
       amount: creditAmount,
-      balanceAfter: Math.round(Number(balanceAfter ?? creditAmount)),
       note,
+      sourceType,
+      expiresAt,
       metadata,
-    },
-  });
+    }),
+  );
 }
 
-async function grantBusinessCredits({ businessProfileId, amount, type = "grant", note = "Credit grant", metadata = {} }) {
+async function grantBusinessCredits({
+  businessProfileId,
+  amount,
+  type = "grant",
+  note = "Credit grant",
+  metadata = {},
+  sourceType = "grant",
+  periodStart = null,
+  expiresAt = null,
+  subscriptionPlanId = null,
+  stripeInvoiceId = null,
+  stripeCheckoutSessionId = null,
+}) {
   const creditAmount = Math.max(0, Math.round(Number(amount || 0)));
   if (!businessProfileId || !creditAmount) return null;
   return prisma.$transaction(async (tx) => {
-    const profile = await tx.businessProfile.update({
-      where: { id: businessProfileId },
-      data: { creditBalance: { increment: creditAmount } },
-      select: { creditBalance: true },
-    });
-    return tx.creditTransaction.create({
-      data: {
-        businessProfileId,
-        type,
-        amount: creditAmount,
-        balanceAfter: profile.creditBalance,
-        note,
-        metadata,
-      },
+    await prepareCreditBuckets(tx, businessProfileId);
+    return createCreditBucketGrant(tx, {
+      businessProfileId,
+      type,
+      amount: creditAmount,
+      note,
+      metadata,
+      sourceType,
+      periodStart,
+      expiresAt,
+      subscriptionPlanId,
+      stripeInvoiceId,
+      stripeCheckoutSessionId,
     });
   });
 }
@@ -2589,8 +2927,9 @@ async function provisionTrialBusiness({ businessName, website, settings }) {
     await recordCreditGrant({
       businessProfileId: profile.id,
       amount: settings.trialCredits,
-      balanceAfter: profile.creditBalance,
       note: "Trial credits granted",
+      sourceType: "trial",
+      expiresAt: profile.trialEndsAt,
       metadata: { source: "phone_onboarding", trialStartedAt: trialStartedAt.toISOString(), trialDays: settings.trialDays },
     }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
   }
@@ -3267,6 +3606,7 @@ const businessConfigInclude = {
   knowledgeEntries: { orderBy: { updatedAt: "desc" } },
   priceEntries: { orderBy: { updatedAt: "desc" } },
   availabilityRules: { orderBy: { dayOfWeek: "asc" } },
+  transferTargets: { orderBy: [{ sortOrder: "asc" }, { id: "asc" }] },
 };
 
 function fieldKey(value) {
@@ -3335,6 +3675,17 @@ function priceDisplay(entry) {
   return `${currency} ${entry.amountMin ?? "?"}`;
 }
 
+function activeTransferTargets(config) {
+  return (config.transferTargets || [])
+    .filter((target) => target.active !== false && target.phone)
+    .map((target) => ({
+      id: target.id,
+      label: target.label,
+      phone: target.phone,
+      description: target.description || "",
+    }));
+}
+
 function runtimeBusinessInstructions(config) {
   const intake = config.intakeFields.map((field) => ({
     key: field.fieldKey,
@@ -3354,6 +3705,7 @@ function runtimeBusinessInstructions(config) {
     price: priceDisplay(entry),
     category: entry.category,
   }));
+  const transferTargets = activeTransferTargets(config);
   return `
 Business-managed receptionist configuration:
 - Appointment mode: ${config.appointmentMode === "instant" ? "Book available slots immediately" : "Create pending appointment requests"}.
@@ -3362,6 +3714,7 @@ Business-managed receptionist configuration:
 - Information to collect before an appointment: ${JSON.stringify(intake)}
 - Knowledge base: ${JSON.stringify(knowledge)}
 - Prices: ${JSON.stringify(prices)}
+- Call transfer targets: ${transferTargets.length ? JSON.stringify(transferTargets) : "none"}
 - Extra instructions: ${config.extraInstructions || "none"}
 - Smart review/recovery: ${
     config.reviewRequestsEnabled
@@ -3376,6 +3729,7 @@ Phone-speed rules:
 - After get_available_slots returns, offer only the best matching slot or at most two options. Do not read a long list.
 - If the caller asks to book and has given a time, collect only missing required intake fields, then call schedule_appointment.
 - Do not repeat the same confirmation question after the caller already answered it.
+- If the caller asks for a person, department, manager, or topic you cannot answer from the configured knowledge, offer the best matching call transfer target. Only call transfer_call after the caller agrees to be transferred. After calling transfer_call, do not call end_call. If no transfer target fits, record a transfer_message instead.
 
 Use get_available_slots before offering or scheduling a time. Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status="confirmed". For status="requested", say it is pending confirmation. If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint. Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
@@ -3426,6 +3780,7 @@ function toolDeclarations(config) {
     durationMinutes: { type: "INTEGER" },
   };
   const appointmentRequired = ["start"];
+  const transferTargets = activeTransferTargets(config);
   for (const field of config.intakeFields) {
     appointmentProperties[field.fieldKey] = {
       type: "STRING",
@@ -3504,6 +3859,30 @@ function toolDeclarations(config) {
         required: ["message"],
       },
     },
+    ...(transferTargets.length
+      ? [
+          {
+            name: "transfer_call",
+            description: `Transfer a live phone caller to a configured human destination after the caller agrees. Available destinations: ${transferTargets
+              .map((target) => `${target.id}: ${target.label} (${target.description || "no description"})`)
+              .join("; ")}.`,
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                targetId: {
+                  type: "INTEGER",
+                  description: "The configured transfer target id from the destination list.",
+                },
+                reason: {
+                  type: "STRING",
+                  description: "Short reason the caller should be transferred.",
+                },
+              },
+              required: ["targetId"],
+            },
+          },
+        ]
+      : []),
     {
       name: "record_customer_feedback",
       description:
@@ -3836,6 +4215,88 @@ async function runToolCall(profile, config, functionCall, context = {}) {
     return { ok: true, messageId: message.id };
   }
 
+  if (functionCall.name === "transfer_call") {
+    let callControlId = context.callControlId || null;
+    if (!callControlId && context.voiceCallId) {
+      const voiceCall = await prisma.voiceCall.findUnique({
+        where: { id: context.voiceCallId },
+        select: { callControlId: true },
+      });
+      callControlId = voiceCall?.callControlId || null;
+    }
+    if (!callControlId) throw new Error("Call transfer is only available during a live phone call");
+    const targetId = Number(args.targetId);
+    const target = activeTransferTargets(config).find((entry) => entry.id === targetId);
+    if (!target) throw new Error("Transfer target is not active or does not exist");
+    const reason = String(args.reason || `Transfer to ${target.label}`).trim();
+    const transferMessage = await prisma.transferMessage.create({
+      data: {
+        businessName: profile.businessName,
+        website: profile.website,
+        name: contextLead?.name || null,
+        phone: context.fromNumber || contextLead?.phone || null,
+        email: contextLead?.email || null,
+        message: `Live call transfer requested to ${target.label}: ${reason}`,
+        urgency: "call_transfer",
+      },
+    });
+    if (contextLead?.id) {
+      await prisma.lead.update({
+        where: { id: contextLead.id },
+        data: {
+          status: "transferred",
+          notes: [contextLead.notes, `Live transfer requested to ${target.label}: ${reason}`].filter(Boolean).join("\n\n") || null,
+          extractedFields: {
+            ...(contextLead.extractedFields && typeof contextLead.extractedFields === "object" ? contextLead.extractedFields : {}),
+            latestTransfer: {
+              targetId: target.id,
+              label: target.label,
+              phone: target.phone,
+              reason,
+              transferMessageId: transferMessage.id,
+              requestedAt: new Date().toISOString(),
+            },
+          },
+        },
+      });
+    }
+    const commandId = crypto.randomUUID();
+    const clientState = Buffer.from(
+      JSON.stringify({
+        callMode: "business_transfer",
+        businessProfileId: profile.id,
+        transferTargetId: target.id,
+        voiceCallId: context.voiceCallId || null,
+      }),
+    ).toString("base64");
+    const response = await telnyxRequest(`/calls/${encodeURIComponent(callControlId)}/actions/transfer`, {
+      method: "POST",
+      body: JSON.stringify({
+        to: target.phone,
+        command_id: commandId,
+        client_state: clientState,
+        timeout_secs: 60,
+      }),
+    });
+    await logVoiceCallEvent(callControlId, "call.transfer_requested", {
+      targetId: target.id,
+      label: target.label,
+      phone: target.phone,
+      reason,
+      commandId,
+      transferMessageId: transferMessage.id,
+      response: response?.data || response || null,
+    });
+    return {
+      ok: true,
+      transferred: true,
+      detachAgent: true,
+      target: { id: target.id, label: target.label, phone: target.phone },
+      transferMessageId: transferMessage.id,
+      message: `Transfer requested to ${target.label}.`,
+    };
+  }
+
   if (functionCall.name === "record_customer_feedback") {
     const sentiment = normalizeSentiment(args.sentiment);
     const phone = args.phone ? String(args.phone) : context.fromNumber || contextLead?.phone || null;
@@ -4150,8 +4611,9 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
       await recordCreditGrant({
         businessProfileId: profile.id,
         amount: settings.trialCredits,
-        balanceAfter: profile.creditBalance,
         note: "Trial credits granted",
+        sourceType: "trial",
+        expiresAt: profile.trialEndsAt,
         metadata: { source: "browser_demo", trialStartedAt: trialStartedAt.toISOString(), trialDays: settings.trialDays },
       }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
     }
@@ -5907,6 +6369,70 @@ app.delete("/api/business-admin/prices/:id", async (req, res) => {
   }
 });
 
+function normalizeTransferPhone(value) {
+  const phone = normalizeE164Phone(value);
+  if (!/^\+[1-9]\d{7,14}$/.test(phone)) throw new Error("Transfer phone must be a valid +E.164 number, for example +15551234567");
+  return phone;
+}
+
+app.post("/api/business-admin/transfer-targets", async (req, res) => {
+  try {
+    const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const label = String(req.body.label || "").trim();
+    if (!label) throw new Error("Transfer label is required");
+    await prisma.businessTransferTarget.create({
+      data: {
+        businessConfigId: config.id,
+        label,
+        phone: normalizeTransferPhone(req.body.phone),
+        description: String(req.body.description || "").trim(),
+        active: req.body.active === undefined ? true : Boolean(req.body.active),
+        sortOrder: Number(req.body.sortOrder || 0),
+      },
+    });
+    res.status(201).json(await refreshedAdmin(profile));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.put("/api/business-admin/transfer-targets/:id", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    const existing = await prisma.businessTransferTarget.findFirst({
+      where: { id: Number(req.params.id), businessConfigId: config.id },
+    });
+    if (!existing) throw new Error("Transfer target was not found for this business");
+    const label = String(req.body.label ?? existing.label).trim();
+    if (!label) throw new Error("Transfer label is required");
+    await prisma.businessTransferTarget.update({
+      where: { id: existing.id },
+      data: {
+        label,
+        phone: req.body.phone === undefined ? existing.phone : normalizeTransferPhone(req.body.phone),
+        description: String(req.body.description ?? existing.description ?? "").trim(),
+        active: req.body.active === undefined ? existing.active : Boolean(req.body.active),
+        sortOrder: Number(req.body.sortOrder ?? existing.sortOrder),
+      },
+    });
+    res.json(await refreshedAdmin(profile));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete("/api/business-admin/transfer-targets/:id", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await prisma.businessTransferTarget.deleteMany({ where: { id: Number(req.params.id), businessConfigId: config.id } });
+    res.json(await refreshedAdmin(profile));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post("/api/business-admin/import/:type", upload.single("file"), async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
@@ -6245,6 +6771,16 @@ function stripeCheckoutSubscription(session) {
   return stripeId(session.subscription);
 }
 
+function stripeInvoiceCreditPeriod(invoice) {
+  const line = invoice.lines?.data?.[0] || {};
+  const periodStart = stripeTimestamp(line.period?.start) || stripeTimestamp(invoice.period_start) || new Date();
+  let periodEnd = stripeTimestamp(line.period?.end) || stripeTimestamp(invoice.period_end);
+  if (!periodEnd || periodEnd <= periodStart) {
+    periodEnd = DateTime.fromJSDate(periodStart).plus({ months: 1 }).toJSDate();
+  }
+  return { periodStart, periodEnd };
+}
+
 async function completeStripeCreditCheckout(session) {
   const metadata = session.metadata || {};
   const businessProfileId = Number(metadata.businessProfileId || 0);
@@ -6255,28 +6791,27 @@ async function completeStripeCreditCheckout(session) {
   return prisma.$transaction(async (tx) => {
     const current = await tx.stripeCheckoutSession.findUnique({ where: { stripeSessionId: session.id } });
     if (current?.status === "completed") return current;
-    const profile = await tx.businessProfile.update({
+    await tx.businessProfile.update({
       where: { id: profileId },
       data: {
         accountStatus: "paid",
         stripeCustomerId: stripeCheckoutCustomer(session) || undefined,
-        creditBalance: { increment: creditAmount },
       },
-      select: { creditBalance: true },
+      select: { id: true },
     });
-    await tx.creditTransaction.create({
-      data: {
-        businessProfileId: profileId,
-        type: "stripe_topup",
-        amount: creditAmount,
-        balanceAfter: profile.creditBalance,
-        note: "Stripe credit top-up",
-        metadata: {
-          stripeSessionId: session.id,
-          stripePaymentIntentId: stripeId(session.payment_intent),
-          amountTotal: session.amount_total ?? null,
-          currency: session.currency || null,
-        },
+    await prepareCreditBuckets(tx, profileId);
+    await createCreditBucketGrant(tx, {
+      businessProfileId: profileId,
+      amount: creditAmount,
+      type: "stripe_topup",
+      sourceType: "topup",
+      note: "Stripe credit top-up",
+      stripeCheckoutSessionId: session.id,
+      metadata: {
+        stripeSessionId: session.id,
+        stripePaymentIntentId: stripeId(session.payment_intent),
+        amountTotal: session.amount_total ?? null,
+        currency: session.currency || null,
       },
     });
     return tx.stripeCheckoutSession.upsert({
@@ -6402,19 +6937,25 @@ async function processStripeInvoicePaid(invoice) {
     select: { id: true },
   });
   if (existing) return profile;
+  const period = stripeInvoiceCreditPeriod(invoice);
   await grantBusinessCredits({
     businessProfileId: profile.id,
     amount: creditAmount,
     type: "stripe_subscription",
     note,
-      metadata: {
-        stripeInvoiceId: invoice.id,
-        stripeSubscriptionId: subscriptionId,
-        subscriptionPlanId: profile.subscriptionPlanId || null,
-        subscriptionPlanName: profile.subscriptionPlan?.name || null,
-        amountPaid: invoice.amount_paid ?? null,
-        currency: invoice.currency || null,
-      },
+    sourceType: "subscription_monthly",
+    periodStart: period.periodStart,
+    expiresAt: period.periodEnd,
+    subscriptionPlanId: profile.subscriptionPlanId || null,
+    stripeInvoiceId: invoice.id || null,
+    metadata: {
+      stripeInvoiceId: invoice.id,
+      stripeSubscriptionId: subscriptionId,
+      subscriptionPlanId: profile.subscriptionPlanId || null,
+      subscriptionPlanName: profile.subscriptionPlan?.name || null,
+      amountPaid: invoice.amount_paid ?? null,
+      currency: invoice.currency || null,
+    },
   });
   return prisma.businessProfile.update({
     where: { id: profile.id },
@@ -6423,6 +6964,7 @@ async function processStripeInvoicePaid(invoice) {
       stripeCustomerId: customerId || undefined,
       stripeSubscriptionId: subscriptionId || undefined,
       stripeSubscriptionStatus: "active",
+      subscriptionCurrentPeriodEnd: period.periodEnd,
     },
   });
 }
@@ -7787,6 +8329,36 @@ app.post("/api/business-admin/messages/test", async (req, res) => {
   }
 });
 
+app.post("/api/business-admin/messages/manual", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    const settings = await getSettings();
+    const toPhone = normalizeE164Phone(req.body.toPhone);
+    const message = String(req.body.message || "").trim();
+    if (!message) throw new Error("Message text is required");
+    const lead = toPhone
+      ? await prisma.lead.findFirst({
+          where: { AND: [leadWhereForProfile(profile), { phone: toPhone }] },
+          orderBy: { updatedAt: "desc" },
+        })
+      : null;
+    const result = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone,
+      message,
+      purpose: "manual_message",
+      providerOverride: req.body.provider,
+      leadId: lead?.id || null,
+      metadata: { source: "business_admin_manual" },
+    });
+    res.status(201).json({ ok: true, provider: result.provider, delivery: result.delivery });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post("/api/business-admin/crm/:id/missed-call-followup", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
@@ -7866,6 +8438,7 @@ app.get("/api/business-admin/usage", async (req, res) => {
   try {
     const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
     const settings = await getSettings();
+    const creditBuckets = await creditBucketBreakdown(profile.id);
     const [events, transactions, current, categoryTotals] = await Promise.all([
       prisma.usageEvent.findMany({
         where: { businessProfileId: profile.id },
@@ -7886,9 +8459,10 @@ app.get("/api/business-admin/usage", async (req, res) => {
         _sum: { credits: true, quantity: true },
       }).catch(() => []),
     ]);
-    const creditBalance = current?.creditBalance ?? profile.creditBalance;
+    const creditBalance = creditBuckets.creditBalance ?? current?.creditBalance ?? profile.creditBalance;
     res.json({
       creditBalance,
+      creditBuckets,
       lowBalanceTokens: settings.lowBalanceTokens,
       lowBalance: creditBalance <= settings.lowBalanceTokens,
       rates: {
@@ -7918,6 +8492,7 @@ app.get("/api/business-admin/usage", async (req, res) => {
 app.get("/api/business-admin/billing", async (req, res) => {
   try {
     const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const creditBuckets = await creditBucketBreakdown(profile.id);
     const [settings, secretKey, webhookSecret, current, sessions, plans] = await Promise.all([
       getSettings(),
       systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
@@ -7944,7 +8519,8 @@ app.get("/api/business-admin/billing", async (req, res) => {
     ]);
     res.json({
       accountStatus: current?.accountStatus || profile.accountStatus,
-      creditBalance: current?.creditBalance ?? profile.creditBalance,
+      creditBalance: creditBuckets.creditBalance ?? current?.creditBalance ?? profile.creditBalance,
+      creditBuckets,
       currentPlan: publicSubscriptionPlan(current?.subscriptionPlan),
       availablePlans: plans.map(publicSubscriptionPlan),
       stripe: {
@@ -7980,7 +8556,7 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
     const cancelUrl = businessPortalReturnUrl(baseUrl, profile, "cancelled");
     const existing = await prisma.businessProfile.findUnique({
       where: { id: profile.id },
-      select: { stripeCustomerId: true },
+      select: { stripeCustomerId: true, subscriptionPlan: true },
     });
     const selectedPlanId = Number(req.body.subscriptionPlanId || req.body.planId || 0);
     const selectedPlan =
@@ -8011,6 +8587,9 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
 
     let creditAmount = 0;
     if (checkoutType === "credits") {
+      if (existing?.subscriptionPlan && !existing.subscriptionPlan.allowCreditTopups) {
+        throw new Error("Credit top-ups are not enabled for the current plan");
+      }
       creditAmount = Math.max(1, Math.round(Number(req.body.credits || settings.stripeCreditPackCredits || 1000)));
       const unitAmount = Math.max(50, Math.round(creditAmount * Number(settings.tokenUsd || 0.01) * 100));
       metadata.creditAmount = String(creditAmount);
@@ -8046,7 +8625,7 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
               recurring: { interval: "month" },
               product_data: {
                 name: selectedPlan.name,
-                description: selectedPlan.description || `${selectedPlan.monthlyCredits} AI receptionist tokens per month`,
+                description: selectedPlan.description || `${selectedPlan.monthlyCredits} AI receptionist credits per month`,
               },
             },
             quantity: 1,
@@ -8424,6 +9003,8 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   let suppressedInputChunks = 0;
   const loggedSuppressedInputReasons = new Set();
   let closing = false;
+  let bridgeDetachedForTransfer = false;
+  let transferDetachDetail = null;
   let mediaStartTimer = null;
   let onboardingTranscript = onboardingSession?.transcript || "";
   let onboardingRealtimeTranscript = onboardingTranscript;
@@ -8709,6 +9290,13 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
 
   const hangup = async (reason = "normal_clearing") => {
     if (closing) return;
+    if (bridgeDetachedForTransfer) {
+      await logVoiceCallEvent(callControlId, "hangup.suppressed_after_transfer", {
+        reason,
+        transfer: transferDetachDetail,
+      });
+      return;
+    }
     closing = true;
     await logVoiceCallEvent(callControlId, "hangup.requested", { reason });
     try {
@@ -8718,6 +9306,23 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       });
     } catch (error) {
       console.warn(`[telnyx] hangup failed (${reason}): ${error.message}`);
+    }
+  };
+
+  const detachBridgeAfterTransfer = async (result) => {
+    if (bridgeDetachedForTransfer) return;
+    bridgeDetachedForTransfer = true;
+    transferDetachDetail = {
+      target: result?.target || null,
+      transferMessageId: result?.transferMessageId || null,
+      detachedAt: new Date().toISOString(),
+    };
+    closing = true;
+    clearTelnyxPlayback("call_transfer_detach", 0);
+    geminiReady = false;
+    await logVoiceCallEvent(callControlId, "call.transfer_bridge_detached", transferDetachDetail);
+    if (geminiWs?.readyState === WebSocket.OPEN) {
+      geminiWs.close(1000, "Transfer requested; AI bridge detached");
     }
   };
 
@@ -9607,10 +10212,12 @@ Live session identity and language:
         let shouldEndCall = false;
         let endReason = "Call completed";
         let personaPrompt = null;
+        let detachAfterTransfer = null;
         for (const functionCall of message.toolCall.functionCalls || []) {
           try {
             const toolContext = {
               channel: "phone",
+              callControlId,
               voiceCallId: call.id,
               fromNumber: call.fromNumber,
               toNumber: call.toNumber,
@@ -9624,12 +10231,18 @@ Live session identity and language:
                 : isQualification
                   ? runQualificationToolCall(profile, config, functionCall, toolContext)
                   : runToolCall(profile, config, functionCall, {
+                      callControlId,
                       voiceCallId: call.id,
                       fromNumber: call.fromNumber,
                       toNumber: call.toNumber,
                     }),
             );
-            shouldEndCall ||= Boolean(result.shouldEndCall);
+            if (result.detachAgent) {
+              detachAfterTransfer = result;
+              shouldEndCall = false;
+            } else {
+              shouldEndCall ||= Boolean(result.shouldEndCall);
+            }
             endReason = result.reason || endReason;
             personaPrompt ||= result.personaPrompt || null;
             functionResponses.push({ id: functionCall.id, name: functionCall.name, response: { result } });
@@ -9641,6 +10254,7 @@ Live session identity and language:
             });
           }
         }
+        if (detachAfterTransfer) shouldEndCall = false;
         if (geminiWs.readyState === WebSocket.OPEN) {
           geminiWs.send(JSON.stringify({ toolResponse: { functionResponses } }));
           if (personaPrompt) {
@@ -9651,6 +10265,7 @@ Live session identity and language:
             );
           }
         }
+        if (detachAfterTransfer) await detachBridgeAfterTransfer(detachAfterTransfer);
         if (shouldEndCall) setTimeout(() => hangup(endReason), 1200);
       }
     });
@@ -9658,11 +10273,11 @@ Live session identity and language:
     geminiWs.on("error", async (error) => {
       console.error("[telnyx] live voice provider error", error.message);
       await logVoiceCallEvent(callControlId, "error", { stage: "gemini", message: error.message });
-      hangup("gemini_error");
+      if (!bridgeDetachedForTransfer) hangup("gemini_error");
     });
     geminiWs.on("close", async (code, reason) => {
       await logVoiceCallEvent(callControlId, "gemini.closed", { code, reason: reason.toString() });
-      if (!closing && telnyxWs.readyState === WebSocket.OPEN) hangup("gemini_closed");
+      if (!closing && !bridgeDetachedForTransfer && telnyxWs.readyState === WebSocket.OPEN) hangup("gemini_closed");
     });
   };
 

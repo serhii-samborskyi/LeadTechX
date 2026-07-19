@@ -51,6 +51,7 @@ model BusinessProfile {
   messageDeliveries   MessageDelivery[]
   usageEvents         UsageEvent[]
   creditTransactions  CreditTransaction[]
+  creditBuckets       CreditBucket[]
   stripeCheckoutSessions StripeCheckoutSession[]
   inboundMessages    MessageInbound[]
   reviewLinks        BusinessReviewLink[]
@@ -63,11 +64,24 @@ model SubscriptionPlan {
   description       String?
   monthlyPriceCents Int              @default(0)
   monthlyCredits    Int              @default(0)
+  maxPhoneNumbers    Int              @default(1)
+  maxTransferTargets Int              @default(1)
+  maxUsers           Int              @default(1)
+  outboundQualificationEnabled Boolean @default(false)
+  smartReviewsEnabled Boolean        @default(false)
+  callTransfersEnabled Boolean       @default(false)
+  leadWebhookEnabled Boolean         @default(true)
+  messageInboxEnabled Boolean        @default(true)
+  appointmentRemindersEnabled Boolean @default(false)
+  prioritySupport    Boolean          @default(false)
+  allowCreditTopups  Boolean          @default(true)
+  supportLevel       String           @default("standard")
   stripePriceId     String?
   active            Boolean          @default(true)
   sortOrder         Int              @default(0)
   businessProfiles  BusinessProfile[]
   checkoutSessions  StripeCheckoutSession[]
+  creditBuckets     CreditBucket[]
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 
@@ -109,8 +123,24 @@ model BusinessConfig {
   knowledgeEntries    KnowledgeEntry[]
   priceEntries        PriceEntry[]
   availabilityRules   AvailabilityRule[]
+  transferTargets     BusinessTransferTarget[]
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
+}
+
+model BusinessTransferTarget {
+  id               Int            @id @default(autoincrement())
+  businessConfigId Int
+  businessConfig   BusinessConfig @relation(fields: [businessConfigId], references: [id], onDelete: Cascade)
+  label            String
+  phone            String
+  description      String         @default("")
+  active           Boolean        @default(true)
+  sortOrder        Int            @default(0)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([businessConfigId, active, sortOrder])
 }
 
 model BusinessReviewLink {
@@ -617,6 +647,8 @@ model CreditTransaction {
   businessProfile   BusinessProfile  @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
   usageEventId      Int?             @unique
   usageEvent        UsageEvent?      @relation(fields: [usageEventId], references: [id], onDelete: SetNull)
+  creditBucketId    Int?
+  creditBucket      CreditBucket?    @relation(fields: [creditBucketId], references: [id], onDelete: SetNull)
   type              String
   amount            Int
   balanceAfter      Int
@@ -626,6 +658,30 @@ model CreditTransaction {
 
   @@index([businessProfileId, createdAt])
   @@index([type, createdAt])
+  @@index([creditBucketId, createdAt])
+}
+
+model CreditBucket {
+  id                      Int                 @id @default(autoincrement())
+  businessProfileId       Int
+  businessProfile         BusinessProfile     @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  subscriptionPlanId      Int?
+  subscriptionPlan        SubscriptionPlan?   @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
+  sourceType              String
+  totalCredits            Int
+  remainingCredits        Int
+  periodStart             DateTime?
+  expiresAt               DateTime?
+  stripeInvoiceId         String?             @unique
+  stripeCheckoutSessionId String?             @unique
+  metadata                Json?
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  creditTransactions      CreditTransaction[]
+
+  @@index([businessProfileId, sourceType, expiresAt])
+  @@index([businessProfileId, remainingCredits])
+  @@index([subscriptionPlanId, createdAt])
 }
 
 model StripeCheckoutSession {

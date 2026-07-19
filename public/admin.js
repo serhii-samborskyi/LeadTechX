@@ -42,9 +42,21 @@ const el = {
   planSlug: document.querySelector("#planSlug"),
   planMonthlyPrice: document.querySelector("#planMonthlyPrice"),
   planMonthlyCredits: document.querySelector("#planMonthlyCredits"),
+  planMaxPhoneNumbers: document.querySelector("#planMaxPhoneNumbers"),
+  planMaxTransferTargets: document.querySelector("#planMaxTransferTargets"),
+  planMaxUsers: document.querySelector("#planMaxUsers"),
+  planSupportLevel: document.querySelector("#planSupportLevel"),
   planStripePriceId: document.querySelector("#planStripePriceId"),
   planSortOrder: document.querySelector("#planSortOrder"),
   planDescription: document.querySelector("#planDescription"),
+  planOutboundQualificationEnabled: document.querySelector("#planOutboundQualificationEnabled"),
+  planSmartReviewsEnabled: document.querySelector("#planSmartReviewsEnabled"),
+  planCallTransfersEnabled: document.querySelector("#planCallTransfersEnabled"),
+  planLeadWebhookEnabled: document.querySelector("#planLeadWebhookEnabled"),
+  planMessageInboxEnabled: document.querySelector("#planMessageInboxEnabled"),
+  planAppointmentRemindersEnabled: document.querySelector("#planAppointmentRemindersEnabled"),
+  planPrioritySupport: document.querySelector("#planPrioritySupport"),
+  planAllowCreditTopups: document.querySelector("#planAllowCreditTopups"),
   planActive: document.querySelector("#planActive"),
   resetPlanButton: document.querySelector("#resetPlanButton"),
   planMessage: document.querySelector("#planMessage"),
@@ -346,9 +358,21 @@ function resetPlanForm() {
   el.planSlug.value = "";
   el.planMonthlyPrice.value = "";
   el.planMonthlyCredits.value = "";
+  el.planMaxPhoneNumbers.value = "1";
+  el.planMaxTransferTargets.value = "1";
+  el.planMaxUsers.value = "1";
+  el.planSupportLevel.value = "standard";
   el.planStripePriceId.value = "";
   el.planSortOrder.value = "0";
   el.planDescription.value = "";
+  el.planOutboundQualificationEnabled.checked = false;
+  el.planSmartReviewsEnabled.checked = false;
+  el.planCallTransfersEnabled.checked = false;
+  el.planLeadWebhookEnabled.checked = true;
+  el.planMessageInboxEnabled.checked = true;
+  el.planAppointmentRemindersEnabled.checked = false;
+  el.planPrioritySupport.checked = false;
+  el.planAllowCreditTopups.checked = true;
   el.planActive.checked = true;
   el.planMessage.textContent = "";
 }
@@ -359,9 +383,21 @@ function fillPlanForm(plan) {
   el.planSlug.value = plan.slug || "";
   el.planMonthlyPrice.value = ((Number(plan.monthlyPriceCents || 0) / 100).toFixed(2));
   el.planMonthlyCredits.value = plan.monthlyCredits || 0;
+  el.planMaxPhoneNumbers.value = plan.maxPhoneNumbers || 1;
+  el.planMaxTransferTargets.value = plan.maxTransferTargets ?? 1;
+  el.planMaxUsers.value = plan.maxUsers || 1;
+  el.planSupportLevel.value = plan.supportLevel || "standard";
   el.planStripePriceId.value = plan.stripePriceId || "";
   el.planSortOrder.value = plan.sortOrder || 0;
   el.planDescription.value = plan.description || "";
+  el.planOutboundQualificationEnabled.checked = Boolean(plan.outboundQualificationEnabled);
+  el.planSmartReviewsEnabled.checked = Boolean(plan.smartReviewsEnabled);
+  el.planCallTransfersEnabled.checked = Boolean(plan.callTransfersEnabled);
+  el.planLeadWebhookEnabled.checked = plan.leadWebhookEnabled !== false;
+  el.planMessageInboxEnabled.checked = plan.messageInboxEnabled !== false;
+  el.planAppointmentRemindersEnabled.checked = Boolean(plan.appointmentRemindersEnabled);
+  el.planPrioritySupport.checked = Boolean(plan.prioritySupport);
+  el.planAllowCreditTopups.checked = plan.allowCreditTopups !== false;
   el.planActive.checked = Boolean(plan.active);
   el.planMessage.textContent = `Editing ${plan.name}`;
 }
@@ -373,6 +409,18 @@ function planPayload() {
     description: el.planDescription.value,
     monthlyPriceDollars: el.planMonthlyPrice.value,
     monthlyCredits: Number(el.planMonthlyCredits.value || 0),
+    maxPhoneNumbers: Number(el.planMaxPhoneNumbers.value || 1),
+    maxTransferTargets: Number(el.planMaxTransferTargets.value || 0),
+    maxUsers: Number(el.planMaxUsers.value || 1),
+    supportLevel: el.planSupportLevel.value,
+    outboundQualificationEnabled: el.planOutboundQualificationEnabled.checked,
+    smartReviewsEnabled: el.planSmartReviewsEnabled.checked,
+    callTransfersEnabled: el.planCallTransfersEnabled.checked,
+    leadWebhookEnabled: el.planLeadWebhookEnabled.checked,
+    messageInboxEnabled: el.planMessageInboxEnabled.checked,
+    appointmentRemindersEnabled: el.planAppointmentRemindersEnabled.checked,
+    prioritySupport: el.planPrioritySupport.checked,
+    allowCreditTopups: el.planAllowCreditTopups.checked,
     stripePriceId: el.planStripePriceId.value,
     sortOrder: Number(el.planSortOrder.value || 0),
     active: el.planActive.checked,
@@ -388,6 +436,19 @@ function planMetric(label, value) {
   detail.textContent = value;
   item.append(title, detail);
   return item;
+}
+
+function planFeatureLabels(plan) {
+  return [
+    plan.outboundQualificationEnabled ? "Outbound agent" : null,
+    plan.smartReviewsEnabled ? "Smart reviews" : null,
+    plan.callTransfersEnabled ? "Call transfers" : null,
+    plan.leadWebhookEnabled !== false ? "Lead webhook" : null,
+    plan.messageInboxEnabled !== false ? "Message inbox" : null,
+    plan.appointmentRemindersEnabled ? "Reminders" : null,
+    plan.allowCreditTopups !== false ? "Top-ups" : "No top-ups",
+    plan.prioritySupport ? "Priority support" : null,
+  ].filter(Boolean);
 }
 
 function renderPlans(plans = []) {
@@ -419,12 +480,24 @@ function renderPlans(plans = []) {
     const metrics = document.createElement("div");
     metrics.className = "plan-metrics";
     metrics.append(
-      planMetric("Monthly tokens", `${plan.monthlyCredits || 0}`),
+      planMetric("Monthly credits", `${plan.monthlyCredits || 0}`),
       planMetric("Stripe price", plan.stripePriceId ? "Linked" : "Dynamic"),
+      planMetric("Phone numbers", `${plan.maxPhoneNumbers || 1}`),
+      planMetric("Transfers", `${plan.maxTransferTargets ?? 0}`),
+      planMetric("Users", `${plan.maxUsers || 1}`),
+      planMetric("Support", plan.supportLevel || "standard"),
       planMetric("Businesses", `${plan.businessCount ?? 0}`),
       planMetric("Sort order", `${plan.sortOrder ?? 0}`),
     );
-    body.append(heading, price, description, metrics);
+    const features = document.createElement("div");
+    features.className = "plan-feature-list";
+    for (const label of planFeatureLabels(plan)) {
+      const pill = document.createElement("span");
+      pill.className = "status-pill";
+      pill.textContent = label;
+      features.appendChild(pill);
+    }
+    body.append(heading, price, description, metrics, features);
     const actions = document.createElement("div");
     actions.className = "plan-actions";
     const edit = document.createElement("button");
@@ -706,7 +779,7 @@ async function loadAccounts() {
     const plan = document.createElement("div");
     plan.innerHTML = `<b>Plan</b><span></span>`;
     plan.querySelector("span").textContent = business.subscriptionPlan
-      ? `${business.subscriptionPlan.name} · ${planPriceDisplay(business.subscriptionPlan.monthlyPriceCents)}/mo · ${business.subscriptionPlan.monthlyCredits} tokens`
+      ? `${business.subscriptionPlan.name} · ${planPriceDisplay(business.subscriptionPlan.monthlyPriceCents)}/mo · ${business.subscriptionPlan.monthlyCredits} credits`
       : business.stripeSubscriptionStatus
         ? `Subscription · ${business.stripeSubscriptionStatus}`
         : "No subscription";
