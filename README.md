@@ -88,6 +88,7 @@ Set production environment variables in Coolify, not in the repository:
 ```bash
 NODE_ENV=production
 PORT=3000
+RUN_DB_DEPLOY_ON_START=1
 DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE"
 SHADOW_DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE_shadow"
 APP_ENCRYPTION_KEY="use-a-long-random-secret-and-keep-it-stable"
@@ -99,7 +100,7 @@ HTTPS=false
 
 Keep `HTTPS=false` inside Coolify unless you intentionally mount certificates into the container. Coolify should terminate public HTTPS at the proxy.
 
-Before the first production start, run the database deployment command from the app image or Coolify terminal:
+With `RUN_DB_DEPLOY_ON_START=1`, the Docker entrypoint runs the database deployment before starting the app. If you prefer to run schema changes manually, set `RUN_DB_DEPLOY_ON_START=0` and run the database deployment command from the app image or Coolify terminal before starting the app:
 
 ```bash
 npm run db:deploy
