@@ -3,13 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Your AI Receptionist</title>
+    <title>RingPort Fast Agent</title>
+    <link rel="icon" type="image/png" href="/assets/ringport-logo.png" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body class="fast-body">
     <main class="fast-shell">
       <header class="fast-header">
-        <div><p class="eyebrow"><i data-lucide="sparkles"></i> Fast agent</p><strong>AI Receptionist</strong></div>
+        <div class="fast-brand">
+          <img class="brand-logo fast-logo" src="/assets/ringport-logo.png" alt="RingPort" />
+        </div>
         <span class="fast-trial" id="trialBadge">Preparing trial</span>
       </header>
 
@@ -22,7 +25,7 @@
       <section class="fast-entry" id="entryScreen" hidden>
         <div class="fast-entry-icon"><i data-lucide="audio-lines"></i></div>
         <p class="eyebrow">Your business, live in minutes</p>
-        <h1>Test your AI receptionist</h1>
+        <h1>Test your RingPort agent</h1>
         <p>Enter the business details to prepare a live agent.</p>
         <form action="/fastagent/" method="get" class="fast-entry-form">
           <label>Business name<input name="business_name" autocomplete="organization" placeholder="Chicago Locksmiths" required /></label>
@@ -38,7 +41,7 @@
             <i data-lucide="audio-lines"></i>
           </div>
           <p class="fast-status" id="callStatus">Ready</p>
-          <h1 id="agentTitle">Virtual assistant</h1>
+          <h1 id="agentTitle">RingPort agent</h1>
           <p id="agentSummary"></p>
           <div class="fast-call-actions">
             <button id="talkButton" class="primary" type="button"><i data-lucide="phone-call"></i> Talk with agent</button>

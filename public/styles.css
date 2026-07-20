@@ -138,6 +138,22 @@ body {
   gap: 3px;
 }
 
+.fast-brand {
+  display: flex !important;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.fast-brand > :not(.fast-logo) {
+  display: none;
+}
+
+.fast-logo {
+  height: 42px;
+  max-width: 150px;
+}
+
 .fast-header .eyebrow {
   margin: 0;
 }
@@ -563,6 +579,7 @@ body {
 @media (max-width: 560px) {
   .fast-shell { width: 100%; }
   .fast-header { padding: 14px 16px; }
+  .fast-logo { height: 34px; max-width: 118px; }
   .fast-trial { max-width: 150px; text-align: right; }
   .fast-agent-stage { min-height: 410px; padding-inline: 18px; }
   .fast-entry { padding: 52px 20px 36px; }
@@ -599,6 +616,52 @@ body {
   border-radius: 8px;
   background: #fff;
   box-shadow: 0 18px 50px rgb(30 79 64 / 12%);
+}
+
+.brand-logo {
+  display: block;
+  width: auto;
+  object-fit: contain;
+}
+
+.auth-logo {
+  height: 54px;
+  max-width: 210px;
+  margin-bottom: 2px;
+}
+
+.brand-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 16px;
+}
+
+.brand-heading > div {
+  min-width: 0;
+}
+
+.topbar-logo {
+  height: 62px;
+  max-width: 210px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #fff;
+  filter: drop-shadow(0 8px 18px rgb(0 0 0 / 18%));
+}
+
+.admin-logo {
+  height: 56px;
+  max-width: 190px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.public-logo {
+  height: 46px;
+  max-width: 170px;
+  margin-bottom: 10px;
 }
 
 .auth-card h1,
@@ -3065,6 +3128,15 @@ a.appointment-field-value {
     display: grid;
     margin: 0;
     padding: 20px 16px 22px;
+  }
+
+  .brand-heading {
+    align-items: flex-start;
+  }
+
+  .topbar-logo {
+    height: 44px;
+    max-width: 150px;
   }
 
   .topbar h1 {

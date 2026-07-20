@@ -22,7 +22,7 @@ try {
     server.on("exit", (code) => reject(new Error(`Test server exited with ${code}`)));
     server.stdout.on("data", (chunk) => {
       process.stdout.write(chunk);
-      if (chunk.toString().includes("AI receptionist demo running")) {
+      if (chunk.toString().includes("RingPort running")) {
         clearTimeout(timeout);
         resolve();
       }

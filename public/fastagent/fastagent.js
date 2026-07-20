@@ -182,7 +182,7 @@ function renderAgent(data) {
   el.loadingScreen.hidden = true;
   el.errorScreen.hidden = true;
   el.agentScreen.hidden = false;
-  el.agentTitle.textContent = `Virtual assistant for ${data.profile.businessName}`;
+  el.agentTitle.textContent = `RingPort for ${data.profile.businessName}`;
   renderProfileFields(data.profile);
   el.credits.textContent = `${data.profile.creditBalance} credits`;
   const endsAt = new Date(data.profile.trialEndsAt);

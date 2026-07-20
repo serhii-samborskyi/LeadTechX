@@ -214,7 +214,7 @@ function setStatus(text, mode = "") {
 
 function setTitle() {
   const name = el.businessName.value.trim() || "Business Name";
-  el.title.textContent = `Virtual assistant for "${name}"`;
+  el.title.textContent = `RingPort for "${name}"`;
 }
 
 function appendTranscript(speaker, text) {

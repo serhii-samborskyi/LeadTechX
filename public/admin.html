@@ -3,12 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Receptionist Admin</title>
+    <title>RingPort Admin</title>
+    <link rel="icon" type="image/png" href="/assets/ringport-logo.png" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <section class="auth-screen" id="adminAuth">
       <form class="auth-card" id="adminLoginForm">
+        <img class="brand-logo auth-logo" src="/assets/ringport-logo.png" alt="RingPort" />
         <p class="eyebrow"><i data-lucide="shield-check"></i> System administration</p>
         <h1>Admin sign in</h1>
         <label>Email<input id="adminEmail" type="email" autocomplete="username" required /></label>
@@ -20,9 +22,12 @@
 
     <main class="admin-shell" id="adminApp" hidden>
       <header class="admin-topbar">
-        <div>
-          <p class="eyebrow">Platform control</p>
-          <h1>Receptionist admin</h1>
+        <div class="brand-heading">
+          <img class="brand-logo admin-logo" src="/assets/ringport-logo.png" alt="RingPort" />
+          <div>
+            <p class="eyebrow">Platform control</p>
+            <h1>RingPort admin</h1>
+          </div>
         </div>
         <button id="adminLogout" class="icon-button" type="button" title="Sign out"><i data-lucide="log-out"></i></button>
       </header>
@@ -128,7 +133,7 @@
                 <div class="provider-diagnostic bluebubbles-diagnostic">
                   <div class="form-grid messaging-card-grid">
                     <label>Test phone<input id="blueBubblesTestPhone" type="tel" placeholder="+12245550123" /></label>
-                    <label class="wide-field">Test message<textarea id="blueBubblesTestMessage" rows="2">Test message from Receptionist admin.</textarea></label>
+                    <label class="wide-field">Test message<textarea id="blueBubblesTestMessage" rows="2">Test message from RingPort admin.</textarea></label>
                   </div>
                   <div class="provider-diagnostic-actions">
                     <button id="sendBlueBubblesTest" type="button"><i data-lucide="send"></i> Send test message</button>
@@ -189,7 +194,7 @@
               <label>SMTP username<input id="smtpUsername" autocomplete="off" placeholder="Leave blank to keep current" /><small id="smtpUsernameState"></small></label>
               <label>SMTP password<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="smtpPasswordState"></small></label>
               <label>From email<input id="smtpFromEmail" type="email" placeholder="receptionist@example.com" /></label>
-              <label>From name<input id="smtpFromName" placeholder="AI Receptionist" /></label>
+              <label>From name<input id="smtpFromName" placeholder="RingPort" /></label>
               <label class="check-label"><input id="smtpSecure" type="checkbox" /> Use implicit TLS (usually port 465)</label>
             </div>
             <div class="provider-diagnostic email-diagnostic">

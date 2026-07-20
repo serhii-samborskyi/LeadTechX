@@ -1,6 +1,6 @@
-# AI Receptionist on Gemini Live
+# RingPort
 
-Simple Node.js demo for a real-time voice receptionist backed by Gemini Live, Prisma, and PostgreSQL.
+RingPort is a real-time phone and browser receptionist platform backed by a live voice provider, Prisma, and PostgreSQL.
 
 ## Run
 
@@ -33,11 +33,11 @@ The initial administrator is created from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Us
 
 ## What It Does
 
-- Researches the business with Gemini using Google Search and optional URL Context.
+- Researches the business using the configured AI research provider.
 - Caches the structured business profile and generated system prompt in PostgreSQL.
-- Starts a server-side WebSocket bridge to Gemini Live.
+- Starts a server-side WebSocket bridge to the configured live voice provider.
 - Streams browser microphone audio as 16 kHz PCM.
-- Plays Gemini Live audio responses as 24 kHz PCM.
+- Plays live voice audio responses as 24 kHz PCM.
 - Provides tool calls for appointment requests, lead capture, and transfer/escalation messages.
 - Stores demo appointments, leads, and transfer messages in PostgreSQL.
 - Provides separate administrator and business portals with database-backed sessions.
@@ -47,7 +47,7 @@ The initial administrator is created from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Us
 - Supports shared Telnyx demo-number pools with per-trial caller-number routing.
 - Lets owners edit all researched business information and regenerates the live system prompt when saved.
 
-## Fast Agent Onboarding
+## RingPort Fast Agent
 
 `/fastagent` accepts `business_name` and optional `website` query parameters. It automatically researches an unclaimed business, creates a trial, and opens the browser-call experience. Businesses with an active trial or account cannot be opened anonymously.
 
@@ -70,6 +70,52 @@ PORT=3000
 ```
 
 Provider keys can remain in `.env` or be saved through the admin panel. Database values are encrypted with `APP_ENCRYPTION_KEY`. Do not change that encryption key after saving credentials unless you replace the saved credentials too.
+
+## Docker and Coolify Deployment
+
+Use the `Dockerfile` build pack in Coolify. The image runs Node.js 22 on Debian slim, generates Prisma Client during the Docker build, exposes port `3000`, and includes a `/healthz` health check.
+
+Recommended Coolify settings:
+
+```text
+Build pack: Dockerfile
+Port: 3000
+Health check path: /healthz
+```
+
+Set production environment variables in Coolify, not in the repository:
+
+```bash
+NODE_ENV=production
+PORT=3000
+DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE"
+SHADOW_DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE_shadow"
+APP_ENCRYPTION_KEY="use-a-long-random-secret-and-keep-it-stable"
+ADMIN_EMAIL="admin@example.com"
+ADMIN_PASSWORD="use-a-long-unique-password"
+PUBLIC_BASE_URL="https://YOUR-PUBLIC-DOMAIN"
+HTTPS=false
+```
+
+Keep `HTTPS=false` inside Coolify unless you intentionally mount certificates into the container. Coolify should terminate public HTTPS at the proxy.
+
+Before the first production start, run the database deployment command from the app image or Coolify terminal:
+
+```bash
+npm run db:deploy
+```
+
+That command removes legacy plan-manager columns that were replaced by subscription plans, applies the Prisma schema with `prisma db push --skip-generate`, then runs the current idempotent SQL patches for credit buckets and RingPort branding. Back up the production database before running schema changes on an existing production database.
+
+After deployment, configure external webhooks with the production domain:
+
+```text
+Telnyx: https://YOUR-PUBLIC-DOMAIN/webhooks/telnyx
+Stripe: https://YOUR-PUBLIC-DOMAIN/webhooks/stripe
+BlueBubbles replies: https://YOUR-PUBLIC-DOMAIN/webhooks/bluebubbles?password=YOUR-BLUEBUBBLES-PASSWORD
+```
+
+The same URLs are also shown with copy buttons inside the admin System settings when `PUBLIC_BASE_URL` or the saved public base URL is configured.
 
 ## Scripts
 
@@ -121,7 +167,7 @@ Validates the encrypted Telnyx credentials, Ed25519 public key, Voice API applic
 npm run test:onboarding-media
 ```
 
-Exercises an onboarding-number call through the Telnyx media bridge and verifies that Gemini receives caller audio and returns agent audio.
+Exercises an onboarding-number call through the Telnyx media bridge and verifies that the live voice provider receives caller audio and returns agent audio.
 
 ## Telnyx Inbound Calling
 
@@ -131,7 +177,7 @@ Configure the Telnyx Voice API Application with webhook API version V2 and this 
 https://YOUR-PUBLIC-DOMAIN/webhooks/telnyx
 ```
 
-The server answers inbound calls with a token-protected bidirectional media stream at `/telnyx-media`, forwards caller audio to Gemini Live, and sends Gemini agent audio back to the caller through Telnyx media frames.
+The server answers inbound calls with a token-protected bidirectional media stream at `/telnyx-media`, forwards caller audio to the live voice provider, and sends agent audio back to the caller through Telnyx media frames.
 
 ### Current Call Flow and Codecs
 
@@ -140,11 +186,11 @@ The phone bridge currently runs in Telnyx bidirectional media-stream mode:
 1. Telnyx sends `call.initiated` to `/webhooks/telnyx`.
 2. The app looks up the dialed number, resolves the business/onboarding/qualification call context, answers the call, and starts a token-protected WebSocket stream at `/telnyx-media`.
 3. Telnyx connects the media socket with inbound RTP media only from the caller leg and accepts outbound RTP media back to the same call leg.
-4. The bridge opens Gemini Live with the admin-configured live model. `TELNYX_LIVE_MODEL` is ignored unless `TELNYX_LIVE_MODEL_FORCE=true` is also set.
-5. Gemini receives caller audio as 16 kHz PCM16 little-endian audio.
-6. Gemini returns agent audio as 24 kHz PCM16 little-endian audio.
-7. The bridge converts Gemini audio from 24 kHz PCM to the configured Telnyx outbound codec, splits it into 20 ms frames, and paces those frames back to Telnyx.
-8. When Gemini reports `serverContent.interrupted`, the bridge clears the queued outbound audio and sends Telnyx a `clear` event so caller barge-in can stop agent playback.
+4. The bridge opens the live voice provider with the admin-configured live model. `TELNYX_LIVE_MODEL` is ignored unless `TELNYX_LIVE_MODEL_FORCE=true` is also set.
+5. The live voice provider receives caller audio as 16 kHz PCM16 little-endian audio.
+6. The live voice provider returns agent audio as 24 kHz PCM16 little-endian audio.
+7. The bridge converts agent audio from 24 kHz PCM to the configured Telnyx outbound codec, splits it into 20 ms frames, and paces those frames back to Telnyx.
+8. When the live voice provider reports `serverContent.interrupted`, the bridge clears the queued outbound audio and sends Telnyx a `clear` event so caller barge-in can stop agent playback.
 
 Current phone codec settings:
 
@@ -152,13 +198,13 @@ Current phone codec settings:
 - Telnyx outbound stream: `PCMU`, 8 kHz, mono by default. Set `TELNYX_OUTBOUND_CODEC=L16` and `TELNYX_OUTBOUND_SAMPLE_RATE=16000` to test the previous linear PCM path.
 - Telnyx L16 byte order: little-endian by default when L16 is enabled. Set `TELNYX_L16_ENDIAN=BE` only as a rollback/test override.
 - Outbound frame size: 20 ms, which is 160 bytes for `PCMU` at 8 kHz or 640 bytes for `L16` at 16 kHz.
-- Gemini input from the bridge: PCM16 little-endian at 16 kHz.
-- Gemini output to the bridge: PCM16 little-endian at 24 kHz.
+- Live voice input from the bridge: PCM16 little-endian at 16 kHz.
+- Live voice output to the bridge: PCM16 little-endian at 24 kHz.
 - Phone model default: the admin-configured live model, matching the browser call path. Use `TELNYX_LIVE_MODEL_FORCE=true` plus `TELNYX_LIVE_MODEL=...` only for explicit test overrides.
 - Normal phone playback does not drop queued audio frames by default, because that cuts words. Barge-in still clears stale queued playback when the caller interrupts. Set `TELNYX_DROP_QUEUED_AUDIO=1` only for latency experiments.
 - Bridge audio diagnostics are disabled by default. Set `BRIDGE_AUDIO_CAPTURE=1` for a debug run, and optionally set `BRIDGE_AUDIO_CAPTURE_MS=60000` to capture a longer window. Files are written under `logs/audio-dumps/` and are ignored by git.
 
-The browser call path is separate from Telnyx: the browser streams microphone audio to the app as 16 kHz PCM, Gemini returns 24 kHz PCM, and the browser plays it directly through Web Audio. Browser clients also clear queued playback when Gemini reports an interruption.
+The browser call path is separate from Telnyx: the browser streams microphone audio to the app as 16 kHz PCM, the live voice provider returns 24 kHz PCM, and the browser plays it directly through Web Audio. Browser clients also clear queued playback when an interruption is reported.
 
 In `/admin.html`:
 
@@ -177,7 +223,7 @@ Phone onboarding is administered under Admin > Onboarding:
 3. Configure BlueBubbles or Sent.dm as the primary setup-link provider and optionally select the other as failover.
 4. Under Admin > Phone numbers, change a number type to `Onboarding`, enter its campaign label, and select Save.
 
-The onboarding agent looks up or collects business details, creates the trial agent, can switch its Gemini persona so the caller can test the new receptionist during the same call, and sends a unique password-setup link.
+The onboarding agent looks up or collects business details, texts the captured company name and website to the caller for confirmation, creates the trial agent only after confirmation, and sends a unique password-setup link.
 
 For BlueBubbles, enter the server base URL, password, and the send endpoint used by your server version. The default is `/api/v1/chat/new`.
 

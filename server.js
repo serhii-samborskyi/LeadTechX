@@ -508,7 +508,7 @@ const BLUEBUBBLES_SEND_TIMEOUT_MS = Math.max(800, Number(process.env.BLUEBUBBLES
 const DEFAULT_PLATFORM_BUSINESS_RULES =
   "Use only the language configured for the business agent. Do not switch languages automatically when the caller speaks another language. If the caller asks for another language, explain briefly in the configured language that the receptionist is set to use only that language unless the business changes settings.";
 const DEFAULT_ONBOARDING_INSTRUCTIONS =
-  "You are the AI Receptionist platform onboarding specialist. Collect the company name and website, text those details to the caller for confirmation, build the agent only after confirmation, and send the secure setup link when it is ready. Keep the call brief.";
+  "You are the RingPort platform onboarding specialist. Collect the company name and website, text those details to the caller for confirmation, build the agent only after confirmation, and send the secure setup link when it is ready. Keep the call brief.";
 
 function onboardingInstructionsForPrompt(value) {
   const text = String(value || "").trim();
@@ -1009,7 +1009,7 @@ function leadStatusFromCallInsight(existingStatus, insight) {
 
 function buildCallCrmExtractionPrompt({ profile, voiceCall, fallback }) {
   return `
-You extract CRM facts from an AI receptionist phone transcript. Return only valid JSON.
+You extract CRM facts from a RingPort phone transcript. Return only valid JSON.
 
 Business:
 - Name: ${profile.businessName}
@@ -2242,7 +2242,7 @@ async function getSettings() {
 
 function buildResearchPrompt(businessName, website) {
   return `
-Research this business for an AI receptionist demo.
+Research this business for RingPort.
 
 Business name: ${businessName}
 Website: ${website || "unknown"}
@@ -2615,7 +2615,7 @@ async function smtpDiagnosticConfig(body = {}) {
   const port = Math.max(1, Number(body.smtpPort ?? settings.smtpPort ?? 587));
   const secure = typeof body.smtpSecure === "boolean" ? body.smtpSecure : Boolean(settings.smtpSecure);
   const fromEmail = String(body.smtpFromEmail ?? settings.smtpFromEmail ?? "").trim();
-  const fromName = String(body.smtpFromName ?? settings.smtpFromName ?? "AI Receptionist").trim() || "AI Receptionist";
+  const fromName = String(body.smtpFromName ?? settings.smtpFromName ?? "RingPort").trim() || "RingPort";
   const typedUser = String(body.smtpUsername || "").trim();
   const typedPassword = String(body.smtpPassword || "").trim();
   const smtpUser = typedUser || (await systemSecret("smtp_username", "SMTP_USERNAME"));
@@ -2654,11 +2654,11 @@ async function sendClaimEmail({ settings, email, setupUrl, businessName }) {
     auth: smtpUser ? { user: smtpUser, pass: smtpPassword } : undefined,
   });
   await transporter.sendMail({
-    from: { name: settings.smtpFromName || "AI Receptionist", address: settings.smtpFromEmail },
+    from: { name: settings.smtpFromName || "RingPort", address: settings.smtpFromEmail },
     to: email,
     subject: `Finish setting up ${businessName}`,
-    text: `Your AI receptionist is ready. Review it, test it, and finish your account here:\n\n${setupUrl}\n\nThis link expires in ${settings.claimLinkDays} days.`,
-    html: `<p>Your AI receptionist for <strong>${String(businessName).replace(/[<>&"]/g, "")}</strong> is ready.</p><p><a href="${setupUrl}">Review it and finish your account</a></p><p>This link expires in ${settings.claimLinkDays} days.</p>`,
+    text: `Your RingPort agent is ready. Review it, test it, and finish your account here:\n\n${setupUrl}\n\nThis link expires in ${settings.claimLinkDays} days.`,
+    html: `<p>Your RingPort agent for <strong>${String(businessName).replace(/[<>&"]/g, "")}</strong> is ready.</p><p><a href="${setupUrl}">Review it and finish your account</a></p><p>This link expires in ${settings.claimLinkDays} days.</p>`,
   });
   return true;
 }
@@ -2704,7 +2704,7 @@ async function sendTrackedEmail({
       auth: smtpUser ? { user: smtpUser, pass: smtpPassword } : undefined,
     });
     const result = await transporter.sendMail({
-      from: { name: settings.smtpFromName || "AI Receptionist", address: settings.smtpFromEmail },
+      from: { name: settings.smtpFromName || "RingPort", address: settings.smtpFromEmail },
       to: email,
       subject,
       text,
@@ -3199,7 +3199,7 @@ async function sendSentDmMessage({ settings, toPhone, setupUrl, businessName }) 
         settings,
         sentDmMessageParameters({
           businessName,
-          message: `Your AI receptionist for ${businessName} is ready: ${setupUrl}`,
+          message: `Your RingPort agent for ${businessName} is ready: ${setupUrl}`,
           setupUrl,
         }),
       ),
@@ -3386,7 +3386,7 @@ async function deliverBusinessMessage({
 }
 
 async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, profile = null }) {
-  const message = `Your AI receptionist for ${businessName} is ready. Review it and finish setup: ${setupUrl}`;
+  const message = `Your RingPort agent for ${businessName} is ready. Review it and finish setup: ${setupUrl}`;
   return deliverBusinessMessage({
     settings,
     profile,
@@ -3453,7 +3453,7 @@ async function extractOnboardingBusinessDetailsFromTranscript({ transcript, sour
   const response = await ai.models.generateContent({
     model: settings.researchModel,
     contents: [
-      `Extract the most recently confirmed business details from this AI receptionist onboarding call.
+      `Extract the most recently confirmed business details from this RingPort onboarding call.
 
 Return strict JSON only:
 {
@@ -5389,9 +5389,9 @@ app.post("/api/admin/email/send-test", requireAuth, requireAdmin, async (req, re
     const result = await config.transporter.sendMail({
       from: { name: config.fromName, address: config.fromEmail },
       to: toEmail,
-      subject: "Receptionist email test",
-      text: `This is a test email from Receptionist admin.\n\nSent at ${sentAt.toISOString()}.`,
-      html: `<p>This is a test email from Receptionist admin.</p><p>Sent at ${sentAt.toISOString()}.</p>`,
+      subject: "RingPort email test",
+      text: `This is a test email from RingPort admin.\n\nSent at ${sentAt.toISOString()}.`,
+      html: `<p>This is a test email from RingPort admin.</p><p>Sent at ${sentAt.toISOString()}.</p>`,
     });
     res.json({
       ok: true,
@@ -5426,7 +5426,7 @@ app.post("/api/admin/bluebubbles/send-test", requireAuth, requireAdmin, async (r
     };
     const toPhone = normalizeE164Phone(req.body?.toPhone);
     if (!/^\+[1-9]\d{7,14}$/.test(toPhone)) throw new Error("A valid E.164 test phone is required");
-    const message = String(req.body?.message || "Test message from Receptionist admin.").trim();
+    const message = String(req.body?.message || "Test message from RingPort admin.").trim();
     if (!message) throw new Error("Test message is required");
     const result = await sendBlueBubblesMessage({
       settings: diagnosticSettings,
@@ -5505,7 +5505,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         smtpPort: Math.max(1, Number(req.body.smtpPort || 587)),
         smtpSecure: Boolean(req.body.smtpSecure),
         smtpFromEmail: String(req.body.smtpFromEmail || "").trim(),
-        smtpFromName: String(req.body.smtpFromName || "AI Receptionist").trim(),
+        smtpFromName: String(req.body.smtpFromName || "RingPort").trim(),
         onboardingLookupUrl: String(req.body.onboardingLookupUrl || "").trim(),
         onboardingVoiceName: String(req.body.onboardingVoiceName || "Puck").trim() || "Puck",
         onboardingInstructions: String(req.body.onboardingInstructions || DEFAULT_ONBOARDING_INSTRUCTIONS).trim(),
@@ -8599,7 +8599,7 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
         {
           price_data: {
             currency: "usd",
-            product_data: { name: `${creditAmount} AI receptionist credits` },
+            product_data: { name: `${creditAmount} RingPort credits` },
             unit_amount: unitAmount,
           },
           quantity: 1,
@@ -8625,7 +8625,7 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
               recurring: { interval: "month" },
               product_data: {
                 name: selectedPlan.name,
-                description: selectedPlan.description || `${selectedPlan.monthlyCredits} AI receptionist credits per month`,
+                description: selectedPlan.description || `${selectedPlan.monthlyCredits} RingPort credits per month`,
               },
             },
             quantity: 1,
@@ -10706,5 +10706,5 @@ scheduleQualificationWorker(1000);
 
 server.listen(PORT, () => {
   const protocol = USE_HTTPS ? "https" : "http";
-  console.log(`AI receptionist demo running at ${protocol}://localhost:${PORT}`);
+  console.log(`RingPort running at ${protocol}://localhost:${PORT}`);
 });
