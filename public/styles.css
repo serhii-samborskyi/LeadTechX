@@ -267,8 +267,13 @@ body {
 
 .places-suggestion {
   display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  justify-content: stretch;
+  gap: 12px;
+  width: 100%;
   min-height: 0;
-  padding: 11px 13px;
+  padding: 12px 14px;
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
@@ -287,12 +292,42 @@ body {
   box-shadow: none;
 }
 
-.places-suggestion strong {
-  font-size: 0.95rem;
-  line-height: 1.25;
+.places-suggestion-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #cfe5d9;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
 }
 
-.places-suggestion span {
+.places-suggestion-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.places-suggestion-copy {
+  display: grid;
+  min-width: 0;
+  justify-items: start;
+  text-align: left;
+}
+
+.places-suggestion-copy strong {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 0.95rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.places-suggestion-copy > span {
+  display: block;
+  max-width: 100%;
   margin-top: 2px;
   overflow: hidden;
   color: var(--muted);

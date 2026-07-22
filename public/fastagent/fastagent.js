@@ -138,6 +138,23 @@ function hidePlacesSuggestions() {
   el.placesSuggestions.innerHTML = "";
 }
 
+function placeSuggestionIcon(types = []) {
+  const typeSet = new Set(types);
+  if (typeSet.has("lodging") || typeSet.has("hotel")) return "bed";
+  if (typeSet.has("restaurant") || typeSet.has("food") || typeSet.has("bar") || typeSet.has("cafe")) return "utensils";
+  if (typeSet.has("dentist") || typeSet.has("doctor") || typeSet.has("hospital") || typeSet.has("health")) return "stethoscope";
+  if (typeSet.has("school") || typeSet.has("university") || typeSet.has("educational_institution")) return "graduation-cap";
+  if (typeSet.has("store") || typeSet.has("shopping_mall") || typeSet.has("clothing_store")) return "shopping-bag";
+  if (typeSet.has("moving_company") || typeSet.has("storage")) return "truck";
+  if (typeSet.has("locksmith")) return "key-round";
+  if (typeSet.has("car_repair") || typeSet.has("car_dealer") || typeSet.has("car_rental")) return "car";
+  if (typeSet.has("real_estate_agency") || typeSet.has("home_goods_store")) return "house";
+  if (typeSet.has("gym") || typeSet.has("fitness_center")) return "dumbbell";
+  if (typeSet.has("bank") || typeSet.has("finance") || typeSet.has("accounting")) return "landmark";
+  if (typeSet.has("beauty_salon") || typeSet.has("hair_care") || typeSet.has("spa")) return "scissors";
+  return "building-2";
+}
+
 function renderPlacesSuggestions(suggestions = []) {
   if (!el.placesSuggestions) return;
   el.placesSuggestions.innerHTML = "";
@@ -149,13 +166,16 @@ function renderPlacesSuggestions(suggestions = []) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "places-suggestion";
-    button.innerHTML = '<strong></strong><span></span>';
+    button.innerHTML =
+      `<span class="places-suggestion-icon"><i data-lucide="${placeSuggestionIcon(suggestion.types)}"></i></span>` +
+      '<span class="places-suggestion-copy"><strong></strong><span></span></span>';
     button.querySelector("strong").textContent = suggestion.mainText || suggestion.text;
-    button.querySelector("span").textContent = suggestion.secondaryText || suggestion.text;
+    button.querySelector(".places-suggestion-copy > span").textContent = suggestion.secondaryText || suggestion.text;
     button.addEventListener("click", () => selectPlaceSuggestion(suggestion));
     el.placesSuggestions.appendChild(button);
   }
   el.placesSuggestions.hidden = false;
+  window.lucide?.createIcons();
 }
 
 async function selectPlaceSuggestion(suggestion) {
@@ -198,7 +218,12 @@ function setupPlacesAutocomplete() {
       } catch (error) {
         if (error.name === "AbortError") return;
         hidePlacesSuggestions();
-        setPlacesStatus("Business lookup unavailable. You can enter it manually.", true);
+        const message = error.message.includes("API key not valid")
+          ? "Business lookup key was rejected. You can enter it manually."
+          : error.message.includes("Places API key")
+          ? "Business lookup is not configured yet. You can enter it manually."
+          : "Business lookup unavailable. You can enter it manually.";
+        setPlacesStatus(message, true);
       }
     }, 220);
   });

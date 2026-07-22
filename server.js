@@ -2244,6 +2244,24 @@ function placePredictionToSuggestion(suggestion) {
   };
 }
 
+function isBusinessLikePlaceSuggestion(suggestion) {
+  const types = Array.isArray(suggestion?.types) ? suggestion.types : [];
+  if (types.includes("establishment") || types.includes("point_of_interest")) return true;
+  const regionOnlyTypes = new Set([
+    "geocode",
+    "political",
+    "neighborhood",
+    "locality",
+    "sublocality",
+    "administrative_area_level_1",
+    "administrative_area_level_2",
+    "country",
+    "postal_code",
+    "route",
+  ]);
+  return types.length > 0 && types.some((type) => !regionOnlyTypes.has(type));
+}
+
 async function fetchPlacesAutocomplete(input) {
   const query = String(input || "").trim();
   if (query.length < 2) return [];
@@ -2270,7 +2288,9 @@ async function fetchPlacesAutocomplete(input) {
   if (!response.ok) {
     throw new Error(data.error?.message || `Places autocomplete failed with HTTP ${response.status}`);
   }
-  return (data.suggestions || []).map(placePredictionToSuggestion).filter(Boolean).slice(0, 6);
+  const suggestions = (data.suggestions || []).map(placePredictionToSuggestion).filter(Boolean);
+  const businessSuggestions = suggestions.filter(isBusinessLikePlaceSuggestion);
+  return (businessSuggestions.length ? businessSuggestions : suggestions).slice(0, 6);
 }
 
 async function fetchPlaceDetails(placeId) {
