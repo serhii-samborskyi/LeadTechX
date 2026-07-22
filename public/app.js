@@ -214,7 +214,8 @@ function setStatus(text, mode = "") {
 
 function setTitle() {
   const name = el.businessName.value.trim() || "Business Name";
-  el.title.textContent = `RingPort for "${name}"`;
+  el.title.textContent = name;
+  document.title = `${name} | RingPort`;
 }
 
 function appendTranscript(speaker, text) {

@@ -16,6 +16,7 @@ const el = {
   liveModel: document.querySelector("#systemLiveModel"),
   platformBusinessRules: document.querySelector("#platformBusinessRules"),
   geminiApiKey: document.querySelector("#geminiApiKey"),
+  placesApiKey: document.querySelector("#placesApiKey"),
   telnyxApiKey: document.querySelector("#telnyxApiKey"),
   telnyxPublicKey: document.querySelector("#telnyxPublicKey"),
   telnyxConnectionId: document.querySelector("#telnyxConnectionId"),
@@ -176,6 +177,7 @@ async function loadSystem() {
   }
   el.smtpSecure.checked = Boolean(data.settings.smtpSecure);
   secretState("geminiApiKey", data.secrets.geminiApiKey);
+  secretState("placesApiKey", data.secrets.placesApiKey);
   secretState("telnyxApiKey", data.secrets.telnyxApiKey);
   secretState("telnyxPublicKey", data.secrets.telnyxPublicKey);
   secretState("telnyxConnectionId", data.secrets.telnyxConnectionId);
@@ -1221,6 +1223,7 @@ el.systemForm.addEventListener("submit", async (event) => {
         platformBusinessRules: el.platformBusinessRules.value,
         publicBaseUrl: el.publicBaseUrl.value,
         geminiApiKey: el.geminiApiKey.value,
+        placesApiKey: el.placesApiKey.value,
         telnyxApiKey: el.telnyxApiKey.value,
         telnyxPublicKey: el.telnyxPublicKey.value,
         telnyxConnectionId: el.telnyxConnectionId.value,
@@ -1259,6 +1262,7 @@ el.systemForm.addEventListener("submit", async (event) => {
     });
     for (const input of [
       el.geminiApiKey,
+      el.placesApiKey,
       el.telnyxApiKey,
       el.telnyxPublicKey,
       el.telnyxConnectionId,

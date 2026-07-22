@@ -28,8 +28,14 @@
         <h1>Test your RingPort agent</h1>
         <p>Enter the business details to prepare a live agent.</p>
         <form action="/fastagent/" method="get" class="fast-entry-form">
-          <label>Business name<input name="business_name" autocomplete="organization" placeholder="Chicago Locksmiths" required /></label>
-          <label>Website <span>optional</span><input name="website" type="text" autocomplete="url" inputmode="url" placeholder="example.com" /></label>
+          <label class="places-autocomplete-field">
+            Business name
+            <input id="businessNameInput" name="business_name" autocomplete="off" placeholder="Chicago Locksmiths" required />
+            <input id="placeIdInput" name="place_id" type="hidden" />
+            <div id="placesSuggestions" class="places-suggestions" hidden></div>
+            <small id="placesAutocompleteStatus"></small>
+          </label>
+          <label>Website <span>optional</span><input id="websiteInput" name="website" type="text" autocomplete="url" inputmode="url" placeholder="example.com" /></label>
           <button class="primary" type="submit"><i data-lucide="sparkles"></i> Test agent</button>
         </form>
       </section>

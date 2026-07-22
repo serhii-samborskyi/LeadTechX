@@ -2207,6 +2207,218 @@ function businessCacheKey(businessName, website) {
   return crypto.createHash("sha256").update(base).digest("hex");
 }
 
+async function placesApiKey() {
+  return systemSecret("places_api_key", "PLACES_API_KEY");
+}
+
+function localizedText(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  return String(value.text || "").trim();
+}
+
+function cleanGooglePlaceId(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return raw.startsWith("places/") ? raw.split("/").pop() : raw;
+}
+
+function googlePlaceCacheIdentity(placeId) {
+  return `place:${cleanGooglePlaceId(placeId)}`;
+}
+
+function placePredictionToSuggestion(suggestion) {
+  const prediction = suggestion?.placePrediction;
+  if (!prediction) return null;
+  const placeId = cleanGooglePlaceId(prediction.placeId || prediction.place);
+  const mainText = localizedText(prediction.structuredFormat?.mainText);
+  const secondaryText = localizedText(prediction.structuredFormat?.secondaryText);
+  const text = localizedText(prediction.text) || [mainText, secondaryText].filter(Boolean).join(", ");
+  if (!placeId || !text) return null;
+  return {
+    placeId,
+    text,
+    mainText: mainText || text,
+    secondaryText,
+    types: Array.isArray(prediction.types) ? prediction.types : [],
+  };
+}
+
+async function fetchPlacesAutocomplete(input) {
+  const query = String(input || "").trim();
+  if (query.length < 2) return [];
+  const apiKey = await placesApiKey();
+  if (!apiKey) throw new Error("Places API key is not configured");
+
+  const response = await fetch("https://places.googleapis.com/v1/places:autocomplete", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask":
+        "suggestions.placePrediction.placeId,suggestions.placePrediction.place,suggestions.placePrediction.text,suggestions.placePrediction.structuredFormat,suggestions.placePrediction.types",
+    },
+    body: JSON.stringify({
+      input: query,
+      includeQueryPredictions: false,
+      includePureServiceAreaBusinesses: true,
+      languageCode: "en",
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error?.message || `Places autocomplete failed with HTTP ${response.status}`);
+  }
+  return (data.suggestions || []).map(placePredictionToSuggestion).filter(Boolean).slice(0, 6);
+}
+
+async function fetchPlaceDetails(placeId) {
+  const normalizedPlaceId = cleanGooglePlaceId(placeId);
+  if (!normalizedPlaceId) throw new Error("Place ID is required");
+  const apiKey = await placesApiKey();
+  if (!apiKey) throw new Error("Places API key is not configured");
+
+  const fields = [
+    "id",
+    "displayName",
+    "formattedAddress",
+    "nationalPhoneNumber",
+    "internationalPhoneNumber",
+    "websiteUri",
+    "regularOpeningHours",
+    "businessStatus",
+    "types",
+    "primaryTypeDisplayName",
+    "googleMapsUri",
+  ].join(",");
+  const url = new URL(`https://places.googleapis.com/v1/places/${encodeURIComponent(normalizedPlaceId)}`);
+  url.searchParams.set("fields", fields);
+  url.searchParams.set("key", apiKey);
+  const response = await fetch(url);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error?.message || `Places details failed with HTTP ${response.status}`);
+  }
+  return data;
+}
+
+function placeTypeLabel(place) {
+  const primary = localizedText(place.primaryTypeDisplayName);
+  if (primary) return primary;
+  const types = Array.isArray(place.types) ? place.types : [];
+  return types
+    .filter(Boolean)
+    .slice(0, 6)
+    .map((type) => String(type).replace(/_/g, " "))
+    .join(", ");
+}
+
+function businessDataFromPlace(place, fallback = {}) {
+  const businessName = normalizeBusinessName(localizedText(place.displayName) || fallback.businessName);
+  const website = normalizeWebsite(place.websiteUri || fallback.website);
+  const address = String(place.formattedAddress || "unknown").trim() || "unknown";
+  const phone = String(place.nationalPhoneNumber || place.internationalPhoneNumber || "unknown").trim() || "unknown";
+  const hours = Array.isArray(place.regularOpeningHours?.weekdayDescriptions)
+    ? place.regularOpeningHours.weekdayDescriptions.join("; ")
+    : "unknown";
+  const services = placeTypeLabel(place) || "unknown";
+  const summaryParts = [];
+  if (businessName) summaryParts.push(`${businessName} is listed as ${services === "unknown" ? "a local business" : services}.`);
+  if (address !== "unknown") summaryParts.push(`Address: ${address}.`);
+  if (phone !== "unknown") summaryParts.push(`Phone: ${phone}.`);
+  const sourceUrls = [place.websiteUri, place.googleMapsUri].filter(Boolean);
+  return {
+    businessName,
+    website,
+    summary: summaryParts.join(" ") || `${businessName || "This business"} was loaded from Places business data.`,
+    hours,
+    services,
+    serviceArea: address,
+    address,
+    phone,
+    email: "unknown",
+    pricing: "unknown",
+    bookingPolicy: "unknown",
+    faq: [],
+    sourceUrls,
+    source: "google_places",
+    googlePlaceId: cleanGooglePlaceId(place.id || fallback.placeId),
+    googleBusinessStatus: place.businessStatus || "unknown",
+    googleTypes: Array.isArray(place.types) ? place.types : [],
+  };
+}
+
+async function findBusinessByGooglePlaceId(placeId) {
+  const normalizedPlaceId = cleanGooglePlaceId(placeId);
+  if (!normalizedPlaceId) return null;
+  return prisma.businessProfile.findFirst({
+    where: { rawData: { path: ["googlePlaceId"], equals: normalizedPlaceId } },
+    include: { users: { select: { id: true } } },
+    orderBy: { updatedAt: "desc" },
+  });
+}
+
+async function createOrUpdateBusinessFromPlace({ placeId, businessName, website, researchModel, forceRefresh = false }) {
+  const normalizedPlaceId = cleanGooglePlaceId(placeId);
+  if (!normalizedPlaceId) throw new Error("Place ID is required");
+  if (!forceRefresh) {
+    const cached = await findBusinessByGooglePlaceId(normalizedPlaceId);
+    if (cached) return { profile: cached, cached: true };
+  }
+
+  const place = await fetchPlaceDetails(normalizedPlaceId);
+  const data = businessDataFromPlace(place, { businessName, website, placeId: normalizedPlaceId });
+  if (!data.businessName) throw new Error("Selected place did not include a business name");
+  const cacheKey = businessCacheKey(data.businessName, data.website || googlePlaceCacheIdentity(normalizedPlaceId));
+  const contactParts = [data.phone, data.email, data.address].filter((item) => item && item !== "unknown");
+  const systemPrompt = buildSystemPrompt({
+    businessName: data.businessName,
+    website: data.website,
+    summary: data.summary,
+    hours: data.hours,
+    services: data.services,
+    serviceArea: data.serviceArea,
+    contact: contactParts.join(" | "),
+    rawData: data,
+  });
+
+  const profile = await prisma.businessProfile.upsert({
+    where: { cacheKey },
+    create: {
+      cacheKey,
+      businessName: data.businessName,
+      website: data.website,
+      normalized: normalizeBusinessName(businessName || data.businessName),
+      summary: data.summary,
+      hours: data.hours,
+      services: data.services,
+      serviceArea: data.serviceArea,
+      contact: contactParts.join(" | "),
+      rawData: data,
+      systemPrompt,
+      researchModel,
+      sourceUrls: data.sourceUrls,
+    },
+    update: {
+      businessName: data.businessName,
+      website: data.website,
+      summary: data.summary,
+      hours: data.hours,
+      services: data.services,
+      serviceArea: data.serviceArea,
+      contact: contactParts.join(" | "),
+      rawData: data,
+      systemPrompt,
+      researchModel,
+      sourceUrls: data.sourceUrls,
+    },
+    include: { users: { select: { id: true } } },
+  });
+
+  return { profile, cached: false };
+}
+
 function stripJsonFence(text) {
   const raw = String(text || "").trim();
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -4575,14 +4787,48 @@ async function handleToolCall(geminiWs, clientWs, profile, config, toolCall) {
   }
 }
 
+app.get("/api/places/autocomplete", async (req, res) => {
+  try {
+    const input = String(req.query.input || "").trim();
+    const suggestions = await fetchPlacesAutocomplete(input);
+    res.json({ suggestions });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/places/details", async (req, res) => {
+  try {
+    const placeId = cleanGooglePlaceId(req.query.place_id || req.query.placeId);
+    const place = await fetchPlaceDetails(placeId);
+    const data = businessDataFromPlace(place, { placeId });
+    res.json({
+      place: {
+        placeId: data.googlePlaceId,
+        businessName: data.businessName,
+        website: data.website,
+        summary: data.summary,
+        phone: data.phone === "unknown" ? "" : data.phone,
+        address: data.address === "unknown" ? "" : data.address,
+        hours: data.hours === "unknown" ? "" : data.hours,
+        services: data.services === "unknown" ? "" : data.services,
+        sourceUrls: data.sourceUrls,
+      },
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post("/api/onboarding/fast-agent", async (req, res) => {
   try {
+    const placeId = cleanGooglePlaceId(req.body.placeId || req.body.place_id || req.query.place_id);
     const businessName = normalizeBusinessName(req.body.businessName || req.query.business_name);
     const website = normalizeWebsite(req.body.website || req.query.website);
-    if (!businessName) throw new Error("Business name is required");
+    if (!businessName && !placeId) throw new Error("Business name is required");
 
     const settings = await getSettings();
-    const existing = await findBusinessMatch(businessName, website);
+    const existing = placeId ? await findBusinessByGooglePlaceId(placeId) : await findBusinessMatch(businessName, website);
     const activeTrial = existing?.accountStatus === "trial" && existing.trialEndsAt > new Date();
     if (existing && (existing.users.length || existing.accountStatus === "paid")) {
       return res.status(409).json({
@@ -4594,9 +4840,23 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
 
     const researched = existing
       ? { profile: existing, cached: true }
-      : await researchBusiness({ businessName, website, researchModel: settings.researchModel });
+      : placeId
+        ? await createOrUpdateBusinessFromPlace({
+            placeId,
+            businessName,
+            website,
+            researchModel: settings.researchModel,
+        })
+        : await researchBusiness({ businessName, website, researchModel: settings.researchModel });
     let profile = researched.profile;
-    if (!activeTrial) {
+    if (!existing && (profile.users?.length || profile.accountStatus === "paid")) {
+      return res.status(409).json({
+        error: "This business already has an account. Sign in to access it.",
+        code: "BUSINESS_ALREADY_ACTIVE",
+      });
+    }
+    const profileActiveTrial = profile.accountStatus === "trial" && profile.trialEndsAt > new Date();
+    if (!profileActiveTrial) {
       const trialStartedAt = new Date();
       const trialEndsAt = new Date(trialStartedAt.getTime() + settings.trialDays * 24 * 60 * 60 * 1000);
       profile = await prisma.businessProfile.update({
@@ -4630,7 +4890,7 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
     if (!demoAssignment || demoAssignment.expiresAt <= new Date()) {
       demoAssignment = await allocateDemoNumber(profile, settings);
     }
-    res.status(activeTrial ? 200 : 201).json({
+    res.status(profileActiveTrial ? 200 : 201).json({
       accessToken: access.token,
       cached: researched.cached,
       profile: publicBusinessProfile(profile),
@@ -5346,6 +5606,7 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
     settings,
     secrets: {
       geminiApiKey: secretState("gemini_api_key", "GEMINI_API_KEY"),
+      placesApiKey: secretState("places_api_key", "PLACES_API_KEY"),
       telnyxApiKey: secretState("telnyx_api_key", "TELNYX_API_KEY"),
       telnyxPublicKey: secretState("telnyx_public_key", "TELNYX_PUBLIC_KEY"),
       telnyxConnectionId: secretState("telnyx_connection_id", "TELNYX_CONNECTION_ID"),
@@ -5579,6 +5840,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
     });
     await Promise.all([
       saveSystemSecret("gemini_api_key", req.body.geminiApiKey),
+      saveSystemSecret("places_api_key", req.body.placesApiKey),
       saveSystemSecret("telnyx_api_key", req.body.telnyxApiKey),
       saveSystemSecret("telnyx_public_key", req.body.telnyxPublicKey),
       saveSystemSecret("telnyx_connection_id", req.body.telnyxConnectionId),

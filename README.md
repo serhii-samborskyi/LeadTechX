@@ -61,6 +61,7 @@ Create `.env`:
 
 ```bash
 GEMINI_API_KEY="your-key"
+PLACES_API_KEY="your-google-places-key"
 ADMIN_EMAIL="admin@example.com"
 ADMIN_PASSWORD="use-a-long-unique-password"
 APP_ENCRYPTION_KEY="use-a-separate-long-random-secret"
@@ -89,6 +90,7 @@ Set production environment variables in Coolify, not in the repository:
 NODE_ENV=production
 PORT=3000
 RUN_DB_DEPLOY_ON_START=1
+AUTO_BASELINE_EXISTING_DB=1
 DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE"
 SHADOW_DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE_shadow"
 APP_ENCRYPTION_KEY="use-a-long-random-secret-and-keep-it-stable"
@@ -106,7 +108,9 @@ With `RUN_DB_DEPLOY_ON_START=1`, the Docker entrypoint runs the database deploym
 npm run db:deploy
 ```
 
-That command removes legacy plan-manager columns that were replaced by subscription plans, applies the Prisma schema with `prisma db push --skip-generate`, then runs the current idempotent SQL patches for credit buckets and RingPort branding. Back up the production database before running schema changes on an existing production database.
+That command runs `prisma migrate deploy`, then runs the current idempotent SQL patches for legacy cleanup, credit buckets, and RingPort branding. Back up the production database before running schema changes on an existing production database.
+
+The first migration is a baseline migration named `20260722000000_baseline`. For a new empty database, Prisma applies it normally. For a database restored from the full RingPort dump, `AUTO_BASELINE_EXISTING_DB=1` lets the deploy script detect the existing app tables and mark the baseline as already applied before running `prisma migrate deploy`. Set `AUTO_BASELINE_EXISTING_DB=0` only if you want to manage that baseline step manually.
 
 After deployment, configure external webhooks with the production domain:
 
@@ -131,6 +135,18 @@ npm run db:local
 ```
 
 Starts the named `live-receptionist` Prisma Postgres instance when `DATABASE_URL` uses the managed local port `51214`. The command is idempotent, and `restart.sh` runs it automatically. It skips local database startup when a production `DATABASE_URL` is configured.
+
+```bash
+npm run db:migrate -- --name describe_change
+```
+
+Creates and applies a Prisma migration during local development. Use this after editing `prisma/schema.prisma` instead of `prisma db push`.
+
+```bash
+npm run db:deploy
+```
+
+Applies committed Prisma migrations in production with `prisma migrate deploy`, then runs the idempotent post-deploy SQL patches.
 
 To import the legacy SQLite database once:
 
