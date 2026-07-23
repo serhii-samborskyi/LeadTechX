@@ -76,6 +76,10 @@ app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 app.use("/vendor/lucide", express.static(path.join(__dirname, "node_modules/lucide/dist/umd")));
 app.use(express.static(path.join(__dirname, "public")));
 
+app.get(["/admin", "/admin/"], (_req, res) => {
+  res.sendFile(path.join(__dirname, "public/admin.html"));
+});
+
 const SESSION_COOKIE = "receptionist_session";
 const SESSION_DAYS = 14;
 const onboardingAttempts = new Map();

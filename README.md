@@ -26,7 +26,7 @@ The business portal requires a business account created by an administrator.
 Open the system administration panel at:
 
 ```text
-http://localhost:3000/admin.html
+http://localhost:3000/admin
 ```
 
 The initial administrator is created from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Use the admin panel to configure AI models and encrypted API credentials, then create business logins. Each business login is restricted to its assigned profile and records.
@@ -223,7 +223,7 @@ Current phone codec settings:
 
 The browser call path is separate from Telnyx: the browser streams microphone audio to the app as 16 kHz PCM, the live voice provider returns 24 kHz PCM, and the browser plays it directly through Web Audio. Browser clients also clear queued playback when an interruption is reported.
 
-In `/admin.html`:
+In `/admin`:
 
 1. Save the Telnyx API key, public key, connection ID, and public HTTPS base URL under System.
 2. Open Phone numbers and select Sync inventory.
