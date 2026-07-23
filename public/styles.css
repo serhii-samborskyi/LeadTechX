@@ -742,14 +742,31 @@ body {
 }
 
 .topbar-logo {
-  height: 62px;
-  max-width: 210px;
+  height: 64px;
+  max-width: 235px;
+  border-radius: 4px;
   filter: drop-shadow(0 8px 18px rgb(0 0 0 / 14%));
 }
 
 .admin-logo {
-  height: 56px;
-  max-width: 190px;
+  height: 58px;
+  max-width: 215px;
+  border-radius: 4px;
+}
+
+.admin-brand-stack {
+  display: grid;
+  gap: 6px;
+}
+
+.admin-brand-stack p {
+  margin: 0;
+  padding-left: 8px;
+  color: #d9f3e7;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 
 .public-logo {
@@ -789,6 +806,11 @@ body {
 .admin-shell {
   width: min(1180px, calc(100% - 32px));
   margin: 24px auto;
+  padding: 0 0 20px;
+  border-radius: 8px;
+  background: #f7faf8;
+  overflow: hidden;
+  box-shadow: 0 22px 60px rgb(24 77 59 / 16%);
 }
 
 .admin-topbar,
@@ -800,7 +822,10 @@ body {
 }
 
 .admin-topbar {
-  margin-bottom: 18px;
+  margin-bottom: 0;
+  padding: 24px 30px 18px;
+  background: #246a55;
+  color: #fff;
 }
 
 .admin-topbar h1,
@@ -812,8 +837,10 @@ body {
 .admin-page-tabs {
   display: flex;
   gap: 8px;
-  margin-bottom: 14px;
-  border-bottom: 1px solid var(--line);
+  margin-bottom: 0;
+  padding: 0 30px;
+  border-bottom: 1px solid rgb(255 255 255 / 18%);
+  background: #246a55;
 }
 
 .admin-page-tabs button {
@@ -821,11 +848,18 @@ body {
   border-bottom: 3px solid transparent;
   border-radius: 0;
   background: transparent;
+  color: #d9f3e7;
 }
 
 .admin-page-tabs button.active {
-  border-bottom-color: var(--green);
-  color: var(--green-dark);
+  border-bottom-color: #f47c59;
+  color: #fff;
+}
+
+.admin-page-tabs button:hover,
+.admin-page-tabs button:focus {
+  background: rgb(255 255 255 / 8%);
+  color: #fff;
 }
 
 .system-subtabs {
@@ -3082,8 +3116,9 @@ a.appointment-field-value {
   }
 
   .admin-shell {
-    width: calc(100% - 20px);
-    margin: 12px auto 80px;
+    width: 100%;
+    margin: 0 0 80px;
+    border-radius: 0;
   }
 
   .admin-page-view {
@@ -3094,6 +3129,19 @@ a.appointment-field-value {
   .section-heading {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .admin-topbar {
+    padding: 18px 16px 16px;
+  }
+
+  .admin-brand-stack p {
+    padding-left: 6px;
+    font-size: 0.75rem;
+  }
+
+  .admin-page-tabs {
+    padding: 0 16px;
   }
 
   .admin-page-tabs button {
@@ -3220,31 +3268,52 @@ a.appointment-field-value {
 
   .topbar {
     display: grid;
+    gap: 16px;
     margin: 0;
-    padding: 20px 16px 22px;
+    padding: 18px 16px 22px;
   }
 
   .brand-heading {
-    align-items: flex-start;
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: start;
+    gap: 14px;
+  }
+
+  .topbar .brand-heading > div {
+    width: 100%;
   }
 
   .topbar-logo {
-    height: 44px;
-    max-width: 150px;
+    width: min(230px, 70vw);
+    height: auto;
+    max-width: 100%;
   }
 
   .topbar h1 {
-    font-size: 2rem;
+    font-size: clamp(2rem, 10vw, 2.8rem);
     line-height: 1.08;
+    overflow-wrap: anywhere;
   }
 
   .header-copy {
-    font-size: 0.88rem;
+    max-width: 100%;
+    font-size: 0.96rem;
+    line-height: 1.35;
+  }
+
+  .topbar-actions {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
   }
 
   .status {
     min-width: 0;
     width: fit-content;
+    max-width: calc(100% - 58px);
   }
 
   .workspace {
