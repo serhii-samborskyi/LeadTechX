@@ -34,6 +34,16 @@ const SSL_CERT = process.env.SSL_CERT || path.join(__dirname, "certs/local-cert.
 const SSL_KEY = process.env.SSL_KEY || path.join(__dirname, "certs/local-key.pem");
 const GEMINI_WS_URL =
   "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+const FALLBACK_RESEARCH_MODELS = [
+  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview" },
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
+];
+const FALLBACK_LIVE_MODELS = [
+  { id: "models/gemini-3.1-flash-live-preview", label: "Gemini 3.1 Flash Live Preview" },
+  { id: "models/gemini-2.5-flash-native-audio-preview-09-2025", label: "Gemini 2.5 Flash Native Audio Preview" },
+];
 
 const prisma = new PrismaClient();
 const upload = multer({
@@ -85,6 +95,7 @@ const SESSION_DAYS = 14;
 const onboardingAttempts = new Map();
 const activeOnboardingTextSessions = new Map();
 const blueBubblesPreferredModes = new Map();
+const aiRateLimitHits = new Map();
 let prismaReconnectPromise = null;
 
 function sleep(ms) {
@@ -139,6 +150,145 @@ async function withPrismaRetry(label, operation, attempts = 3) {
     }
   }
   throw lastError;
+}
+
+function cleanAiModelId(value) {
+  return String(value || "").trim();
+}
+
+function modelDisplayName(modelId) {
+  return cleanAiModelId(modelId)
+    .replace(/^models\//, "")
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function modelRateLimitKey(model, operation) {
+  return `${cleanAiModelId(model) || "unknown"}|${operation || "unknown"}`;
+}
+
+function errorMessage(error) {
+  if (!error) return "";
+  if (typeof error === "string") return error;
+  return String(error.message || error.reason || error.toString?.() || "");
+}
+
+function isAiRateLimitError(error) {
+  const code = String(error?.code || error?.status || error?.statusCode || "");
+  const message = errorMessage(error).toLowerCase();
+  return (
+    code === "429" ||
+    message.includes("429") ||
+    message.includes("quota") ||
+    message.includes("rate limit") ||
+    message.includes("resource_exhausted") ||
+    message.includes("too many requests")
+  );
+}
+
+function recordAiRateLimit({ model, operation, error }) {
+  if (!isAiRateLimitError(error)) return;
+  const normalizedModel = cleanAiModelId(model) || "unknown";
+  const key = modelRateLimitKey(normalizedModel, operation);
+  const existing = aiRateLimitHits.get(key) || {
+    model: normalizedModel,
+    operation: operation || "unknown",
+    count: 0,
+    firstAt: new Date().toISOString(),
+    lastAt: null,
+    lastMessage: "",
+  };
+  existing.count += 1;
+  existing.lastAt = new Date().toISOString();
+  existing.lastMessage = errorMessage(error).slice(0, 500);
+  aiRateLimitHits.set(key, existing);
+}
+
+function aiRateLimitSnapshot() {
+  return [...aiRateLimitHits.values()].sort((a, b) => String(b.lastAt || "").localeCompare(String(a.lastAt || "")));
+}
+
+async function generateAiContent(ai, request, operation) {
+  try {
+    return await ai.models.generateContent(request);
+  } catch (error) {
+    recordAiRateLimit({ model: request?.model, operation, error });
+    throw error;
+  }
+}
+
+function normalizeResearchModelOption(modelName) {
+  return cleanAiModelId(modelName).replace(/^models\//, "");
+}
+
+function normalizeLiveModelOption(modelName) {
+  const cleaned = cleanAiModelId(modelName);
+  return cleaned.startsWith("models/") ? cleaned : `models/${cleaned}`;
+}
+
+function mergeModelOptions(fallbackOptions, dynamicOptions, currentValue, normalize = cleanAiModelId) {
+  const options = new Map();
+  const add = (option, source) => {
+    const id = normalize(option?.id || option?.name);
+    if (!id) return;
+    options.set(id, {
+      id,
+      label: option.label || option.displayName || modelDisplayName(id),
+      source: option.source || source,
+    });
+  };
+  fallbackOptions.forEach((option) => add(option, "default"));
+  dynamicOptions.forEach((option) => add(option, "api"));
+  if (currentValue) add({ id: currentValue, label: `${currentValue} (current)` }, "current");
+  return [...options.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+async function providerModelOptions(settings) {
+  const fallback = {
+    source: "default",
+    error: null,
+    researchModels: mergeModelOptions(FALLBACK_RESEARCH_MODELS, [], settings.researchModel, normalizeResearchModelOption),
+    liveModels: mergeModelOptions(FALLBACK_LIVE_MODELS, [], settings.liveModel, normalizeLiveModelOption),
+    rateLimits: aiRateLimitSnapshot(),
+  };
+  const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY").catch(() => "");
+  if (!geminiApiKey) return { ...fallback, error: "AI provider API key is not configured" };
+
+  try {
+    const models = [];
+    let pageToken = "";
+    do {
+      const url = new URL("https://generativelanguage.googleapis.com/v1beta/models");
+      url.searchParams.set("key", geminiApiKey);
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const response = await fetch(url);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error?.message || `Model list failed with HTTP ${response.status}`);
+      models.push(...(data.models || []));
+      pageToken = data.nextPageToken || "";
+    } while (pageToken);
+
+    const researchModels = [];
+    const liveModels = [];
+    for (const model of models) {
+      const name = cleanAiModelId(model.name);
+      if (!name.toLowerCase().includes("gemini")) continue;
+      const methods = Array.isArray(model.supportedGenerationMethods) ? model.supportedGenerationMethods : [];
+      const option = { id: name, label: model.displayName || modelDisplayName(name), source: "api" };
+      if (methods.includes("generateContent") && !name.toLowerCase().includes("live")) researchModels.push(option);
+      if (methods.includes("bidiGenerateContent") || name.toLowerCase().includes("live")) liveModels.push(option);
+    }
+
+    return {
+      source: "api",
+      error: null,
+      researchModels: mergeModelOptions(FALLBACK_RESEARCH_MODELS, researchModels, settings.researchModel, normalizeResearchModelOption),
+      liveModels: mergeModelOptions(FALLBACK_LIVE_MODELS, liveModels, settings.liveModel, normalizeLiveModelOption),
+      rateLimits: aiRateLimitSnapshot(),
+    };
+  } catch (error) {
+    return { ...fallback, error: error.message };
+  }
 }
 
 function passwordHash(password, salt = crypto.randomBytes(16).toString("hex")) {
@@ -1065,11 +1215,11 @@ async function generateCallCrmInsight({ voiceCall, profile, fallback }) {
   const settings = await getSettings();
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
   const response = await Promise.race([
-    ai.models.generateContent({
+    generateAiContent(ai, {
       model: settings.researchModel,
       contents: [buildCallCrmExtractionPrompt({ profile, voiceCall, fallback })],
       config: { temperature: 0.1 },
-    }),
+    }, "post_call_crm_extraction"),
     sleep(15000).then(() => {
       throw new Error("Post-call CRM extraction timed out");
     }),
@@ -2634,14 +2784,14 @@ async function researchBusiness({ businessName, website, researchModel, forceRef
   if (!geminiApiKey) throw new Error("AI provider API key is not configured");
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
-  const response = await ai.models.generateContent({
+  const response = await generateAiContent(ai, {
     model: researchModel,
     contents: [prompt],
     config: {
       tools,
       temperature: 0.2,
     },
-  });
+  }, "business_research");
 
   const text = response.text || "";
   let data;
@@ -3686,7 +3836,7 @@ async function extractOnboardingBusinessDetailsFromTranscript({ transcript, sour
   const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY");
   if (!geminiApiKey) throw new Error("AI provider API key is not configured");
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-  const response = await ai.models.generateContent({
+  const response = await generateAiContent(ai, {
     model: settings.researchModel,
     contents: [
       `Extract the most recently confirmed business details from this RingPort onboarding call.
@@ -3713,7 +3863,7 @@ Transcript:
 ${recentTranscript}`,
     ],
     config: { temperature: 0 },
-  });
+  }, "onboarding_detail_extraction");
   let data = {};
   try {
     data = JSON.parse(stripJsonFence(response.text || ""));
@@ -5646,6 +5796,15 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
       blueBubblesReplies: blueBubblesWebhookUrl(configuredPublicBaseUrl(settings), blueBubblesPassword),
     },
   });
+});
+
+app.get("/api/admin/models", requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const settings = await getSettings();
+    res.json(await providerModelOptions(settings));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.post("/api/admin/email/test-connection", requireAuth, requireAdmin, async (req, res) => {
@@ -10558,10 +10717,16 @@ Live session identity and language:
 
     geminiWs.on("error", async (error) => {
       console.error("[telnyx] live voice provider error", error.message);
+      recordAiRateLimit({ model: phoneLiveModel, operation: "phone_live_socket", error });
       await logVoiceCallEvent(callControlId, "error", { stage: "gemini", message: error.message });
       if (!bridgeDetachedForTransfer) hangup("gemini_error");
     });
     geminiWs.on("close", async (code, reason) => {
+      recordAiRateLimit({
+        model: phoneLiveModel,
+        operation: "phone_live_socket",
+        error: { code, message: reason.toString() },
+      });
       await logVoiceCallEvent(callControlId, "gemini.closed", { code, reason: reason.toString() });
       if (!closing && !bridgeDetachedForTransfer && telnyxWs.readyState === WebSocket.OPEN) hangup("gemini_closed");
     });
@@ -10784,10 +10949,10 @@ wss.on("connection", (clientWs, request) => {
 
         const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY");
         if (!geminiApiKey) throw new Error("Live agent provider key is not configured");
+        const selectedLiveModel = liveModelPath(message.liveModel || settings.liveModel);
         geminiWs = new WebSocket(`${GEMINI_WS_URL}?key=${encodeURIComponent(geminiApiKey)}`);
 
         geminiWs.on("open", () => {
-          const selectedLiveModel = liveModelPath(message.liveModel || settings.liveModel);
           liveUsageStartedAt = new Date();
           const liveSystemPrompt = `${profile.systemPrompt}
 ${platformBusinessRulesPrompt(settings)}
@@ -10917,6 +11082,11 @@ Live session identity and language:
 
         geminiWs.on("close", (code, reason) => {
           console.log(`[live] voice provider socket closed code=${code} reason=${reason.toString()}`);
+          recordAiRateLimit({
+            model: selectedLiveModel,
+            operation: "browser_live_socket",
+            error: { code, message: reason.toString() },
+          });
           flushBrowserAgentTranscript();
           sendClient({ type: "status", status: "agent_closed", code, reason: reason.toString() });
           recordLiveBrowserUsageOnce().catch(() => {});
@@ -10924,6 +11094,7 @@ Live session identity and language:
 
         geminiWs.on("error", (error) => {
           console.error("[live] voice provider socket error", error);
+          recordAiRateLimit({ model: selectedLiveModel, operation: "browser_live_socket", error });
           sendClient({ type: "error", error: `Live agent connection error: ${error.message}` });
         });
       } catch (error) {

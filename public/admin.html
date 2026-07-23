@@ -59,10 +59,25 @@
         <form id="systemForm" class="settings-form system-settings-form">
           <section class="system-panel active" data-system-panel="core">
             <div class="system-panel-heading"><h3>Core AI settings</h3><p>Default engines used for business research and live calls.</p></div>
-            <div class="form-grid">
-              <label>Research engine<input id="systemResearchModel" required /></label>
-              <label>Live voice engine<input id="systemLiveModel" required /></label>
+            <div class="form-grid model-settings-grid">
+              <label>
+                Research engine
+                <select id="systemResearchModelSelect"></select>
+                <input id="systemResearchModel" class="custom-model-input" placeholder="Custom research model" />
+                <small id="researchModelRateLimit"></small>
+              </label>
+              <label>
+                Live voice engine
+                <select id="systemLiveModelSelect"></select>
+                <input id="systemLiveModel" class="custom-model-input" placeholder="Custom live voice model" />
+                <small id="liveModelRateLimit"></small>
+              </label>
             </div>
+            <div class="model-diagnostics">
+              <button id="refreshModelOptions" type="button"><i data-lucide="refresh-cw"></i> Refresh model list</button>
+              <span id="modelOptionsStatus"></span>
+            </div>
+            <div id="modelRateLimits" class="model-rate-limit-list"></div>
           </section>
           <section class="system-panel" data-system-panel="rules">
             <div class="system-panel-heading"><h3>Global business agent rules</h3><p>Rules applied to every business receptionist, phone call, browser call, and outbound qualification call.</p></div>

@@ -13,7 +13,14 @@ const el = {
   systemForm: document.querySelector("#systemForm"),
   systemStatus: document.querySelector("#systemStatus"),
   researchModel: document.querySelector("#systemResearchModel"),
+  researchModelSelect: document.querySelector("#systemResearchModelSelect"),
+  researchModelRateLimit: document.querySelector("#researchModelRateLimit"),
   liveModel: document.querySelector("#systemLiveModel"),
+  liveModelSelect: document.querySelector("#systemLiveModelSelect"),
+  liveModelRateLimit: document.querySelector("#liveModelRateLimit"),
+  refreshModelOptions: document.querySelector("#refreshModelOptions"),
+  modelOptionsStatus: document.querySelector("#modelOptionsStatus"),
+  modelRateLimits: document.querySelector("#modelRateLimits"),
   platformBusinessRules: document.querySelector("#platformBusinessRules"),
   geminiApiKey: document.querySelector("#geminiApiKey"),
   placesApiKey: document.querySelector("#placesApiKey"),
@@ -124,6 +131,7 @@ const el = {
 let businesses = [];
 let subscriptionPlans = [];
 let savedBlueBubblesWebhookPassword = "";
+let modelRateLimits = [];
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -140,12 +148,104 @@ function secretState(id, state) {
   node.className = state.configured ? "configured" : "missing";
 }
 
+function comparableModelId(value) {
+  return String(value || "").trim().replace(/^models\//, "");
+}
+
+function modelLabel(option) {
+  const source = option.source === "api" ? "available" : option.source === "current" ? "current" : "default";
+  return `${option.label || option.id} (${source})`;
+}
+
+function populateModelSelect(select, input, options, currentValue) {
+  select.innerHTML = "";
+  const currentComparable = comparableModelId(currentValue);
+  let matched = false;
+  for (const option of options || []) {
+    const node = document.createElement("option");
+    node.value = option.id;
+    node.textContent = modelLabel(option);
+    if (comparableModelId(option.id) === currentComparable) {
+      node.selected = true;
+      matched = true;
+      input.value = option.id;
+    }
+    select.appendChild(node);
+  }
+  const custom = document.createElement("option");
+  custom.value = "__custom__";
+  custom.textContent = "Other / custom model";
+  custom.selected = !matched;
+  select.appendChild(custom);
+  if (!matched) input.value = currentValue || "";
+  syncCustomModelInput(select, input);
+}
+
+function syncCustomModelInput(select, input) {
+  const custom = select.value === "__custom__";
+  input.hidden = !custom;
+  if (!custom) input.value = select.value;
+}
+
+function modelRateLimitFor(model) {
+  const comparable = comparableModelId(model);
+  return modelRateLimits.filter((item) => comparableModelId(item.model) === comparable);
+}
+
+function modelLimitSummary(model) {
+  const hits = modelRateLimitFor(model);
+  if (!hits.length) return "No rate-limit errors recorded for this model since server restart.";
+  const count = hits.reduce((total, item) => total + Number(item.count || 0), 0);
+  const latest = hits[0];
+  return `${count} rate-limit hit${count === 1 ? "" : "s"} since restart. Last: ${new Date(latest.lastAt).toLocaleString()}.`;
+}
+
+function renderModelRateLimits() {
+  el.researchModelRateLimit.textContent = modelLimitSummary(el.researchModel.value);
+  el.liveModelRateLimit.textContent = modelLimitSummary(el.liveModel.value);
+  el.modelRateLimits.innerHTML = "";
+  if (!modelRateLimits.length) {
+    el.modelRateLimits.textContent = "No model rate-limit errors recorded since the server started.";
+    return;
+  }
+  for (const hit of modelRateLimits) {
+    const row = document.createElement("div");
+    row.className = "model-rate-limit-row";
+    row.innerHTML = "<strong></strong><span></span><small></small>";
+    row.querySelector("strong").textContent = hit.model;
+    row.querySelector("span").textContent = `${hit.operation} · ${hit.count} hit${Number(hit.count) === 1 ? "" : "s"} · ${new Date(hit.lastAt).toLocaleString()}`;
+    row.querySelector("small").textContent = hit.lastMessage || "No provider message returned.";
+    el.modelRateLimits.appendChild(row);
+  }
+}
+
+async function loadModelOptions() {
+  el.modelOptionsStatus.textContent = "Loading model list...";
+  try {
+    const data = await api("/api/admin/models");
+    modelRateLimits = data.rateLimits || [];
+    populateModelSelect(el.researchModelSelect, el.researchModel, data.researchModels || [], el.researchModel.value);
+    populateModelSelect(el.liveModelSelect, el.liveModel, data.liveModels || [], el.liveModel.value);
+    renderModelRateLimits();
+    el.modelOptionsStatus.textContent = data.error
+      ? `Using default list: ${data.error}`
+      : `Model list loaded from ${data.source === "api" ? "provider API" : "defaults"}.`;
+  } catch (error) {
+    modelRateLimits = [];
+    populateModelSelect(el.researchModelSelect, el.researchModel, [], el.researchModel.value);
+    populateModelSelect(el.liveModelSelect, el.liveModel, [], el.liveModel.value);
+    renderModelRateLimits();
+    el.modelOptionsStatus.textContent = error.message;
+  }
+}
+
 async function loadSystem() {
   const [data] = await Promise.all([api("/api/admin/settings"), loadPlans()]);
   el.researchModel.value = data.settings.researchModel;
   el.liveModel.value = data.settings.liveModel;
   el.platformBusinessRules.value = data.settings.platformBusinessRules || "";
   el.publicBaseUrl.value = data.publicBaseUrl;
+  await loadModelOptions();
   setSavedBlueBubblesWebhookPassword(data.webhooks?.blueBubblesReplies || "");
   for (const key of [
     "trialDays",
@@ -1208,6 +1308,22 @@ el.loginForm.addEventListener("submit", async (event) => {
   } catch (error) {
     el.loginError.textContent = error.message;
   }
+});
+
+el.researchModelSelect.addEventListener("change", () => {
+  syncCustomModelInput(el.researchModelSelect, el.researchModel);
+  renderModelRateLimits();
+});
+el.liveModelSelect.addEventListener("change", () => {
+  syncCustomModelInput(el.liveModelSelect, el.liveModel);
+  renderModelRateLimits();
+});
+el.researchModel.addEventListener("input", renderModelRateLimits);
+el.liveModel.addEventListener("input", renderModelRateLimits);
+el.refreshModelOptions.addEventListener("click", () => {
+  loadModelOptions().catch((error) => {
+    el.modelOptionsStatus.textContent = error.message;
+  });
 });
 
 el.systemForm.addEventListener("submit", async (event) => {
