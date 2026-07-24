@@ -330,10 +330,11 @@ function setSessionCookie(req, res, token) {
   );
 }
 
-function publicBusinessProfile(profile) {
+function publicBusinessProfile(profile, config = null) {
   const rawData = profile.rawData && typeof profile.rawData === "object" && !Array.isArray(profile.rawData)
     ? profile.rawData
     : {};
+  const profileConfig = config || profile.config || {};
   return {
     id: profile.id,
     businessName: profile.businessName,
@@ -346,6 +347,7 @@ function publicBusinessProfile(profile) {
     phone: rawData.phone || "",
     address: rawData.address || "",
     email: rawData.email || "",
+    language: profileConfig.language || "English",
     accountStatus: profile.accountStatus,
     trialEndsAt: profile.trialEndsAt,
     creditBalance: profile.creditBalance,
@@ -4023,6 +4025,7 @@ async function ensureBusinessConfig(profile) {
           { fieldKey: "reason", label: "Reason for appointment", fieldType: "text", required: true, sortOrder: 3 },
         ],
       },
+      language: "English",
       availabilityRules: {
         create: Array.from({ length: 7 }, (_, dayOfWeek) => ({
           dayOfWeek,
@@ -5051,7 +5054,7 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
         metadata: { source: "browser_demo", trialStartedAt: trialStartedAt.toISOString(), trialDays: settings.trialDays },
       }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
     }
-    await ensureBusinessConfig(profile);
+    const config = await ensureBusinessConfig(profile);
     await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
     const access = issueToken();
     await prisma.fastAgentSession.create({
@@ -5067,7 +5070,7 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
     res.status(profileActiveTrial ? 200 : 201).json({
       accessToken: access.token,
       cached: researched.cached,
-      profile: publicBusinessProfile(profile),
+      profile: publicBusinessProfile(profile, config),
       trial: {
         days: settings.trialDays,
         endsAt: profile.trialEndsAt,
@@ -5097,8 +5100,9 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
       include: { voiceNumber: true, callerBindings: { orderBy: { createdAt: "asc" } } },
     });
   }
+  const config = await ensureBusinessConfig(session.businessProfile);
   res.json({
-    profile: publicBusinessProfile(session.businessProfile),
+    profile: publicBusinessProfile(session.businessProfile, config),
     demoPhoneNumber: assignment?.voiceNumber.phoneNumber || null,
     callerPhones: assignment?.callerBindings.map((binding) => binding.callerPhone) || [],
     demoCallerLimit: settings.demoCallerLimit,
@@ -5127,6 +5131,8 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
     const serviceArea = textOrUnknown(req.body.serviceArea);
     const phone = textOrUnknown(req.body.phone);
     const address = textOrUnknown(req.body.address);
+    const config = await ensureBusinessConfig(session.businessProfile);
+    const language = String(req.body.language || config.language || "English").trim().slice(0, 80) || "English";
     const rawData = {
       ...existingRaw,
       businessName: session.businessProfile.businessName,
@@ -5155,7 +5161,11 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
         systemPrompt: buildSystemPrompt(values),
       },
     });
-    res.json({ profile: publicBusinessProfile(updated) });
+    const updatedConfig = await prisma.businessConfig.update({
+      where: { businessProfileId: session.businessProfileId },
+      data: { language },
+    });
+    res.json({ profile: publicBusinessProfile(updated, updatedConfig) });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }

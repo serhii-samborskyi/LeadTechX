@@ -513,6 +513,10 @@ body {
   box-shadow: 0 0 0 3px rgba(76, 171, 131, 0.14);
 }
 
+.fast-profile-grid > label.compact {
+  padding-block: 12px;
+}
+
 .fast-profile-grid .wide {
   grid-column: 1 / -1;
 }
@@ -526,7 +530,8 @@ body {
 }
 
 .fast-profile-grid input,
-.fast-profile-grid textarea {
+.fast-profile-grid textarea,
+.fast-profile-grid select {
   width: 100%;
   margin: 6px 0 0;
   padding: 0;
@@ -537,6 +542,11 @@ body {
   font: inherit;
   overflow-wrap: anywhere;
   line-height: 1.45;
+}
+
+.fast-profile-grid select {
+  min-height: 34px;
+  cursor: pointer;
 }
 
 .fast-profile-grid textarea {

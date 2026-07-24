@@ -70,6 +70,7 @@ const el = Object.fromEntries(
     "profileHours",
     "profileArea",
     "profileServices",
+    "profileLanguage",
     "phoneSection",
     "phoneLimit",
     "demoPhone",
@@ -251,6 +252,14 @@ function editableProfileValue(value) {
   return text.toLowerCase() === "unknown" ? "" : text;
 }
 
+function setProfileLanguage(value) {
+  const language = String(value || "English").trim() || "English";
+  if (![...el.profileLanguage.options].some((option) => option.value === language)) {
+    el.profileLanguage.appendChild(new Option(language, language));
+  }
+  el.profileLanguage.value = language;
+}
+
 function profilePayload() {
   return {
     accessToken: state.accessToken,
@@ -260,6 +269,7 @@ function profilePayload() {
     hours: el.profileHours.value,
     serviceArea: el.profileArea.value,
     services: el.profileServices.value,
+    language: el.profileLanguage.value,
   };
 }
 
@@ -272,6 +282,7 @@ function renderProfileFields(profile) {
   el.profileHours.value = editableProfileValue(profile.hours);
   el.profileArea.value = editableProfileValue(profile.serviceArea);
   el.profileServices.value = editableProfileValue(profile.services);
+  setProfileLanguage(profile.language);
   state.renderingProfile = false;
   state.profileDirty = false;
   el.profileSaveButton.disabled = false;
@@ -589,11 +600,14 @@ async function initialize() {
 
 el.talkButton.addEventListener("click", startCall);
 el.stopButton.addEventListener("click", () => stopCall());
-el.profileForm.addEventListener("input", () => {
+function markProfileDirty() {
   if (state.renderingProfile) return;
   state.profileDirty = true;
   el.profileMessage.textContent = "Unsaved changes";
-});
+}
+
+el.profileForm.addEventListener("input", markProfileDirty);
+el.profileForm.addEventListener("change", markProfileDirty);
 el.profileForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
