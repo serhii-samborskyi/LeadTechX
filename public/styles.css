@@ -499,18 +499,30 @@ body {
 }
 
 .fast-profile-grid > label {
+  position: relative;
   min-width: 0;
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: #f9fbfa;
+  cursor: text;
   transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.fast-profile-grid > label:hover {
+  border-color: rgba(76, 171, 131, 0.55);
+  background: #fff;
+  box-shadow: 0 10px 22px rgba(27, 66, 51, 0.08);
 }
 
 .fast-profile-grid > label:focus-within {
   border-color: var(--accent);
   background: #fff;
   box-shadow: 0 0 0 3px rgba(76, 171, 131, 0.14);
+}
+
+.fast-profile-grid > label:has(select) {
+  cursor: pointer;
 }
 
 .fast-profile-grid > label.compact {
@@ -522,11 +534,28 @@ body {
 }
 
 .fast-profile-grid span {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.fast-profile-grid span svg {
+  width: 15px;
+  height: 15px;
+  color: var(--accent-dark);
+  opacity: 0.48;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.fast-profile-grid > label:hover span svg,
+.fast-profile-grid > label:focus-within span svg {
+  opacity: 1;
+  transform: translateY(-1px);
 }
 
 .fast-profile-grid input,
