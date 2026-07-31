@@ -24,6 +24,7 @@ const state = {
   crmSearchTimer: null,
   selectedMessageThreadKey: "",
   messageData: { messages: [], inboundMessages: [] },
+  adTracking: null,
   businessName: params.get("business_name") || "Business Name",
   website: params.get("website") || "",
 };
@@ -571,6 +572,76 @@ async function apiJson(url, options = {}) {
   const data = await response.json();
   if (!response.ok) throw new Error(businessDisplayText(data.error || "Request failed"));
   return data;
+}
+
+function initMetaPixel(pixelId) {
+  if (!pixelId) return;
+  if (!window.fbq) {
+    const fbq = function () {
+      fbq.callMethod ? fbq.callMethod.apply(fbq, arguments) : fbq.queue.push(arguments);
+    };
+    fbq.push = fbq;
+    fbq.loaded = true;
+    fbq.version = "2.0";
+    fbq.queue = [];
+    window.fbq = fbq;
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://connect.facebook.net/en_US/fbevents.js";
+    document.head.appendChild(script);
+  }
+  window.fbq("init", pixelId);
+}
+
+function initTikTokPixel(pixelId) {
+  if (!pixelId) return;
+  if (!window.ttq) {
+    const ttq = (window.ttq = []);
+    ttq.methods = ["page", "track", "identify", "instances", "debug", "on", "off", "once", "ready", "alias", "group", "enableCookie", "disableCookie"];
+    ttq.setAndDefer = function (target, method) {
+      target[method] = function () {
+        target.push([method].concat(Array.prototype.slice.call(arguments, 0)));
+      };
+    };
+    for (const method of ttq.methods) ttq.setAndDefer(ttq, method);
+    ttq.instance = function (name) {
+      const instance = ttq._i[name] || [];
+      for (const method of ttq.methods) ttq.setAndDefer(instance, method);
+      return instance;
+    };
+    ttq.load = function (id) {
+      ttq._i = ttq._i || {};
+      ttq._i[id] = [];
+      ttq._i[id]._u = "https://analytics.tiktok.com/i18n/pixel/events.js";
+      const script = document.createElement("script");
+      script.async = true;
+      script.src = `${ttq._i[id]._u}?sdkid=${id}&lib=ttq`;
+      document.head.appendChild(script);
+    };
+  }
+  window.ttq.load(pixelId);
+}
+
+async function loadAdTracking() {
+  try {
+    state.adTracking = await apiJson("/api/ad-platforms/config");
+    initMetaPixel(state.adTracking.meta?.pixelId);
+    initTikTokPixel(state.adTracking.tiktok?.pixelId);
+  } catch {
+    state.adTracking = null;
+  }
+}
+
+function trackBrowserAdEvent(eventKey, eventId, customData = {}) {
+  if (!state.adTracking || !eventId) return;
+  const meta = state.adTracking.meta?.events?.[eventKey];
+  if (meta?.enabled && meta.browser && state.adTracking.meta?.pixelId && window.fbq) {
+    window.fbq("track", meta.eventName, customData, { eventID: eventId });
+  }
+  const tiktok = state.adTracking.tiktok?.events?.[eventKey];
+  if (tiktok?.enabled && tiktok.browser && state.adTracking.tiktok?.pixelId && window.ttq) {
+    window.ttq.track(tiktok.eventName, customData, { event_id: eventId });
+  }
 }
 
 function setAdminStatus(text, isError = false) {
@@ -2353,6 +2424,12 @@ async function startBillingCheckout(checkoutType) {
     }),
   });
   if (!data.url) throw new Error("Stripe did not return a checkout URL");
+  trackBrowserAdEvent("checkout_started", data.trackingEventId, {
+    checkout_type: checkoutType,
+    credit_amount: Number(el.creditPackCredits.value || 0) || undefined,
+    subscription_plan_id: checkoutType === "subscription" ? Number(el.billingPlanSelect.value || 0) || undefined : undefined,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 150));
   window.location.href = data.url;
 }
 
@@ -2540,6 +2617,7 @@ async function initializePortal(user) {
   setTitle();
   el.authScreen.hidden = true;
   el.appShell.hidden = false;
+  await loadAdTracking();
   await loadSettings();
   await loadBusinessAdmin();
   await loadDemoData();

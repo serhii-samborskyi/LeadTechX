@@ -36,6 +36,8 @@ const state = {
   agentLevel: 0,
   visualizerLevel: 0,
   agentSpeakingUntil: 0,
+  adTracking: null,
+  adTrackedEvents: new Set(),
 };
 
 const el = Object.fromEntries(
@@ -92,6 +94,112 @@ async function api(url, options = {}) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Request failed");
   return data;
+}
+
+function randomEventSuffix() {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function adEventId(eventKey) {
+  return `rp_${eventKey}_${Date.now().toString(36)}_${randomEventSuffix()}`;
+}
+
+function initMetaPixel(pixelId) {
+  if (!pixelId) return;
+  if (!window.fbq) {
+    const fbq = function () {
+      fbq.callMethod ? fbq.callMethod.apply(fbq, arguments) : fbq.queue.push(arguments);
+    };
+    fbq.push = fbq;
+    fbq.loaded = true;
+    fbq.version = "2.0";
+    fbq.queue = [];
+    window.fbq = fbq;
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://connect.facebook.net/en_US/fbevents.js";
+    document.head.appendChild(script);
+  }
+  window.fbq("init", pixelId);
+}
+
+function initTikTokPixel(pixelId) {
+  if (!pixelId) return;
+  if (!window.ttq) {
+    const ttq = (window.ttq = []);
+    ttq.methods = ["page", "track", "identify", "instances", "debug", "on", "off", "once", "ready", "alias", "group", "enableCookie", "disableCookie"];
+    ttq.setAndDefer = function (target, method) {
+      target[method] = function () {
+        target.push([method].concat(Array.prototype.slice.call(arguments, 0)));
+      };
+    };
+    for (const method of ttq.methods) ttq.setAndDefer(ttq, method);
+    ttq.instance = function (name) {
+      const instance = ttq._i[name] || [];
+      for (const method of ttq.methods) ttq.setAndDefer(instance, method);
+      return instance;
+    };
+    ttq.load = function (id) {
+      ttq._i = ttq._i || {};
+      ttq._i[id] = [];
+      ttq._i[id]._u = "https://analytics.tiktok.com/i18n/pixel/events.js";
+      ttq._t = ttq._t || {};
+      ttq._t[id] = +new Date();
+      ttq._o = ttq._o || {};
+      ttq._o[id] = {};
+      const script = document.createElement("script");
+      script.async = true;
+      script.src = `${ttq._i[id]._u}?sdkid=${id}&lib=ttq`;
+      document.head.appendChild(script);
+    };
+  }
+  window.ttq.load(pixelId);
+}
+
+async function loadAdTracking() {
+  try {
+    state.adTracking = await api("/api/ad-platforms/config");
+    initMetaPixel(state.adTracking.meta?.pixelId);
+    initTikTokPixel(state.adTracking.tiktok?.pixelId);
+  } catch {
+    state.adTracking = null;
+  }
+}
+
+function platformEventConfig(platform, eventKey) {
+  return state.adTracking?.[platform]?.events?.[eventKey] || null;
+}
+
+async function trackAdEvent(eventKey, customData = {}, userData = {}) {
+  if (!state.adTracking || state.adTrackedEvents.has(eventKey)) return;
+  const eventId = adEventId(eventKey);
+  const meta = platformEventConfig("meta", eventKey);
+  const tiktok = platformEventConfig("tiktok", eventKey);
+  if (meta?.enabled && meta.browser && state.adTracking.meta?.pixelId && window.fbq) {
+    window.fbq("track", meta.eventName, customData, { eventID: eventId });
+  }
+  if (tiktok?.enabled && tiktok.browser && state.adTracking.tiktok?.pixelId && window.ttq) {
+    window.ttq.track(tiktok.eventName, customData, { event_id: eventId });
+  }
+  state.adTrackedEvents.add(eventKey);
+  try {
+    await fetch("/api/ad-platforms/track", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        eventKey,
+        eventId,
+        sourceUrl: location.href,
+        referrer: document.referrer,
+        customData,
+        userData,
+      }),
+    });
+  } catch {
+    // Tracking should never block the demo.
+  }
 }
 
 function showError(message) {
@@ -562,6 +670,8 @@ function drawVisualizer() {
 }
 
 async function initialize() {
+  await loadAdTracking();
+  trackAdEvent("fastagent_page_visit", { page_type: "fastagent" });
   if (!businessName && !state.accessToken) {
     el.loadingScreen.hidden = true;
     el.entryScreen.hidden = false;
@@ -571,6 +681,7 @@ async function initialize() {
   }
   try {
     let data;
+    let createdAgent = false;
     if (state.accessToken) {
       try {
         data = await api(`/api/onboarding/fast-agent?token=${encodeURIComponent(state.accessToken)}`);
@@ -588,11 +699,23 @@ async function initialize() {
         body: JSON.stringify({ businessName, website, placeId }),
       });
       state.accessToken = data.accessToken;
+      createdAgent = true;
     }
     if (storageKey && state.accessToken) {
       localStorage.setItem(storageKey, state.accessToken);
     }
     renderAgent(data);
+    if (createdAgent) {
+      const customData = {
+        content_name: data.profile?.businessName || businessName,
+        business_profile_id: data.profile?.id,
+        website: data.profile?.website || website || undefined,
+        trial_credits: data.profile?.creditBalance,
+      };
+      const userData = data.profile?.id ? { externalId: `business:${data.profile.id}` } : {};
+      trackAdEvent("fastagent_agent_built", customData, userData);
+      trackAdEvent("trial_started", customData, userData);
+    }
   } catch (error) {
     showError(error.message);
   }

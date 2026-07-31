@@ -42,6 +42,12 @@ const el = {
   stripeCreditPackCredits: document.querySelector("#stripeCreditPackCredits"),
   stripeWebhookUrl: document.querySelector("#stripeWebhookUrl"),
   copyStripeWebhookUrl: document.querySelector("#copyStripeWebhookUrl"),
+  metaPixelId: document.querySelector("#metaPixelId"),
+  metaAccessToken: document.querySelector("#metaAccessToken"),
+  metaTestEventCode: document.querySelector("#metaTestEventCode"),
+  tiktokPixelId: document.querySelector("#tiktokPixelId"),
+  tiktokAccessToken: document.querySelector("#tiktokAccessToken"),
+  adEventRows: document.querySelector("#adEventRows"),
   blueBubblesWebhookUrl: document.querySelector("#blueBubblesWebhookUrl"),
   copyBlueBubblesWebhookUrl: document.querySelector("#copyBlueBubblesWebhookUrl"),
   planForm: document.querySelector("#planForm"),
@@ -132,6 +138,8 @@ let businesses = [];
 let subscriptionPlans = [];
 let savedBlueBubblesWebhookPassword = "";
 let modelRateLimits = [];
+let adEventDefinitions = [];
+let adEventConfig = {};
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -219,6 +227,104 @@ function renderModelRateLimits() {
   }
 }
 
+function adEventValue(key, platform, field, fallback = "") {
+  return adEventConfig?.[key]?.[platform]?.[field] ?? fallback;
+}
+
+function renderAdEventRows(definitions = [], config = {}) {
+  adEventDefinitions = definitions;
+  adEventConfig = config || {};
+  el.adEventRows.innerHTML = "";
+  if (!definitions.length) {
+    el.adEventRows.textContent = "No ad events are configured.";
+    return;
+  }
+  const header = document.createElement("div");
+  header.className = "ad-event-row ad-event-header";
+  header.innerHTML = "<span>Event</span><span>Meta</span><span>TikTok</span>";
+  el.adEventRows.appendChild(header);
+  for (const definition of definitions) {
+    const row = document.createElement("div");
+    row.className = "ad-event-row";
+    row.dataset.adEventKey = definition.key;
+
+    const eventCell = document.createElement("div");
+    eventCell.className = "ad-event-name";
+    const title = document.createElement("strong");
+    title.textContent = definition.label;
+    const description = document.createElement("small");
+    description.textContent = definition.description || definition.key;
+    const enabledLabel = document.createElement("label");
+    enabledLabel.className = "check-label";
+    const enabled = document.createElement("input");
+    enabled.type = "checkbox";
+    enabled.dataset.adEnabled = "true";
+    enabled.checked = adEventConfig?.[definition.key]?.enabled !== false;
+    enabledLabel.append(enabled, " Enabled");
+    eventCell.append(title, description, enabledLabel);
+
+    const platformCell = (platform, fallbackEventName) => {
+      const cell = document.createElement("div");
+      cell.className = "ad-platform-event-cell";
+      const eventNameLabel = document.createElement("label");
+      eventNameLabel.textContent = "Event name";
+      const eventName = document.createElement("input");
+      eventName.dataset.adEventName = platform;
+      eventName.value = adEventValue(definition.key, platform, "eventName", fallbackEventName);
+      eventNameLabel.appendChild(eventName);
+
+      const toggles = document.createElement("div");
+      toggles.className = "ad-event-toggles";
+      const browserLabel = document.createElement("label");
+      browserLabel.className = "check-label";
+      const browser = document.createElement("input");
+      browser.type = "checkbox";
+      browser.dataset.adToggle = `${platform}-browser`;
+      browser.checked = Boolean(adEventValue(definition.key, platform, "browser", false));
+      browserLabel.append(browser, " Browser Pixel");
+
+      const capiLabel = document.createElement("label");
+      capiLabel.className = "check-label";
+      const capi = document.createElement("input");
+      capi.type = "checkbox";
+      capi.dataset.adToggle = `${platform}-capi`;
+      capi.checked = Boolean(adEventValue(definition.key, platform, "capi", false));
+      capiLabel.append(capi, platform === "meta" ? " CAPI" : " Events API");
+      toggles.append(browserLabel, capiLabel);
+      cell.append(eventNameLabel, toggles);
+      return cell;
+    };
+
+    row.append(
+      eventCell,
+      platformCell("meta", definition.metaEventName || "Lead"),
+      platformCell("tiktok", definition.tiktokEventName || "SubmitForm"),
+    );
+    el.adEventRows.appendChild(row);
+  }
+}
+
+function collectAdEventConfig() {
+  const config = {};
+  for (const row of el.adEventRows.querySelectorAll("[data-ad-event-key]")) {
+    const key = row.dataset.adEventKey;
+    config[key] = {
+      enabled: Boolean(row.querySelector("[data-ad-enabled]")?.checked),
+      meta: {
+        eventName: row.querySelector('[data-ad-event-name="meta"]')?.value.trim() || "Lead",
+        browser: Boolean(row.querySelector('[data-ad-toggle="meta-browser"]')?.checked),
+        capi: Boolean(row.querySelector('[data-ad-toggle="meta-capi"]')?.checked),
+      },
+      tiktok: {
+        eventName: row.querySelector('[data-ad-event-name="tiktok"]')?.value.trim() || "SubmitForm",
+        browser: Boolean(row.querySelector('[data-ad-toggle="tiktok-browser"]')?.checked),
+        capi: Boolean(row.querySelector('[data-ad-toggle="tiktok-capi"]')?.checked),
+      },
+    };
+  }
+  return config;
+}
+
 async function loadModelOptions() {
   el.modelOptionsStatus.textContent = "Loading model list...";
   try {
@@ -272,9 +378,13 @@ async function loadSystem() {
     "sentDmTemplateId",
     "sentDmTemplateName",
     "sentDmProfileId",
+    "metaPixelId",
+    "metaTestEventCode",
+    "tiktokPixelId",
   ]) {
     el[key].value = data.settings[key] ?? "";
   }
+  renderAdEventRows(data.adEvents?.definitions || [], data.adEvents?.config || {});
   el.smtpSecure.checked = Boolean(data.settings.smtpSecure);
   secretState("geminiApiKey", data.secrets.geminiApiKey);
   secretState("placesApiKey", data.secrets.placesApiKey);
@@ -285,6 +395,8 @@ async function loadSystem() {
   secretState("smtpPassword", data.secrets.smtpPassword);
   secretState("stripeSecretKey", data.secrets.stripeSecretKey);
   secretState("stripeWebhookSecret", data.secrets.stripeWebhookSecret);
+  secretState("metaAccessToken", data.secrets.metaAccessToken);
+  secretState("tiktokAccessToken", data.secrets.tiktokAccessToken);
   secretState("blueBubblesPassword", data.secrets.blueBubblesPassword);
   secretState("sentDmApiKey", data.secrets.sentDmApiKey);
   if (!el.emailTestRecipient.value && el.smtpFromEmail.value) el.emailTestRecipient.value = el.smtpFromEmail.value;
@@ -1355,6 +1467,12 @@ el.systemForm.addEventListener("submit", async (event) => {
         stripeSecretKey: el.stripeSecretKey.value,
         stripeWebhookSecret: el.stripeWebhookSecret.value,
         stripeCreditPackCredits: Number(el.stripeCreditPackCredits.value),
+        metaPixelId: el.metaPixelId.value,
+        metaAccessToken: el.metaAccessToken.value,
+        metaTestEventCode: el.metaTestEventCode.value,
+        tiktokPixelId: el.tiktokPixelId.value,
+        tiktokAccessToken: el.tiktokAccessToken.value,
+        adEventConfig: collectAdEventConfig(),
         recordingRetentionDays: Number(el.recordingRetentionDays.value),
         demoNumberCapacity: Number(el.demoNumberCapacity.value),
         demoCallerLimit: Number(el.demoCallerLimit.value),
@@ -1386,6 +1504,8 @@ el.systemForm.addEventListener("submit", async (event) => {
       el.smtpPassword,
       el.stripeSecretKey,
       el.stripeWebhookSecret,
+      el.metaAccessToken,
+      el.tiktokAccessToken,
       el.blueBubblesPassword,
       el.sentDmApiKey,
     ]) input.value = "";

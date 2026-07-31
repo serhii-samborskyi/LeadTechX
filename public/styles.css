@@ -1075,6 +1075,83 @@ body {
   margin: 0;
 }
 
+.ad-platform-settings {
+  display: grid;
+  gap: 14px;
+}
+
+.ad-platform-card {
+  background: #fbfdfc;
+}
+
+.ad-event-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.ad-event-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) repeat(2, minmax(220px, 1fr));
+  gap: 12px;
+  align-items: stretch;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fcfa;
+}
+
+.ad-event-header {
+  padding-block: 8px;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.ad-event-name,
+.ad-platform-event-cell {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.ad-event-name strong {
+  color: var(--ink);
+}
+
+.ad-event-name small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.ad-platform-event-cell label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.ad-platform-event-cell input[type="text"],
+.ad-platform-event-cell input:not([type]) {
+  min-height: 38px;
+}
+
+.ad-event-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.ad-event-toggles .check-label,
+.ad-event-name .check-label {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 .system-webhook-card {
   grid-column: 1 / -1;
   display: grid;
@@ -3276,6 +3353,14 @@ a.appointment-field-value {
   .system-subtabs button {
     justify-content: flex-start;
     min-width: 0;
+  }
+
+  .ad-event-row {
+    grid-template-columns: 1fr;
+  }
+
+  .ad-event-header {
+    display: none;
   }
 
   .plan-card {

@@ -318,7 +318,30 @@ model AppSettings {
   sentDmTemplateId        String   @default("")
   sentDmTemplateName      String   @default("")
   sentDmProfileId         String   @default("")
+  metaPixelId             String   @default("")
+  metaTestEventCode       String   @default("")
+  tiktokPixelId           String   @default("")
+  adEventConfig           Json?
   updatedAt               DateTime @updatedAt
+}
+
+model AdPlatformEvent {
+  id              Int      @id @default(autoincrement())
+  platform        String
+  eventKey        String
+  eventName       String
+  eventId         String
+  source          String   @default("server")
+  status          String   @default("pending")
+  httpStatus      Int?
+  requestPayload  Json?
+  responsePayload Json?
+  error           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([platform, eventId])
+  @@index([eventKey, platform, createdAt])
 }
 
 model User {

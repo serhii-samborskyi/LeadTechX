@@ -44,6 +44,62 @@ const FALLBACK_LIVE_MODELS = [
   { id: "models/gemini-3.1-flash-live-preview", label: "Gemini 3.1 Flash Live Preview" },
   { id: "models/gemini-2.5-flash-native-audio-preview-09-2025", label: "Gemini 2.5 Flash Native Audio Preview" },
 ];
+const AD_EVENT_DEFINITIONS = [
+  {
+    key: "fastagent_page_visit",
+    label: "Fast Agent page visit",
+    description: "Visitor opened the Fast Agent builder page.",
+    metaEventName: "PageView",
+    tiktokEventName: "ViewContent",
+    defaultBrowser: true,
+    defaultCapi: false,
+  },
+  {
+    key: "fastagent_agent_built",
+    label: "Agent built",
+    description: "Fast Agent researched a business and created a live trial receptionist.",
+    metaEventName: "Lead",
+    tiktokEventName: "SubmitForm",
+    defaultBrowser: true,
+    defaultCapi: true,
+  },
+  {
+    key: "trial_started",
+    label: "Trial started",
+    description: "A new trial profile/session was created.",
+    metaEventName: "StartTrial",
+    tiktokEventName: "StartTrial",
+    defaultBrowser: true,
+    defaultCapi: true,
+  },
+  {
+    key: "checkout_started",
+    label: "Checkout started",
+    description: "A business started Stripe checkout for a plan or credit top-up.",
+    metaEventName: "InitiateCheckout",
+    tiktokEventName: "InitiateCheckout",
+    defaultBrowser: true,
+    defaultCapi: true,
+  },
+  {
+    key: "paid_plan",
+    label: "Paid plan",
+    description: "A paid subscription checkout was completed.",
+    metaEventName: "Subscribe",
+    tiktokEventName: "Subscribe",
+    defaultBrowser: false,
+    defaultCapi: true,
+  },
+  {
+    key: "credit_topup",
+    label: "Credit top-up",
+    description: "A credit pack checkout was completed.",
+    metaEventName: "Purchase",
+    tiktokEventName: "CompletePayment",
+    defaultBrowser: false,
+    defaultCapi: true,
+  },
+];
 
 const prisma = new PrismaClient();
 const upload = multer({
@@ -432,6 +488,306 @@ async function stripeWebhookSecret() {
 function jsonSafe(value) {
   if (value === undefined) return null;
   return JSON.parse(JSON.stringify(value));
+}
+
+function defaultAdEventConfig() {
+  return Object.fromEntries(
+    AD_EVENT_DEFINITIONS.map((definition) => [
+      definition.key,
+      {
+        enabled: true,
+        meta: {
+          browser: Boolean(definition.defaultBrowser),
+          capi: Boolean(definition.defaultCapi),
+          eventName: definition.metaEventName,
+        },
+        tiktok: {
+          browser: Boolean(definition.defaultBrowser),
+          capi: Boolean(definition.defaultCapi),
+          eventName: definition.tiktokEventName,
+        },
+      },
+    ]),
+  );
+}
+
+function normalizeAdEventConfig(rawConfig = {}) {
+  const raw = rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig) ? rawConfig : {};
+  const defaults = defaultAdEventConfig();
+  return Object.fromEntries(
+    AD_EVENT_DEFINITIONS.map((definition) => {
+      const incoming = raw[definition.key] && typeof raw[definition.key] === "object" ? raw[definition.key] : {};
+      const incomingMeta = incoming.meta && typeof incoming.meta === "object" ? incoming.meta : {};
+      const incomingTikTok = incoming.tiktok && typeof incoming.tiktok === "object" ? incoming.tiktok : {};
+      const fallback = defaults[definition.key];
+      return [
+        definition.key,
+        {
+          enabled: incoming.enabled !== false,
+          meta: {
+            browser: typeof incomingMeta.browser === "boolean" ? incomingMeta.browser : fallback.meta.browser,
+            capi: typeof incomingMeta.capi === "boolean" ? incomingMeta.capi : fallback.meta.capi,
+            eventName: String(incomingMeta.eventName || fallback.meta.eventName).trim() || fallback.meta.eventName,
+          },
+          tiktok: {
+            browser: typeof incomingTikTok.browser === "boolean" ? incomingTikTok.browser : fallback.tiktok.browser,
+            capi: typeof incomingTikTok.capi === "boolean" ? incomingTikTok.capi : fallback.tiktok.capi,
+            eventName: String(incomingTikTok.eventName || fallback.tiktok.eventName).trim() || fallback.tiktok.eventName,
+          },
+        },
+      ];
+    }),
+  );
+}
+
+function publicAdTrackingConfig(settings) {
+  const events = normalizeAdEventConfig(settings?.adEventConfig);
+  return {
+    meta: {
+      pixelId: String(settings?.metaPixelId || "").trim(),
+      events: Object.fromEntries(
+        Object.entries(events).map(([key, config]) => [
+          key,
+          { enabled: config.enabled, browser: Boolean(config.meta.browser), eventName: config.meta.eventName },
+        ]),
+      ),
+    },
+    tiktok: {
+      pixelId: String(settings?.tiktokPixelId || "").trim(),
+      events: Object.fromEntries(
+        Object.entries(events).map(([key, config]) => [
+          key,
+          { enabled: config.enabled, browser: Boolean(config.tiktok.browser), eventName: config.tiktok.eventName },
+        ]),
+      ),
+    },
+    definitions: AD_EVENT_DEFINITIONS.map(({ key, label, description }) => ({ key, label, description })),
+  };
+}
+
+function adRequestIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "")
+    .split(",")
+    .map((value) => value.trim())
+    .find(Boolean);
+  return forwarded || req.ip || req.socket?.remoteAddress || "";
+}
+
+function sha256Value(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized ? crypto.createHash("sha256").update(normalized).digest("hex") : undefined;
+}
+
+function adCustomData(input = {}) {
+  const data = input && typeof input === "object" && !Array.isArray(input) ? { ...input } : {};
+  for (const key of Object.keys(data)) {
+    if (data[key] === undefined || data[key] === null || data[key] === "") delete data[key];
+  }
+  return data;
+}
+
+function adEventUrl(req, explicitUrl = "") {
+  const supplied = String(explicitUrl || "").trim();
+  if (/^https?:\/\//i.test(supplied)) return supplied;
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+  return `${protocol}://${req.get("host")}${req.originalUrl || req.url || ""}`;
+}
+
+function emptyAdRequest() {
+  return {
+    headers: {},
+    body: {},
+    ip: "",
+    socket: {},
+    protocol: "https",
+    originalUrl: "/",
+    url: "/",
+    get: () => "",
+  };
+}
+
+async function logAdPlatformEvent({ platform, eventKey, eventName, eventId, source, status, httpStatus = null, requestPayload = null, responsePayload = null, error = "" }) {
+  return prisma.adPlatformEvent.upsert({
+    where: { platform_eventId: { platform, eventId } },
+    create: {
+      platform,
+      eventKey,
+      eventName,
+      eventId,
+      source,
+      status,
+      httpStatus,
+      requestPayload: jsonSafe(requestPayload),
+      responsePayload: jsonSafe(responsePayload),
+      error: error || null,
+    },
+    update: {
+      eventKey,
+      eventName,
+      source,
+      status,
+      httpStatus,
+      requestPayload: requestPayload === null ? undefined : jsonSafe(requestPayload),
+      responsePayload: responsePayload === null ? undefined : jsonSafe(responsePayload),
+      error: error || null,
+    },
+  });
+}
+
+async function sendMetaCapiEvent({ settings, accessToken, eventKey, eventName, eventId, req, sourceUrl, customData = {}, userData = {}, source = "server" }) {
+  const pixelId = String(settings.metaPixelId || "").trim();
+  if (!pixelId || !accessToken) return { skipped: true, reason: "Meta Pixel ID or access token is missing" };
+  const eventSourceUrl = adEventUrl(req, sourceUrl);
+  const payload = {
+    data: [
+      {
+        event_name: eventName,
+        event_time: Math.floor(Date.now() / 1000),
+        event_id: eventId,
+        action_source: "website",
+        event_source_url: eventSourceUrl,
+        user_data: {
+          client_ip_address: adRequestIp(req),
+          client_user_agent: String(req.headers["user-agent"] || ""),
+          fbp: cookieValue(req, "_fbp") || undefined,
+          fbc: cookieValue(req, "_fbc") || undefined,
+          em: userData.email ? [sha256Value(userData.email)] : undefined,
+          ph: userData.phone ? [sha256Value(String(userData.phone).replace(/\D/g, ""))] : undefined,
+          external_id: userData.externalId ? [sha256Value(userData.externalId)] : undefined,
+        },
+        custom_data: adCustomData(customData),
+      },
+    ],
+  };
+  if (settings.metaTestEventCode) payload.test_event_code = String(settings.metaTestEventCode).trim();
+  payload.data[0].user_data = adCustomData(payload.data[0].user_data);
+  const url = new URL(`https://graph.facebook.com/v25.0/${encodeURIComponent(pixelId)}/events`);
+  url.searchParams.set("access_token", accessToken);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json().catch(() => ({}));
+  await logAdPlatformEvent({
+    platform: "meta",
+    eventKey,
+    eventName,
+    eventId,
+    source,
+    status: response.ok ? "sent" : "failed",
+    httpStatus: response.status,
+    requestPayload: payload,
+    responsePayload: body,
+    error: response.ok ? "" : body.error?.message || `Meta CAPI failed with HTTP ${response.status}`,
+  });
+  if (!response.ok) throw new Error(body.error?.message || `Meta CAPI failed with HTTP ${response.status}`);
+  return { ok: true, response: body };
+}
+
+async function sendTikTokEventsApiEvent({ settings, accessToken, eventKey, eventName, eventId, req, sourceUrl, customData = {}, userData = {}, source = "server" }) {
+  const pixelCode = String(settings.tiktokPixelId || "").trim();
+  if (!pixelCode || !accessToken) return { skipped: true, reason: "TikTok Pixel ID or access token is missing" };
+  const eventSourceUrl = adEventUrl(req, sourceUrl);
+  const payload = {
+    event_source: "web",
+    event_source_id: pixelCode,
+    data: [
+      {
+        event: eventName,
+        event_time: Math.floor(Date.now() / 1000),
+        event_id: eventId,
+        page: {
+          url: eventSourceUrl,
+          referrer: String(req.body?.referrer || req.headers.referer || ""),
+        },
+        user: {
+          ip: adRequestIp(req),
+          user_agent: String(req.headers["user-agent"] || ""),
+          email: userData.email ? sha256Value(userData.email) : undefined,
+          phone: userData.phone ? sha256Value(String(userData.phone).replace(/\D/g, "")) : undefined,
+          external_id: userData.externalId ? sha256Value(userData.externalId) : undefined,
+          ttp: cookieValue(req, "_ttp") || undefined,
+        },
+        properties: adCustomData(customData),
+      },
+    ],
+  };
+  payload.data[0].user = adCustomData(payload.data[0].user);
+  const response = await fetch("https://business-api.tiktok.com/open_api/v1.3/event/track/", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Access-Token": accessToken },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json().catch(() => ({}));
+  const ok = response.ok && (body.code === 0 || body.code === "0" || body.message === "OK");
+  await logAdPlatformEvent({
+    platform: "tiktok",
+    eventKey,
+    eventName,
+    eventId,
+    source,
+    status: ok ? "sent" : "failed",
+    httpStatus: response.status,
+    requestPayload: payload,
+    responsePayload: body,
+    error: ok ? "" : body.message || `TikTok Events API failed with HTTP ${response.status}`,
+  });
+  if (!ok) throw new Error(body.message || `TikTok Events API failed with HTTP ${response.status}`);
+  return { ok: true, response: body };
+}
+
+async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", customData = {}, userData = {}, source = "server" }) {
+  const cleanEventKey = String(eventKey || "").trim();
+  const definition = AD_EVENT_DEFINITIONS.find((event) => event.key === cleanEventKey);
+  if (!definition) throw new Error("Unknown ad tracking event");
+  const eventConfig = normalizeAdEventConfig(settings.adEventConfig)[definition.key];
+  if (!eventConfig?.enabled) return { ok: true, skipped: true, reason: "Event disabled", eventId };
+  const cleanEventId =
+    String(eventId || "").trim() ||
+    `rp_${definition.key}_${Date.now().toString(36)}_${crypto.randomBytes(8).toString("hex")}`;
+  const [metaToken, tiktokToken] = await Promise.all([
+    systemSecret("meta_capi_access_token", "META_CAPI_ACCESS_TOKEN").catch(() => ""),
+    systemSecret("tiktok_events_api_access_token", "TIKTOK_EVENTS_API_ACCESS_TOKEN").catch(() => ""),
+  ]);
+  const results = {};
+  if (eventConfig.meta.capi && settings.metaPixelId) {
+    try {
+      results.meta = await sendMetaCapiEvent({
+        settings,
+        accessToken: metaToken,
+        eventKey: definition.key,
+        eventName: eventConfig.meta.eventName,
+        eventId: cleanEventId,
+        req,
+        sourceUrl,
+        customData,
+        userData,
+        source,
+      });
+    } catch (error) {
+      results.meta = { ok: false, error: error.message };
+    }
+  }
+  if (eventConfig.tiktok.capi && settings.tiktokPixelId) {
+    try {
+      results.tiktok = await sendTikTokEventsApiEvent({
+        settings,
+        accessToken: tiktokToken,
+        eventKey: definition.key,
+        eventName: eventConfig.tiktok.eventName,
+        eventId: cleanEventId,
+        req,
+        sourceUrl,
+        customData,
+        userData,
+        source,
+      });
+    } catch (error) {
+      results.tiktok = { ok: false, error: error.message };
+    }
+  }
+  return { ok: true, eventId: cleanEventId, results };
 }
 
 function stripeId(value) {
@@ -2623,6 +2979,7 @@ async function getSettings() {
       agentName: "Alex",
       platformBusinessRules: DEFAULT_PLATFORM_BUSINESS_RULES,
       onboardingInstructions: DEFAULT_ONBOARDING_INSTRUCTIONS,
+      adEventConfig: defaultAdEventConfig(),
     },
     update: {},
   });
@@ -5610,7 +5967,7 @@ app.post("/webhooks/stripe", async (req, res) => {
     });
 
     if (["checkout.session.completed", "checkout.session.async_payment_succeeded"].includes(event.type)) {
-      await processStripeCheckoutSession(event.data.object);
+      await processStripeCheckoutSession(event.data.object, req);
     } else if (["customer.subscription.updated", "customer.subscription.deleted"].includes(event.type)) {
       await processStripeSubscription(event.data.object);
     } else if (["invoice.paid", "invoice.payment_succeeded"].includes(event.type)) {
@@ -5663,6 +6020,36 @@ async function handleBlueBubblesWebhook(req, res) {
 
 app.post("/webhooks/bluebubbles", handleBlueBubblesWebhook);
 app.post("/bluebubbles-webhook", handleBlueBubblesWebhook);
+
+app.get("/api/ad-platforms/config", async (_req, res) => {
+  try {
+    const settings = await getSettings();
+    res.json(publicAdTrackingConfig(settings));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/ad-platforms/track", async (req, res) => {
+  try {
+    const settings = await getSettings();
+    const customData = req.body?.customData && typeof req.body.customData === "object" ? req.body.customData : {};
+    const userData = req.body?.userData && typeof req.body.userData === "object" ? req.body.userData : {};
+    const result = await trackAdEvent({
+      req,
+      settings,
+      eventKey: req.body?.eventKey,
+      eventId: String(req.body?.eventId || "").trim().slice(0, 160),
+      sourceUrl: req.body?.sourceUrl,
+      customData,
+      userData,
+      source: "browser_bridge",
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
 
 async function publicAppointmentContext(token) {
   const payload = verifyAppointmentActionToken(token);
@@ -5800,6 +6187,12 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
       blueBubblesPassword: secretState("bluebubbles_password", "BLUEBUBBLES_PASSWORD"),
       stripeSecretKey: secretState("stripe_secret_key", "STRIPE_SECRET_KEY"),
       stripeWebhookSecret: secretState("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
+      metaAccessToken: secretState("meta_capi_access_token", "META_CAPI_ACCESS_TOKEN"),
+      tiktokAccessToken: secretState("tiktok_events_api_access_token", "TIKTOK_EVENTS_API_ACCESS_TOKEN"),
+    },
+    adEvents: {
+      definitions: AD_EVENT_DEFINITIONS,
+      config: normalizeAdEventConfig(settings.adEventConfig),
     },
     publicBaseUrl: settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "",
     webhooks: {
@@ -5972,6 +6365,10 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         sentDmTemplateId: String(req.body.sentDmTemplateId || "").trim(),
         sentDmTemplateName: String(req.body.sentDmTemplateName || "").trim(),
         sentDmProfileId: String(req.body.sentDmProfileId || "").trim(),
+        metaPixelId: String(req.body.metaPixelId || "").trim(),
+        metaTestEventCode: String(req.body.metaTestEventCode || "").trim(),
+        tiktokPixelId: String(req.body.tiktokPixelId || "").trim(),
+        adEventConfig: normalizeAdEventConfig(req.body.adEventConfig),
       },
       update: {
         researchModel: req.body.researchModel || undefined,
@@ -6029,6 +6426,11 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         sentDmTemplateName:
           typeof req.body.sentDmTemplateName === "string" ? req.body.sentDmTemplateName.trim() : undefined,
         sentDmProfileId: typeof req.body.sentDmProfileId === "string" ? req.body.sentDmProfileId.trim() : undefined,
+        metaPixelId: typeof req.body.metaPixelId === "string" ? req.body.metaPixelId.trim() : undefined,
+        metaTestEventCode:
+          typeof req.body.metaTestEventCode === "string" ? req.body.metaTestEventCode.trim() : undefined,
+        tiktokPixelId: typeof req.body.tiktokPixelId === "string" ? req.body.tiktokPixelId.trim() : undefined,
+        adEventConfig: req.body.adEventConfig ? normalizeAdEventConfig(req.body.adEventConfig) : undefined,
       },
     });
     await Promise.all([
@@ -6043,6 +6445,8 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
       saveSystemSecret("bluebubbles_password", req.body.blueBubblesPassword),
       saveSystemSecret("stripe_secret_key", req.body.stripeSecretKey),
       saveSystemSecret("stripe_webhook_secret", req.body.stripeWebhookSecret),
+      saveSystemSecret("meta_capi_access_token", req.body.metaAccessToken),
+      saveSystemSecret("tiktok_events_api_access_token", req.body.tiktokAccessToken),
     ]);
     res.json({ ok: true, settings });
   } catch (error) {
@@ -7346,12 +7750,32 @@ async function completeStripeSubscriptionCheckout(session) {
   });
 }
 
-async function processStripeCheckoutSession(session) {
+async function processStripeCheckoutSession(session, req = null) {
   const checkoutType = session.metadata?.checkoutType || (session.mode === "subscription" ? "subscription" : "credits");
-  if (checkoutType === "subscription" || session.mode === "subscription") {
-    return completeStripeSubscriptionCheckout(session);
-  }
-  return completeStripeCreditCheckout(session);
+  const completed =
+    checkoutType === "subscription" || session.mode === "subscription"
+      ? await completeStripeSubscriptionCheckout(session)
+      : await completeStripeCreditCheckout(session);
+  const profileId = Number(completed?.businessProfileId || session.metadata?.businessProfileId || 0);
+  const settings = await getSettings();
+  const eventKey = checkoutType === "subscription" || session.mode === "subscription" ? "paid_plan" : "credit_topup";
+  trackAdEvent({
+    req: req || emptyAdRequest(),
+    settings,
+    eventKey,
+    eventId: `stripe_${eventKey}_${session.id}`,
+    sourceUrl: session.success_url || "",
+    customData: {
+      checkout_type: checkoutType,
+      value: session.amount_total ? Number(session.amount_total) / 100 : undefined,
+      currency: session.currency || "usd",
+      content_name: session.metadata?.subscriptionPlanName || (eventKey === "paid_plan" ? "Paid plan" : "Credit top-up"),
+      credit_amount: completed?.creditAmount || Number(session.metadata?.creditAmount || 0) || undefined,
+    },
+    userData: profileId ? { externalId: `business:${profileId}` } : {},
+    source: "stripe_webhook",
+  }).catch((error) => console.warn(`[ads] ${eventKey} tracking skipped: ${error.message}`));
+  return completed;
 }
 
 async function processStripeSubscription(subscription) {
@@ -9107,7 +9531,24 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
         metadata: jsonSafe(metadata),
       },
     });
-    res.status(201).json({ url: session.url, sessionId: session.id });
+    const trackingEventId = `stripe_checkout_started_${session.id}`;
+    trackAdEvent({
+      req,
+      settings,
+      eventKey: "checkout_started",
+      eventId: trackingEventId,
+      sourceUrl: successUrl,
+      customData: {
+        checkout_type: checkoutType,
+        value: session.amount_total ? Number(session.amount_total) / 100 : undefined,
+        currency: session.currency || "usd",
+        content_name: selectedPlan?.name || "Credit top-up",
+        credit_amount: creditAmount,
+      },
+      userData: req.user?.email ? { email: req.user.email, externalId: `business:${profile.id}` } : { externalId: `business:${profile.id}` },
+      source: "server_checkout",
+    }).catch((error) => console.warn(`[ads] checkout_started tracking skipped: ${error.message}`));
+    res.status(201).json({ url: session.url, sessionId: session.id, trackingEventId });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }

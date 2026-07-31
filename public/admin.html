@@ -51,6 +51,7 @@
           <button data-system-tab="credentials" type="button"><i data-lucide="key-round"></i> Credentials</button>
           <button data-system-tab="credits" type="button"><i data-lucide="coins"></i> Credits</button>
           <button data-system-tab="messaging" type="button"><i data-lucide="message-square"></i> Messaging</button>
+          <button data-system-tab="ad-platforms" type="button"><i data-lucide="megaphone"></i> Ad platforms</button>
           <button data-system-tab="billing" type="button"><i data-lucide="credit-card"></i> Stripe</button>
           <button data-system-tab="email" type="button"><i data-lucide="mail"></i> Email</button>
           <button data-system-tab="plans" type="button"><i data-lucide="badge-dollar-sign"></i> Plans</button>
@@ -179,6 +180,39 @@
                   <button id="checkSentDm" type="button"><i data-lucide="list-checks"></i> Check Sent.dm</button>
                   <div id="sentDmDiagnostics" class="provider-diagnostic-output"></div>
                 </div>
+              </div>
+            </div>
+          </section>
+          <section class="system-panel" data-system-panel="ad-platforms">
+            <div class="system-panel-heading"><h3>Ad platforms</h3><p>Meta and TikTok browser pixels plus server-side conversion API tracking with event_id deduplication.</p></div>
+            <div class="ad-platform-settings">
+              <div class="messaging-card ad-platform-card">
+                <div class="messaging-card-heading">
+                  <h4>Meta</h4>
+                  <p>Use Meta Pixel in the browser and Conversions API on the server.</p>
+                </div>
+                <div class="form-grid secret-grid messaging-card-grid">
+                  <label>Pixel ID<input id="metaPixelId" placeholder="123456789012345" /></label>
+                  <label>Conversions API access token<input id="metaAccessToken" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="metaAccessTokenState"></small></label>
+                  <label>Test event code<input id="metaTestEventCode" placeholder="TEST12345" /><small>Optional. Used while testing events in Meta Events Manager.</small></label>
+                </div>
+              </div>
+              <div class="messaging-card ad-platform-card">
+                <div class="messaging-card-heading">
+                  <h4>TikTok</h4>
+                  <p>Use TikTok Pixel in the browser and Events API on the server.</p>
+                </div>
+                <div class="form-grid secret-grid messaging-card-grid">
+                  <label>Pixel ID<input id="tiktokPixelId" placeholder="TikTok pixel code" /></label>
+                  <label>Events API access token<input id="tiktokAccessToken" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="tiktokAccessTokenState"></small></label>
+                </div>
+              </div>
+              <div class="messaging-card ad-event-card">
+                <div class="messaging-card-heading">
+                  <h4>Tracked events</h4>
+                  <p>Configure every funnel event separately. Browser Pixel and CAPI use the same event_id for deduplication.</p>
+                </div>
+                <div id="adEventRows" class="ad-event-rows"></div>
               </div>
             </div>
           </section>
