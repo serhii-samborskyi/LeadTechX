@@ -459,13 +459,39 @@ function decryptSecret(value) {
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
 }
 
+function secretDecryptMessage(secretKey, error) {
+  const message = String(error?.message || error || "unknown error");
+  if (/authenticate|unsupported state|initialization vector|bad decrypt/i.test(message)) {
+    return `Saved secret ${secretKey} cannot be decrypted. Re-save it in Admin > System, or set APP_ENCRYPTION_KEY to the value used when the secret was saved.`;
+  }
+  return message;
+}
+
 async function systemSecret(secretKey, envKey) {
   const stored = await withPrismaRetry(
     `systemSecret:${secretKey}`,
     () => prisma.systemSecret.findUnique({ where: { secretKey } }),
     3,
   );
-  return stored ? decryptSecret(stored.encrypted) : process.env[envKey] || "";
+  if (!stored) return process.env[envKey] || "";
+  try {
+    return decryptSecret(stored.encrypted);
+  } catch (error) {
+    if (process.env[envKey]) {
+      console.warn(`[secret] ${secretDecryptMessage(secretKey, error)} Falling back to ${envKey}.`);
+      return process.env[envKey];
+    }
+    throw new Error(secretDecryptMessage(secretKey, error));
+  }
+}
+
+async function systemSecretConfigured(secretKey, envKey) {
+  try {
+    const value = await systemSecret(secretKey, envKey);
+    return { configured: Boolean(value), ok: true, detail: value ? "configured" : "missing" };
+  } catch (error) {
+    return { configured: false, ok: false, detail: error.message };
+  }
 }
 
 async function saveSystemSecret(secretKey, value) {
@@ -9923,14 +9949,14 @@ async function businessHealth(profile) {
     activeNumber,
   ] = await Promise.all([
     databaseHealth(),
-    systemSecret("gemini_api_key", "GEMINI_API_KEY").then(Boolean),
-    systemSecret("telnyx_api_key", "TELNYX_API_KEY").then(Boolean),
-    systemSecret("telnyx_public_key", "TELNYX_PUBLIC_KEY").then(Boolean),
-    systemSecret("telnyx_connection_id", "TELNYX_CONNECTION_ID").then(Boolean),
-    systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD").then(Boolean),
-    systemSecret("sentdm_api_key", "SENTDM_API_KEY").then(Boolean),
-    systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
-    stripeWebhookSecret().then(Boolean),
+    systemSecretConfigured("gemini_api_key", "GEMINI_API_KEY"),
+    systemSecretConfigured("telnyx_api_key", "TELNYX_API_KEY"),
+    systemSecretConfigured("telnyx_public_key", "TELNYX_PUBLIC_KEY"),
+    systemSecretConfigured("telnyx_connection_id", "TELNYX_CONNECTION_ID"),
+    systemSecretConfigured("bluebubbles_password", "BLUEBUBBLES_PASSWORD"),
+    systemSecretConfigured("sentdm_api_key", "SENTDM_API_KEY"),
+    systemSecretConfigured("stripe_secret_key", "STRIPE_SECRET_KEY"),
+    systemSecretConfigured("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
     prisma.voiceCall.findMany({
       where: { businessProfileId: profile.id },
       orderBy: { startedAt: "desc" },
@@ -9950,30 +9976,30 @@ async function businessHealth(profile) {
     prisma.subscriptionPlan.count({ where: { active: true } }),
     prisma.voiceNumber.findFirst({ where: { businessProfileId: profile.id, status: "active" }, select: { phoneNumber: true } }),
   ]);
-  const telnyxConfigured = telnyxKey && telnyxPublicKey && connectionId;
-  const blueBubblesConfigured = Boolean(settings.blueBubblesBaseUrl && messagePassword);
-  const sentDmConfigured = Boolean(sentDmKey && (settings.sentDmTemplateId || settings.sentDmTemplateName));
-  const stripeConfigured = Boolean(stripeKey && stripeWebhook);
+  const telnyxConfigured = telnyxKey.configured && telnyxPublicKey.configured && connectionId.configured;
+  const blueBubblesConfigured = Boolean(settings.blueBubblesBaseUrl && messagePassword.configured);
+  const sentDmConfigured = Boolean(sentDmKey.configured && (settings.sentDmTemplateId || settings.sentDmTemplateName));
+  const stripeConfigured = Boolean(stripeKey.configured && stripeWebhook.configured);
   const checks = {
     database: db,
-    gemini: componentStatus(geminiKey, geminiKey ? "AI provider API key is configured" : "AI provider API key is missing"),
+    gemini: componentStatus(geminiKey.configured, geminiKey.configured ? "AI provider API key is configured" : geminiKey.detail || "AI provider API key is missing"),
     telnyx: {
       ...componentStatus(telnyxConfigured, telnyxConfigured ? "Telnyx API key, public key, and connection ID are configured" : "Telnyx configuration is incomplete"),
       missing: [
-        !telnyxKey ? "TELNYX_API_KEY" : null,
-        !telnyxPublicKey ? "TELNYX_PUBLIC_KEY" : null,
-        !connectionId ? "TELNYX_CONNECTION_ID" : null,
+        !telnyxKey.configured ? "TELNYX_API_KEY" : null,
+        !telnyxPublicKey.configured ? "TELNYX_PUBLIC_KEY" : null,
+        !connectionId.configured ? "TELNYX_CONNECTION_ID" : null,
       ].filter(Boolean),
     },
     publicUrl,
     webhooks: webhookReadiness({ profile, publicUrl }),
     messaging: {
       bluebubbles: {
-        ...componentStatus(blueBubblesConfigured, blueBubblesConfigured ? "BlueBubbles URL and password are configured" : "BlueBubbles URL or password is missing"),
+        ...componentStatus(blueBubblesConfigured, blueBubblesConfigured ? "BlueBubbles URL and password are configured" : messagePassword.ok ? "BlueBubbles URL or password is missing" : messagePassword.detail),
         baseUrl: settings.blueBubblesBaseUrl || "",
       },
       sentdm: {
-        ...componentStatus(sentDmConfigured, sentDmConfigured ? "Sent.dm API key and template are configured" : "Sent.dm API key or approved template is missing"),
+        ...componentStatus(sentDmConfigured, sentDmConfigured ? "Sent.dm API key and template are configured" : sentDmKey.ok ? "Sent.dm API key or approved template is missing" : sentDmKey.detail),
         template: settings.sentDmTemplateId || settings.sentDmTemplateName || "",
       },
     },
@@ -9985,11 +10011,15 @@ async function businessHealth(profile) {
             ? "Stripe keys, webhook, and active plans are configured"
             : stripeConfigured
               ? "Stripe is configured, but no active subscription plan exists"
-              : "Stripe key or webhook secret is missing",
+              : !stripeKey.ok
+                ? stripeKey.detail
+                : !stripeWebhook.ok
+                  ? stripeWebhook.detail
+                  : "Stripe key or webhook secret is missing",
         ),
         missing: [
-          !stripeKey ? "STRIPE_SECRET_KEY" : null,
-          !stripeWebhook ? "STRIPE_WEBHOOK_SECRET" : null,
+          !stripeKey.configured ? "STRIPE_SECRET_KEY" : null,
+          !stripeWebhook.configured ? "STRIPE_WEBHOOK_SECRET" : null,
           activePlanCount <= 0 ? "active subscription plan" : null,
         ].filter(Boolean),
         activePlanCount,
@@ -10006,7 +10036,7 @@ async function businessHealth(profile) {
   checks.sellableMvp = sellableMvpReadiness({ checks, profile, activeNumber, settings });
   return {
     db: db.status,
-    gemini: geminiKey ? "configured" : "missing",
+    gemini: geminiKey.configured ? "configured" : "missing",
     telnyx: telnyxConfigured ? "configured" : "missing",
     publicBaseUrl: publicUrl.url,
     messaging: {
@@ -10051,31 +10081,31 @@ app.get("/api/admin/health", requireAuth, requireAdmin, async (_req, res) => {
     ] =
       await Promise.all([
         databaseHealth(),
-        systemSecret("gemini_api_key", "GEMINI_API_KEY").then(Boolean),
-        systemSecret("telnyx_api_key", "TELNYX_API_KEY").then(Boolean),
-        systemSecret("telnyx_public_key", "TELNYX_PUBLIC_KEY").then(Boolean),
-        systemSecret("telnyx_connection_id", "TELNYX_CONNECTION_ID").then(Boolean),
-        systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD").then(Boolean),
-        systemSecret("sentdm_api_key", "SENTDM_API_KEY").then(Boolean),
-        systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
-        stripeWebhookSecret().then(Boolean),
+        systemSecretConfigured("gemini_api_key", "GEMINI_API_KEY"),
+        systemSecretConfigured("telnyx_api_key", "TELNYX_API_KEY"),
+        systemSecretConfigured("telnyx_public_key", "TELNYX_PUBLIC_KEY"),
+        systemSecretConfigured("telnyx_connection_id", "TELNYX_CONNECTION_ID"),
+        systemSecretConfigured("bluebubbles_password", "BLUEBUBBLES_PASSWORD"),
+        systemSecretConfigured("sentdm_api_key", "SENTDM_API_KEY"),
+        systemSecretConfigured("stripe_secret_key", "STRIPE_SECRET_KEY"),
+        systemSecretConfigured("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
         prisma.subscriptionPlan.count({ where: { active: true } }),
         recentCallIssueSummary(),
         prisma.businessProfile.groupBy({ by: ["accountStatus"], _count: { _all: true } }).catch(() => []),
       ]);
-    const telnyxConfigured = telnyxKey && telnyxPublicKey && connectionId;
-    const blueBubblesConfigured = Boolean(settings.blueBubblesBaseUrl && blueBubblesPassword);
-    const sentDmConfigured = Boolean(sentDmKey && (settings.sentDmTemplateId || settings.sentDmTemplateName));
-    const stripeConfigured = Boolean(stripeKey && stripeWebhook);
+    const telnyxConfigured = telnyxKey.configured && telnyxPublicKey.configured && connectionId.configured;
+    const blueBubblesConfigured = Boolean(settings.blueBubblesBaseUrl && blueBubblesPassword.configured);
+    const sentDmConfigured = Boolean(sentDmKey.configured && (settings.sentDmTemplateId || settings.sentDmTemplateName));
+    const stripeConfigured = Boolean(stripeKey.configured && stripeWebhook.configured);
     const checks = {
       database: db,
-      gemini: componentStatus(geminiKey, geminiKey ? "AI provider API key is configured" : "AI provider API key is missing"),
+      gemini: componentStatus(geminiKey.configured, geminiKey.configured ? "AI provider API key is configured" : geminiKey.detail || "AI provider API key is missing"),
       telnyx: componentStatus(telnyxConfigured, telnyxConfigured ? "Telnyx credentials are configured" : "Telnyx credentials are incomplete"),
       publicUrl,
       webhooks: webhookReadiness({ publicUrl }),
       messaging: {
-        bluebubbles: componentStatus(blueBubblesConfigured, blueBubblesConfigured ? "BlueBubbles is configured" : "BlueBubbles URL or password is missing"),
-        sentdm: componentStatus(sentDmConfigured, sentDmConfigured ? "Sent.dm is configured" : "Sent.dm API key or approved template is missing"),
+        bluebubbles: componentStatus(blueBubblesConfigured, blueBubblesConfigured ? "BlueBubbles is configured" : blueBubblesPassword.ok ? "BlueBubbles URL or password is missing" : blueBubblesPassword.detail),
+        sentdm: componentStatus(sentDmConfigured, sentDmConfigured ? "Sent.dm is configured" : sentDmKey.ok ? "Sent.dm API key or approved template is missing" : sentDmKey.detail),
       },
       billing: {
         stripe: {
@@ -10085,11 +10115,15 @@ app.get("/api/admin/health", requireAuth, requireAdmin, async (_req, res) => {
               ? "Stripe keys, webhook, and active plans are configured"
               : stripeConfigured
                 ? "Stripe is configured, but no active subscription plan exists"
-                : "Stripe secret key or webhook secret is missing",
+                : !stripeKey.ok
+                  ? stripeKey.detail
+                  : !stripeWebhook.ok
+                    ? stripeWebhook.detail
+                    : "Stripe secret key or webhook secret is missing",
           ),
           missing: [
-            !stripeKey ? "STRIPE_SECRET_KEY" : null,
-            !stripeWebhook ? "STRIPE_WEBHOOK_SECRET" : null,
+            !stripeKey.configured ? "STRIPE_SECRET_KEY" : null,
+            !stripeWebhook.configured ? "STRIPE_WEBHOOK_SECRET" : null,
             activePlanCount <= 0 ? "active subscription plan" : null,
           ].filter(Boolean),
           activePlanCount,
@@ -10102,7 +10136,7 @@ app.get("/api/admin/health", requireAuth, requireAdmin, async (_req, res) => {
     res.json({
       db: db.status,
       publicBaseUrl: publicUrl.url,
-      geminiConfigured: geminiKey,
+      geminiConfigured: geminiKey.configured,
       telnyxConfigured,
       messageProviders: {
         bluebubbles: blueBubblesConfigured,
