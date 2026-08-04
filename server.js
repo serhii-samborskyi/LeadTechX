@@ -420,6 +420,7 @@ async function currentUser(req) {
     include: { user: { include: { businessProfile: true } } },
   });
   if (!session || session.expiresAt <= new Date() || !session.user.active) return null;
+  if (session.user.role !== "admin" && session.user.businessProfile?.archivedAt) return null;
   return session.user;
 }
 
@@ -631,6 +632,126 @@ function adCustomData(input = {}) {
     if (data[key] === undefined || data[key] === null || data[key] === "") delete data[key];
   }
   return data;
+}
+
+const TRAFFIC_TRACKING_KEYS = [
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_term",
+  "utm_content",
+  "utm_id",
+  "fbclid",
+  "gclid",
+  "gbraid",
+  "wbraid",
+  "ttclid",
+  "msclkid",
+  "campaign",
+  "adset",
+  "ad",
+  "placement",
+  "source",
+  "medium",
+];
+
+function trafficQueryParams(sourceUrl = "") {
+  const supplied = String(sourceUrl || "").trim();
+  if (!/^https?:\/\//i.test(supplied)) return { landingPath: "", queryParams: {}, trackingTags: {} };
+  try {
+    const parsed = new URL(supplied);
+    const queryParams = {};
+    for (const [key, value] of parsed.searchParams.entries()) {
+      if (queryParams[key] === undefined) queryParams[key] = value;
+      else if (Array.isArray(queryParams[key])) queryParams[key].push(value);
+      else queryParams[key] = [queryParams[key], value];
+    }
+    const trackingTags = {};
+    for (const key of TRAFFIC_TRACKING_KEYS) {
+      if (queryParams[key] !== undefined) trackingTags[key] = queryParams[key];
+    }
+    return { landingPath: parsed.pathname || "/", queryParams, trackingTags };
+  } catch {
+    return { landingPath: "", queryParams: {}, trackingTags: {} };
+  }
+}
+
+function trafficHost(value = "") {
+  const supplied = String(value || "").trim();
+  if (!/^https?:\/\//i.test(supplied)) return "";
+  try {
+    return new URL(supplied).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function firstTrafficValue(value) {
+  if (Array.isArray(value)) return value.find(Boolean) || "";
+  return String(value || "");
+}
+
+function inferTrafficPlatform({ referrer = "", queryParams = {}, trackingTags = {} }) {
+  const source = firstTrafficValue(trackingTags.utm_source || trackingTags.source).trim();
+  if (source) return source.toLowerCase();
+  if (queryParams.fbclid) return "meta";
+  if (queryParams.ttclid) return "tiktok";
+  if (queryParams.gclid || queryParams.gbraid || queryParams.wbraid) return "google";
+  if (queryParams.msclkid) return "microsoft";
+  const host = trafficHost(referrer);
+  if (!host) return "direct";
+  if (host.includes("facebook") || host.includes("instagram")) return "meta";
+  if (host.includes("tiktok")) return "tiktok";
+  if (host.includes("google")) return "google";
+  if (host.includes("bing") || host.includes("microsoft")) return "microsoft";
+  return host;
+}
+
+function trafficBusinessProfileId(customData = {}, userData = {}) {
+  const direct = Number(customData.business_profile_id || customData.businessProfileId || 0);
+  if (direct) return direct;
+  const external = String(userData.externalId || "");
+  const match = external.match(/^business:(\d+)$/);
+  return match ? Number(match[1]) : null;
+}
+
+async function recordTrafficEvent({ req, eventKey, eventId, sourceUrl = "", referrer = "", customData = {}, userData = {}, source = "browser" }) {
+  const cleanEventKey = String(eventKey || "").trim();
+  if (!cleanEventKey) return null;
+  const cleanEventId = String(eventId || "").trim() || null;
+  const cleanSourceUrl = String(sourceUrl || req.body?.sourceUrl || "").trim().slice(0, 2048);
+  const cleanReferrer = String(referrer || req.body?.referrer || req.headers.referer || "").trim().slice(0, 2048);
+  const { landingPath, queryParams, trackingTags } = trafficQueryParams(cleanSourceUrl);
+  const data = {
+    eventKey: cleanEventKey,
+    eventId: cleanEventId,
+    source: String(source || "browser").trim().slice(0, 64) || "browser",
+    sourceUrl: cleanSourceUrl || null,
+    referrer: cleanReferrer || null,
+    platform: inferTrafficPlatform({ referrer: cleanReferrer, queryParams, trackingTags }),
+    landingPath: landingPath || null,
+    queryParams: jsonSafe(queryParams),
+    trackingTags: jsonSafe(trackingTags),
+    customData: jsonSafe(adCustomData(customData)),
+    businessProfileId: trafficBusinessProfileId(customData, userData) || null,
+  };
+  if (cleanEventId) {
+    return prisma.trafficEvent.upsert({
+      where: { eventId: cleanEventId },
+      create: data,
+      update: {
+        sourceUrl: data.sourceUrl,
+        referrer: data.referrer,
+        platform: data.platform,
+        landingPath: data.landingPath,
+        queryParams: data.queryParams,
+        trackingTags: data.trackingTags,
+        customData: data.customData,
+        businessProfileId: data.businessProfileId,
+      },
+    });
+  }
+  return prisma.trafficEvent.create({ data });
 }
 
 function adEventUrl(req, explicitUrl = "") {
@@ -3352,7 +3473,7 @@ async function allocateDemoNumber(profile, settings) {
 
 async function resolveInboundBusiness(voiceNumber, callerPhone) {
   if (!voiceNumber) return null;
-  if (voiceNumber.numberType !== "demo") return voiceNumber.businessProfile || null;
+  if (voiceNumber.numberType !== "demo") return voiceNumber.businessProfile?.archivedAt ? null : voiceNumber.businessProfile || null;
   const now = new Date();
   const normalizedCaller = String(callerPhone || "").trim();
   const [binding, waiting] = await Promise.all([
@@ -3363,13 +3484,15 @@ async function resolveInboundBusiness(voiceNumber, callerPhone) {
         })
       : null,
     prisma.demoNumberAssignment.findFirst({
-      where: { voiceNumberId: voiceNumber.id, status: "waiting", expiresAt: { gt: now } },
+      where: { voiceNumberId: voiceNumber.id, status: "waiting", expiresAt: { gt: now }, businessProfile: { archivedAt: null } },
       include: { businessProfile: true, callerBindings: true },
       orderBy: { createdAt: "desc" },
     }),
   ]);
   const validBinding =
-    binding?.demoNumberAssignment.voiceNumberId === voiceNumber.id && binding.demoNumberAssignment.expiresAt > now
+    binding?.demoNumberAssignment.voiceNumberId === voiceNumber.id &&
+    binding.demoNumberAssignment.expiresAt > now &&
+    !binding.demoNumberAssignment.businessProfile?.archivedAt
       ? binding
       : null;
   if (!waiting || (validBinding && validBinding.demoNumberAssignment.createdAt >= waiting.createdAt)) {
@@ -4449,6 +4572,7 @@ async function adminContext(businessName, website, user) {
     if (!user.businessProfileId) throw new Error("No business is assigned to this account");
     const profile = await prisma.businessProfile.findUnique({ where: { id: user.businessProfileId } });
     if (!profile) throw new Error("Assigned business was not found");
+    if (profile.archivedAt) throw new Error("This business account is archived");
     return { profile, config: await ensureBusinessConfig(profile) };
   }
   const settings = await getSettings();
@@ -5706,6 +5830,9 @@ app.post("/api/auth/login", async (req, res) => {
     if (!user?.active || !passwordMatches(req.body.password, user.passwordHash)) {
       return res.status(401).json({ error: "Invalid email or password" });
     }
+    if (user.role !== "admin" && user.businessProfile?.archivedAt) {
+      return res.status(403).json({ error: "This business account is archived" });
+    }
     const { token, tokenHash } = issueToken();
     const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
     await prisma.session.create({ data: { tokenHash, userId: user.id, expiresAt } });
@@ -6083,6 +6210,16 @@ app.post("/api/ad-platforms/track", async (req, res) => {
     const settings = await getSettings();
     const customData = req.body?.customData && typeof req.body.customData === "object" ? req.body.customData : {};
     const userData = req.body?.userData && typeof req.body.userData === "object" ? req.body.userData : {};
+    await recordTrafficEvent({
+      req,
+      eventKey: req.body?.eventKey,
+      eventId: String(req.body?.eventId || "").trim().slice(0, 160),
+      sourceUrl: req.body?.sourceUrl,
+      referrer: req.body?.referrer,
+      customData,
+      userData,
+      source: "browser_bridge",
+    });
     const result = await trackAdEvent({
       req,
       settings,
@@ -6098,6 +6235,66 @@ app.post("/api/ad-platforms/track", async (req, res) => {
     res.status(400).json({ ok: false, error: error.message });
   }
 });
+
+function localDayStart(date = new Date()) {
+  const value = new Date(date);
+  value.setHours(0, 0, 0, 0);
+  return value;
+}
+
+function addDays(date, days) {
+  const value = new Date(date);
+  value.setDate(value.getDate() + days);
+  return value;
+}
+
+function adminTrafficRange(query = {}) {
+  const range = String(query.range || "today");
+  const today = localDayStart(new Date());
+  if (range === "yesterday") {
+    const from = addDays(today, -1);
+    return { range, from, to: today };
+  }
+  if (range === "last7") return { range, from: addDays(today, -6), to: addDays(today, 1) };
+  if (range === "custom") {
+    const from = query.from ? localDayStart(new Date(`${query.from}T00:00:00`)) : today;
+    const to = query.to ? addDays(localDayStart(new Date(`${query.to}T00:00:00`)), 1) : addDays(from, 1);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) throw new Error("Choose a valid date range");
+    return { range, from, to };
+  }
+  return { range: "today", from: today, to: addDays(today, 1) };
+}
+
+function trafficDateKey(date) {
+  return new Date(date).toISOString().slice(0, 10);
+}
+
+function trafficPublicRow(event) {
+  return {
+    id: event.id,
+    eventKey: event.eventKey,
+    eventId: event.eventId,
+    createdAt: event.createdAt,
+    source: event.source,
+    platform: event.platform || "direct",
+    sourceUrl: event.sourceUrl || "",
+    referrer: event.referrer || "",
+    landingPath: event.landingPath || "",
+    queryParams: event.queryParams || {},
+    trackingTags: event.trackingTags || {},
+    customData: event.customData || {},
+    business: event.businessProfile
+      ? {
+          id: event.businessProfile.id,
+          businessName: event.businessProfile.businessName,
+          website: event.businessProfile.website,
+          accountStatus: event.businessProfile.accountStatus,
+          archivedAt: event.businessProfile.archivedAt,
+          createdAt: event.businessProfile.createdAt,
+        }
+      : null,
+  };
+}
 
 async function publicAppointmentContext(token) {
   const payload = verifyAppointmentActionToken(token);
@@ -6702,6 +6899,64 @@ app.patch("/api/admin/users/:id", requireAuth, requireAdmin, async (req, res) =>
   }
 });
 
+app.get("/api/admin/traffic", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { range, from, to } = adminTrafficRange(req.query);
+    const events = await prisma.trafficEvent.findMany({
+      where: { createdAt: { gte: from, lt: to } },
+      include: {
+        businessProfile: {
+          select: { id: true, businessName: true, website: true, accountStatus: true, archivedAt: true, createdAt: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 1000,
+    });
+    const registrationKeys = new Set(["trial_started", "fastagent_agent_built"]);
+    const registrationRows = [];
+    const seenRegistrations = new Set();
+    for (const event of events) {
+      if (!registrationKeys.has(event.eventKey)) continue;
+      const key = event.businessProfileId ? `business:${event.businessProfileId}` : `event:${event.eventId || event.id}`;
+      if (seenRegistrations.has(key)) continue;
+      seenRegistrations.add(key);
+      registrationRows.push(event);
+    }
+    const byDate = {};
+    const byPlatform = {};
+    for (const event of registrationRows) {
+      const dateKey = trafficDateKey(event.createdAt);
+      byDate[dateKey] = (byDate[dateKey] || 0) + 1;
+      const platform = event.platform || "direct";
+      byPlatform[platform] = (byPlatform[platform] || 0) + 1;
+    }
+    const eventCounts = {};
+    for (const event of events) eventCounts[event.eventKey] = (eventCounts[event.eventKey] || 0) + 1;
+    res.json({
+      range,
+      from,
+      to,
+      totals: {
+        registrations: registrationRows.length,
+        pageVisits: eventCounts.fastagent_page_visit || 0,
+        agentsBuilt: eventCounts.fastagent_agent_built || 0,
+        trialsStarted: eventCounts.trial_started || 0,
+        allEvents: events.length,
+      },
+      byDate: Object.entries(byDate)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, count]) => ({ date, count })),
+      byPlatform: Object.entries(byPlatform)
+        .sort((a, b) => b[1] - a[1])
+        .map(([platform, count]) => ({ platform, count })),
+      registrations: registrationRows.map(trafficPublicRow),
+      events: events.slice(0, 200).map(trafficPublicRow),
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.get("/api/admin/businesses", requireAuth, requireAdmin, async (_req, res) => {
   const businesses = await prisma.businessProfile.findMany({
     include: {
@@ -6720,9 +6975,55 @@ app.get("/api/admin/businesses", requireAuth, requireAdmin, async (_req, res) =>
         },
       },
     },
-    orderBy: { businessName: "asc" },
+    orderBy: [{ archivedAt: "asc" }, { businessName: "asc" }],
   });
   res.json({ businesses });
+});
+
+app.patch("/api/admin/businesses/:id/archive", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const archived = req.body?.archived !== false;
+    const existing = await prisma.businessProfile.findUnique({ where: { id }, select: { id: true, businessName: true } });
+    if (!existing) return res.status(404).json({ error: "Business was not found" });
+    const updated = await prisma.$transaction(async (tx) => {
+      const profile = await tx.businessProfile.update({
+        where: { id },
+        data: { archivedAt: archived ? new Date() : null },
+      });
+      if (archived) {
+        const users = await tx.user.findMany({ where: { businessProfileId: id }, select: { id: true } });
+        if (users.length) await tx.session.deleteMany({ where: { userId: { in: users.map((user) => user.id) } } });
+      }
+      return profile;
+    });
+    res.json({ ok: true, business: updated });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete("/api/admin/businesses/:id", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const existing = await prisma.businessProfile.findUnique({ where: { id }, select: { id: true, businessName: true } });
+    if (!existing) return res.status(404).json({ error: "Business was not found" });
+    const confirmName = String(req.body?.confirmName || "").trim();
+    if (confirmName !== existing.businessName) {
+      throw new Error(`Type the exact business name (${existing.businessName}) to permanently delete this account`);
+    }
+    await prisma.$transaction(async (tx) => {
+      const users = await tx.user.findMany({ where: { businessProfileId: id }, select: { id: true } });
+      if (users.length) {
+        await tx.session.deleteMany({ where: { userId: { in: users.map((user) => user.id) } } });
+        await tx.user.deleteMany({ where: { id: { in: users.map((user) => user.id) }, role: "business" } });
+      }
+      await tx.businessProfile.delete({ where: { id } });
+    });
+    res.json({ ok: true, deleted: true });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.get("/api/admin/calls", requireAuth, requireAdmin, async (_req, res) => {

@@ -1379,6 +1379,41 @@ body {
   font-weight: 500;
 }
 
+.account-subtabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 18px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fcfa;
+}
+
+.account-subtabs button {
+  justify-content: center;
+  min-height: 44px;
+  background: #fff;
+}
+
+.account-subtabs button.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.account-panel {
+  display: none;
+}
+
+.account-panel.active {
+  display: block;
+}
+
+.compact-heading {
+  margin-bottom: 12px;
+}
+
 .form-message {
   min-height: 1.3em;
   margin: 12px 0;
@@ -1682,11 +1717,15 @@ body {
 
 .business-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.2fr) repeat(4, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
   gap: 14px;
   align-items: start;
   padding: 14px 0;
   border-bottom: 1px solid var(--line);
+}
+
+.business-row.archived {
+  opacity: 0.78;
 }
 
 .business-row strong,
@@ -1707,6 +1746,136 @@ body {
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.35;
+}
+
+.business-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.traffic-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, auto) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.traffic-range-buttons,
+.traffic-custom-range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.traffic-range-buttons button.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.traffic-custom-range {
+  justify-content: flex-end;
+}
+
+.traffic-custom-range input {
+  width: 150px;
+}
+
+.traffic-summary,
+.traffic-breakdowns {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.traffic-breakdowns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.traffic-stat-card,
+.traffic-breakdowns > div {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fcfa;
+}
+
+.traffic-stat-card span,
+.traffic-stat-card strong {
+  display: block;
+}
+
+.traffic-stat-card span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.traffic-stat-card strong {
+  margin-top: 4px;
+  font-size: 1.6rem;
+}
+
+.traffic-mini-list,
+.traffic-event-list {
+  display: grid;
+  gap: 8px;
+}
+
+.traffic-mini-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.traffic-mini-row strong {
+  color: var(--ink);
+}
+
+.traffic-event-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.traffic-event-row summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 12px;
+  cursor: pointer;
+}
+
+.traffic-event-row summary span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.traffic-event-detail {
+  display: grid;
+  gap: 7px;
+  padding: 0 12px 12px;
+}
+
+.traffic-event-detail p {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 10px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.traffic-event-detail span {
+  overflow-wrap: anywhere;
 }
 
 .call-log {
@@ -3432,6 +3601,32 @@ a.appointment-field-value {
   .number-row,
   .number-row.search-result {
     grid-template-columns: 1fr;
+  }
+
+  .account-subtabs,
+  .traffic-toolbar,
+  .traffic-summary,
+  .traffic-breakdowns,
+  .traffic-event-row summary,
+  .traffic-event-detail p {
+    grid-template-columns: 1fr;
+  }
+
+  .traffic-custom-range {
+    justify-content: stretch;
+  }
+
+  .traffic-custom-range input,
+  .traffic-custom-range button {
+    width: 100%;
+  }
+
+  .business-actions {
+    justify-content: stretch;
+  }
+
+  .business-actions button {
+    flex: 1;
   }
 
   .number-config,

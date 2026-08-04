@@ -10,6 +10,8 @@ const el = {
   views: document.querySelectorAll("[data-admin-view]"),
   systemTabs: document.querySelectorAll("[data-system-tab]"),
   systemPanels: document.querySelectorAll("[data-system-panel]"),
+  accountTabs: document.querySelectorAll("[data-account-tab]"),
+  accountPanels: document.querySelectorAll("[data-account-panel]"),
   systemForm: document.querySelector("#systemForm"),
   systemStatus: document.querySelector("#systemStatus"),
   researchModel: document.querySelector("#systemResearchModel"),
@@ -94,6 +96,14 @@ const el = {
   accountMessage: document.querySelector("#accountMessage"),
   accountList: document.querySelector("#accountList"),
   businessList: document.querySelector("#businessList"),
+  trafficFrom: document.querySelector("#trafficFrom"),
+  trafficTo: document.querySelector("#trafficTo"),
+  applyTrafficRange: document.querySelector("#applyTrafficRange"),
+  refreshTraffic: document.querySelector("#refreshTraffic"),
+  trafficSummary: document.querySelector("#trafficSummary"),
+  trafficByDate: document.querySelector("#trafficByDate"),
+  trafficByPlatform: document.querySelector("#trafficByPlatform"),
+  trafficRegistrations: document.querySelector("#trafficRegistrations"),
   numberSearchForm: document.querySelector("#numberSearchForm"),
   numberCountry: document.querySelector("#numberCountry"),
   numberAreaCode: document.querySelector("#numberAreaCode"),
@@ -140,6 +150,7 @@ let savedBlueBubblesWebhookPassword = "";
 let modelRateLimits = [];
 let adEventDefinitions = [];
 let adEventConfig = {};
+let trafficRange = "today";
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -957,6 +968,108 @@ async function loadOnboarding() {
   if (!sessionData.sessions.length) el.onboardingList.textContent = "No phone onboarding calls yet.";
 }
 
+function setAccountTab(tabName) {
+  for (const tab of el.accountTabs) tab.classList.toggle("active", tab.dataset.accountTab === tabName);
+  for (const panel of el.accountPanels) panel.classList.toggle("active", panel.dataset.accountPanel === tabName);
+  if (tabName === "traffic") loadTraffic().catch((error) => (el.trafficRegistrations.textContent = error.message));
+}
+
+function shortUrlLabel(url = "") {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return url || "Direct";
+  }
+}
+
+function renderTrafficMiniList(container, rows, emptyText) {
+  container.innerHTML = "";
+  if (!rows?.length) {
+    container.textContent = emptyText;
+    return;
+  }
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = "traffic-mini-row";
+    item.innerHTML = "<strong></strong><span></span>";
+    item.querySelector("strong").textContent = row.date || row.platform || "Unknown";
+    item.querySelector("span").textContent = String(row.count || 0);
+    container.appendChild(item);
+  }
+}
+
+function trafficParamsText(params = {}) {
+  const entries = Object.entries(params || {});
+  if (!entries.length) return "No URL variables captured";
+  return entries.map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(",") : value}`).join(" · ");
+}
+
+function renderTraffic(data) {
+  const totals = data.totals || {};
+  el.trafficSummary.innerHTML = "";
+  for (const [label, value] of [
+    ["Registrations", totals.registrations || 0],
+    ["Page visits", totals.pageVisits || 0],
+    ["Agents built", totals.agentsBuilt || 0],
+    ["Trials", totals.trialsStarted || 0],
+  ]) {
+    const card = document.createElement("div");
+    card.className = "traffic-stat-card";
+    card.innerHTML = "<span></span><strong></strong>";
+    card.querySelector("span").textContent = label;
+    card.querySelector("strong").textContent = String(value);
+    el.trafficSummary.appendChild(card);
+  }
+  renderTrafficMiniList(el.trafficByDate, data.byDate || [], "No registrations in this range.");
+  renderTrafficMiniList(el.trafficByPlatform, data.byPlatform || [], "No lead sources in this range.");
+  el.trafficRegistrations.innerHTML = "";
+  const rows = data.registrations || [];
+  if (!rows.length) {
+    el.trafficRegistrations.textContent = "No registrations in this range.";
+    return;
+  }
+  for (const event of rows) {
+    const row = document.createElement("details");
+    row.className = "traffic-event-row";
+    const summary = document.createElement("summary");
+    const title = document.createElement("strong");
+    title.textContent = event.business?.businessName || event.customData?.content_name || "Unknown business";
+    const meta = document.createElement("span");
+    meta.textContent = `${event.platform || "direct"} · ${new Date(event.createdAt).toLocaleString()}`;
+    summary.append(title, meta);
+    const body = document.createElement("div");
+    body.className = "traffic-event-detail";
+    const fields = [
+      ["Event", event.eventKey],
+      ["Website", event.business?.website || event.customData?.website],
+      ["Landing URL", shortUrlLabel(event.sourceUrl)],
+      ["Referrer", shortUrlLabel(event.referrer)],
+      ["Tracking tags", trafficParamsText(event.trackingTags)],
+      ["All URL variables", trafficParamsText(event.queryParams)],
+    ];
+    for (const [label, value] of fields) {
+      const line = document.createElement("p");
+      line.innerHTML = "<b></b><span></span>";
+      line.querySelector("b").textContent = label;
+      line.querySelector("span").textContent = value || "Not captured";
+      body.appendChild(line);
+    }
+    row.append(summary, body);
+    el.trafficRegistrations.appendChild(row);
+  }
+}
+
+async function loadTraffic() {
+  const query = new URLSearchParams({ range: trafficRange });
+  if (trafficRange === "custom") {
+    if (el.trafficFrom.value) query.set("from", el.trafficFrom.value);
+    if (el.trafficTo.value) query.set("to", el.trafficTo.value);
+  }
+  const data = await api(`/api/admin/traffic?${query}`);
+  renderTraffic(data);
+}
+
 async function loadAccounts() {
   const [{ users }, businessData] = await Promise.all([api("/api/admin/users"), api("/api/admin/businesses")]);
   businesses = businessData.businesses;
@@ -994,11 +1107,12 @@ async function loadAccounts() {
   for (const business of businesses) {
     const row = document.createElement("div");
     row.className = "business-row";
+    if (business.archivedAt) row.classList.add("archived");
     const heading = document.createElement("div");
     const name = document.createElement("strong");
     name.textContent = business.businessName;
     const website = document.createElement("span");
-    website.textContent = business.website || "No website";
+    website.textContent = `${business.website || "No website"}${business.archivedAt ? " · archived" : ""}`;
     heading.append(name, website);
     const access = document.createElement("div");
     access.innerHTML = `<b>Login</b><span></span>`;
@@ -1016,7 +1130,7 @@ async function loadAccounts() {
         : business.accountStatus === "trial"
           ? "Trial account"
           : business.accountStatus;
-    lifecycle.querySelector("span").textContent = `${lifecycleLabel} · ${business.creditBalance} credits${
+    lifecycle.querySelector("span").textContent = `${business.archivedAt ? "Archived" : lifecycleLabel} · ${business.creditBalance} credits${
       business.trialEndsAt ? ` · ends ${new Date(business.trialEndsAt).toLocaleDateString()}` : ""
     }`;
     const plan = document.createElement("div");
@@ -1036,7 +1150,38 @@ async function loadAccounts() {
     content.querySelector("span").textContent = business.config
       ? `${business.config._count.knowledgeEntries} answers · ${business.config._count.priceEntries} prices · ${business.config._count.intakeFields} intake fields`
       : "No configuration";
-    row.append(heading, access, lifecycle, plan, phone, agent, content);
+    const actions = document.createElement("div");
+    actions.className = "business-actions";
+    const archive = document.createElement("button");
+    archive.type = "button";
+    archive.textContent = business.archivedAt ? "Restore" : "Archive";
+    archive.addEventListener("click", async () => {
+      const action = business.archivedAt ? "restore" : "archive";
+      if (!window.confirm(`Are you sure you want to ${action} ${business.businessName}?`)) return;
+      await api(`/api/admin/businesses/${business.id}/archive`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archived: !business.archivedAt }),
+      });
+      await loadAccounts();
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-button";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", async () => {
+      if (!window.confirm(`Permanently delete ${business.businessName}? This cannot be undone.`)) return;
+      const confirmName = window.prompt(`Type the exact business name to delete:\n${business.businessName}`);
+      if (confirmName !== business.businessName) return;
+      await api(`/api/admin/businesses/${business.id}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmName }),
+      });
+      await loadAccounts();
+    });
+    actions.append(archive, remove);
+    row.append(heading, access, lifecycle, plan, phone, agent, content, actions);
     el.businessList.appendChild(row);
   }
 }
@@ -1668,10 +1813,31 @@ for (const tab of el.systemTabs) {
   tab.addEventListener("click", () => setSystemTab(tab.dataset.systemTab));
 }
 
+for (const tab of el.accountTabs) {
+  tab.addEventListener("click", () => setAccountTab(tab.dataset.accountTab));
+}
+
+for (const button of document.querySelectorAll("[data-traffic-range]")) {
+  button.addEventListener("click", () => {
+    trafficRange = button.dataset.trafficRange;
+    for (const item of document.querySelectorAll("[data-traffic-range]")) item.classList.toggle("active", item === button);
+    loadTraffic().catch((error) => (el.trafficRegistrations.textContent = error.message));
+  });
+}
+
+el.applyTrafficRange.addEventListener("click", () => {
+  trafficRange = "custom";
+  for (const item of document.querySelectorAll("[data-traffic-range]")) item.classList.remove("active");
+  loadTraffic().catch((error) => (el.trafficRegistrations.textContent = error.message));
+});
+
+el.refreshTraffic.addEventListener("click", () => loadTraffic().catch((error) => (el.trafficRegistrations.textContent = error.message)));
+
 for (const tab of el.tabs) {
   tab.addEventListener("click", () => {
     for (const item of el.tabs) item.classList.toggle("active", item === tab);
     for (const view of el.views) view.classList.toggle("active", view.dataset.adminView === tab.dataset.adminTab);
+    if (tab.dataset.adminTab === "accounts") loadAccounts().catch((error) => (el.accountMessage.textContent = error.message));
     if (tab.dataset.adminTab === "numbers") loadNumbers().catch((error) => (el.numberError.textContent = error.message));
     if (tab.dataset.adminTab === "health") loadAdminHealth().catch((error) => (el.adminHealthList.textContent = error.message));
     if (tab.dataset.adminTab === "onboarding") {

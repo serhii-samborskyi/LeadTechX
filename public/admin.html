@@ -307,19 +307,52 @@
 
       <section class="admin-page-view" data-admin-view="accounts">
         <div class="section-heading"><div><h2>Business accounts</h2><p>Create credentials and assign each user to one business.</p></div></div>
-        <form id="createAccountForm" class="account-create-form" novalidate>
-          <label>Business name<input id="accountBusinessName" required /></label>
-          <label>Website <span>optional</span><input id="accountWebsite" type="url" /></label>
-          <label>Contact name <span>optional</span><input id="accountName" /></label>
-          <label>Login email<input id="accountEmail" type="email" required /></label>
-          <label>Temporary password<input id="accountPassword" type="password" minlength="10" required /><small>At least 10 characters</small></label>
-          <button id="createAccountButton" class="primary" type="submit"><i data-lucide="user-plus"></i> Create account</button>
-        </form>
-        <p class="form-message" id="accountMessage"></p>
-        <h3>Login accounts</h3>
-        <div class="account-list" id="accountList"></div>
-        <h3>Business profiles</h3>
-        <div class="business-list" id="businessList"></div>
+        <div class="account-subtabs">
+          <button class="active" data-account-tab="accounts" type="button"><i data-lucide="user-plus"></i> Login accounts</button>
+          <button data-account-tab="profiles" type="button"><i data-lucide="building-2"></i> Business profiles</button>
+          <button data-account-tab="traffic" type="button"><i data-lucide="chart-no-axes-combined"></i> Traffic</button>
+        </div>
+        <div class="account-panel active" data-account-panel="accounts">
+          <form id="createAccountForm" class="account-create-form" novalidate>
+            <label>Business name<input id="accountBusinessName" required /></label>
+            <label>Website <span>optional</span><input id="accountWebsite" type="url" /></label>
+            <label>Contact name <span>optional</span><input id="accountName" /></label>
+            <label>Login email<input id="accountEmail" type="email" required /></label>
+            <label>Temporary password<input id="accountPassword" type="password" minlength="10" required /><small>At least 10 characters</small></label>
+            <button id="createAccountButton" class="primary" type="submit"><i data-lucide="user-plus"></i> Create account</button>
+          </form>
+          <p class="form-message" id="accountMessage"></p>
+          <h3>Login accounts</h3>
+          <div class="account-list" id="accountList"></div>
+        </div>
+        <div class="account-panel" data-account-panel="profiles">
+          <div class="section-heading compact-heading">
+            <div><h3>Business profiles</h3><p>Archive accounts to hide access without deleting history. Delete only when you want to permanently remove the business.</p></div>
+          </div>
+          <div class="business-list" id="businessList"></div>
+        </div>
+        <div class="account-panel" data-account-panel="traffic">
+          <div class="traffic-toolbar">
+            <div class="traffic-range-buttons">
+              <button class="active" data-traffic-range="today" type="button">Today</button>
+              <button data-traffic-range="yesterday" type="button">Yesterday</button>
+              <button data-traffic-range="last7" type="button">Last week</button>
+            </div>
+            <div class="traffic-custom-range">
+              <input id="trafficFrom" type="date" aria-label="Traffic from date" />
+              <input id="trafficTo" type="date" aria-label="Traffic to date" />
+              <button id="applyTrafficRange" type="button">Apply dates</button>
+              <button id="refreshTraffic" type="button"><i data-lucide="refresh-cw"></i> Refresh</button>
+            </div>
+          </div>
+          <div class="traffic-summary" id="trafficSummary"></div>
+          <div class="traffic-breakdowns">
+            <div><h3>Registrations by date</h3><div id="trafficByDate" class="traffic-mini-list"></div></div>
+            <div><h3>Lead source</h3><div id="trafficByPlatform" class="traffic-mini-list"></div></div>
+          </div>
+          <h3>Registration details</h3>
+          <div id="trafficRegistrations" class="traffic-event-list"></div>
+        </div>
       </section>
 
       <section class="admin-page-view" data-admin-view="numbers">

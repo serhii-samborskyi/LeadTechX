@@ -33,6 +33,7 @@ model BusinessProfile {
   subscriptionCurrentPeriodEnd DateTime?
   subscriptionPlanId Int?
   subscriptionPlan   SubscriptionPlan?    @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
+  archivedAt         DateTime?
   leadWebhookToken   String?                @unique
   leadWebhookEnabled Boolean                @default(true)
   createdAt          DateTime               @default(now())
@@ -55,6 +56,7 @@ model BusinessProfile {
   stripeCheckoutSessions StripeCheckoutSession[]
   inboundMessages    MessageInbound[]
   reviewLinks        BusinessReviewLink[]
+  trafficEvents      TrafficEvent[]
 }
 
 model SubscriptionPlan {
@@ -342,6 +344,28 @@ model AdPlatformEvent {
 
   @@unique([platform, eventId])
   @@index([eventKey, platform, createdAt])
+}
+
+model TrafficEvent {
+  id                Int              @id @default(autoincrement())
+  eventKey          String
+  eventId           String?          @unique
+  source            String           @default("browser")
+  sourceUrl         String?
+  referrer          String?
+  platform          String?
+  landingPath       String?
+  queryParams       Json?
+  trackingTags      Json?
+  customData        Json?
+  businessProfileId Int?
+  businessProfile   BusinessProfile? @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([eventKey, createdAt])
+  @@index([businessProfileId, createdAt])
+  @@index([platform, createdAt])
 }
 
 model User {
