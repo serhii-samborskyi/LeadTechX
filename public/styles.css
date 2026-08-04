@@ -1134,8 +1134,23 @@ body {
   font-weight: 750;
 }
 
+.ad-event-parameters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px;
+  gap: 8px;
+}
+
+.ad-event-parameters label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
 .ad-platform-event-cell input[type="text"],
-.ad-platform-event-cell input:not([type]) {
+.ad-platform-event-cell input:not([type]),
+.ad-event-parameters input {
   min-height: 38px;
 }
 

@@ -71,6 +71,8 @@ const AD_EVENT_DEFINITIONS = [
     tiktokEventName: "StartTrial",
     defaultBrowser: true,
     defaultCapi: true,
+    defaultValue: 0,
+    defaultCurrency: "USD",
   },
   {
     key: "checkout_started",
@@ -496,6 +498,8 @@ function defaultAdEventConfig() {
       definition.key,
       {
         enabled: true,
+        value: definition.defaultValue ?? null,
+        currency: definition.defaultCurrency || "",
         meta: {
           browser: Boolean(definition.defaultBrowser),
           capi: Boolean(definition.defaultCapi),
@@ -511,6 +515,17 @@ function defaultAdEventConfig() {
   );
 }
 
+function cleanAdEventValue(value, fallback = null) {
+  if (value === "" || value === null || value === undefined) return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function cleanAdEventCurrency(value, fallback = "") {
+  const normalized = String(value || fallback || "").trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(normalized) ? normalized : "";
+}
+
 function normalizeAdEventConfig(rawConfig = {}) {
   const raw = rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig) ? rawConfig : {};
   const defaults = defaultAdEventConfig();
@@ -524,6 +539,8 @@ function normalizeAdEventConfig(rawConfig = {}) {
         definition.key,
         {
           enabled: incoming.enabled !== false,
+          value: cleanAdEventValue(incoming.value, fallback.value),
+          currency: cleanAdEventCurrency(incoming.currency, fallback.currency),
           meta: {
             browser: typeof incomingMeta.browser === "boolean" ? incomingMeta.browser : fallback.meta.browser,
             capi: typeof incomingMeta.capi === "boolean" ? incomingMeta.capi : fallback.meta.capi,
@@ -540,6 +557,24 @@ function normalizeAdEventConfig(rawConfig = {}) {
   );
 }
 
+function adEventDefaultCustomData(eventConfig = {}) {
+  const value = cleanAdEventValue(eventConfig.value);
+  const currency = cleanAdEventCurrency(eventConfig.currency);
+  if (value === null || !currency) return {};
+  return { value, currency };
+}
+
+function mergeAdCustomData(eventConfig, customData = {}) {
+  const data = { ...adEventDefaultCustomData(eventConfig) };
+  const incoming = customData && typeof customData === "object" && !Array.isArray(customData) ? customData : {};
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value !== undefined && value !== null && value !== "") data[key] = value;
+  }
+  if (data.currency) data.currency = cleanAdEventCurrency(data.currency);
+  if (data.value !== undefined) data.value = cleanAdEventValue(data.value);
+  return adCustomData(data);
+}
+
 function publicAdTrackingConfig(settings) {
   const events = normalizeAdEventConfig(settings?.adEventConfig);
   return {
@@ -548,7 +583,13 @@ function publicAdTrackingConfig(settings) {
       events: Object.fromEntries(
         Object.entries(events).map(([key, config]) => [
           key,
-          { enabled: config.enabled, browser: Boolean(config.meta.browser), eventName: config.meta.eventName },
+          {
+            enabled: config.enabled,
+            browser: Boolean(config.meta.browser),
+            eventName: config.meta.eventName,
+            value: config.value,
+            currency: config.currency,
+          },
         ]),
       ),
     },
@@ -557,7 +598,13 @@ function publicAdTrackingConfig(settings) {
       events: Object.fromEntries(
         Object.entries(events).map(([key, config]) => [
           key,
-          { enabled: config.enabled, browser: Boolean(config.tiktok.browser), eventName: config.tiktok.eventName },
+          {
+            enabled: config.enabled,
+            browser: Boolean(config.tiktok.browser),
+            eventName: config.tiktok.eventName,
+            value: config.value,
+            currency: config.currency,
+          },
         ]),
       ),
     },
@@ -750,6 +797,7 @@ async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", 
     systemSecret("meta_capi_access_token", "META_CAPI_ACCESS_TOKEN").catch(() => ""),
     systemSecret("tiktok_events_api_access_token", "TIKTOK_EVENTS_API_ACCESS_TOKEN").catch(() => ""),
   ]);
+  const eventCustomData = mergeAdCustomData(eventConfig, customData);
   const results = {};
   if (eventConfig.meta.capi && settings.metaPixelId) {
     try {
@@ -761,7 +809,7 @@ async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", 
         eventId: cleanEventId,
         req,
         sourceUrl,
-        customData,
+        customData: eventCustomData,
         userData,
         source,
       });
@@ -779,7 +827,7 @@ async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", 
         eventId: cleanEventId,
         req,
         sourceUrl,
-        customData,
+        customData: eventCustomData,
         userData,
         source,
       });
@@ -7768,7 +7816,7 @@ async function processStripeCheckoutSession(session, req = null) {
     customData: {
       checkout_type: checkoutType,
       value: session.amount_total ? Number(session.amount_total) / 100 : undefined,
-      currency: session.currency || "usd",
+      currency: String(session.currency || "USD").toUpperCase(),
       content_name: session.metadata?.subscriptionPlanName || (eventKey === "paid_plan" ? "Paid plan" : "Credit top-up"),
       credit_amount: completed?.creditAmount || Number(session.metadata?.creditAmount || 0) || undefined,
     },
@@ -9532,23 +9580,24 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
       },
     });
     const trackingEventId = `stripe_checkout_started_${session.id}`;
+    const trackingCustomData = {
+      checkout_type: checkoutType,
+      value: session.amount_total ? Number(session.amount_total) / 100 : undefined,
+      currency: String(session.currency || "USD").toUpperCase(),
+      content_name: selectedPlan?.name || "Credit top-up",
+      credit_amount: creditAmount,
+    };
     trackAdEvent({
       req,
       settings,
       eventKey: "checkout_started",
       eventId: trackingEventId,
       sourceUrl: successUrl,
-      customData: {
-        checkout_type: checkoutType,
-        value: session.amount_total ? Number(session.amount_total) / 100 : undefined,
-        currency: session.currency || "usd",
-        content_name: selectedPlan?.name || "Credit top-up",
-        credit_amount: creditAmount,
-      },
+      customData: trackingCustomData,
       userData: req.user?.email ? { email: req.user.email, externalId: `business:${profile.id}` } : { externalId: `business:${profile.id}` },
       source: "server_checkout",
     }).catch((error) => console.warn(`[ads] checkout_started tracking skipped: ${error.message}`));
-    res.status(201).json({ url: session.url, sessionId: session.id, trackingEventId });
+    res.status(201).json({ url: session.url, sessionId: session.id, trackingEventId, trackingCustomData });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }

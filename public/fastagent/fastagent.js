@@ -172,16 +172,32 @@ function platformEventConfig(platform, eventKey) {
   return state.adTracking?.[platform]?.events?.[eventKey] || null;
 }
 
+function adPixelCustomData(eventConfig, customData = {}) {
+  const data = {};
+  if (eventConfig?.value !== null && eventConfig?.value !== undefined && eventConfig?.value !== "") {
+    const value = Number(eventConfig.value);
+    if (Number.isFinite(value) && value >= 0) data.value = value;
+  }
+  if (eventConfig?.currency) data.currency = String(eventConfig.currency).trim().toUpperCase();
+  for (const [key, value] of Object.entries(customData || {})) {
+    if (value !== undefined && value !== null && value !== "") data[key] = value;
+  }
+  if (data.currency) data.currency = String(data.currency).trim().toUpperCase();
+  return data;
+}
+
 async function trackAdEvent(eventKey, customData = {}, userData = {}) {
   if (!state.adTracking || state.adTrackedEvents.has(eventKey)) return;
   const eventId = adEventId(eventKey);
   const meta = platformEventConfig("meta", eventKey);
   const tiktok = platformEventConfig("tiktok", eventKey);
+  const metaCustomData = adPixelCustomData(meta, customData);
+  const tiktokCustomData = adPixelCustomData(tiktok, customData);
   if (meta?.enabled && meta.browser && state.adTracking.meta?.pixelId && window.fbq) {
-    window.fbq("track", meta.eventName, customData, { eventID: eventId });
+    window.fbq("track", meta.eventName, metaCustomData, { eventID: eventId });
   }
   if (tiktok?.enabled && tiktok.browser && state.adTracking.tiktok?.pixelId && window.ttq) {
-    window.ttq.track(tiktok.eventName, customData, { event_id: eventId });
+    window.ttq.track(tiktok.eventName, tiktokCustomData, { event_id: eventId });
   }
   state.adTrackedEvents.add(eventKey);
   try {
@@ -193,7 +209,7 @@ async function trackAdEvent(eventKey, customData = {}, userData = {}) {
         eventId,
         sourceUrl: location.href,
         referrer: document.referrer,
-        customData,
+        customData: adPixelCustomData(meta || tiktok, customData),
         userData,
       }),
     });

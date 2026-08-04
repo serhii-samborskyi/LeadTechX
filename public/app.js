@@ -635,12 +635,25 @@ async function loadAdTracking() {
 function trackBrowserAdEvent(eventKey, eventId, customData = {}) {
   if (!state.adTracking || !eventId) return;
   const meta = state.adTracking.meta?.events?.[eventKey];
+  const pixelCustomData = (eventConfig) => {
+    const data = {};
+    if (eventConfig?.value !== null && eventConfig?.value !== undefined && eventConfig?.value !== "") {
+      const value = Number(eventConfig.value);
+      if (Number.isFinite(value) && value >= 0) data.value = value;
+    }
+    if (eventConfig?.currency) data.currency = String(eventConfig.currency).trim().toUpperCase();
+    for (const [key, value] of Object.entries(customData || {})) {
+      if (value !== undefined && value !== null && value !== "") data[key] = value;
+    }
+    if (data.currency) data.currency = String(data.currency).trim().toUpperCase();
+    return data;
+  };
   if (meta?.enabled && meta.browser && state.adTracking.meta?.pixelId && window.fbq) {
-    window.fbq("track", meta.eventName, customData, { eventID: eventId });
+    window.fbq("track", meta.eventName, pixelCustomData(meta), { eventID: eventId });
   }
   const tiktok = state.adTracking.tiktok?.events?.[eventKey];
   if (tiktok?.enabled && tiktok.browser && state.adTracking.tiktok?.pixelId && window.ttq) {
-    window.ttq.track(tiktok.eventName, customData, { event_id: eventId });
+    window.ttq.track(tiktok.eventName, pixelCustomData(tiktok), { event_id: eventId });
   }
 }
 
@@ -2424,7 +2437,7 @@ async function startBillingCheckout(checkoutType) {
     }),
   });
   if (!data.url) throw new Error("Stripe did not return a checkout URL");
-  trackBrowserAdEvent("checkout_started", data.trackingEventId, {
+  trackBrowserAdEvent("checkout_started", data.trackingEventId, data.trackingCustomData || {
     checkout_type: checkoutType,
     credit_amount: Number(el.creditPackCredits.value || 0) || undefined,
     subscription_plan_id: checkoutType === "subscription" ? Number(el.billingPlanSelect.value || 0) || undefined : undefined,

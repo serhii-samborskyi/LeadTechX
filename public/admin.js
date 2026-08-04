@@ -231,6 +231,10 @@ function adEventValue(key, platform, field, fallback = "") {
   return adEventConfig?.[key]?.[platform]?.[field] ?? fallback;
 }
 
+function adEventRootValue(key, field, fallback = "") {
+  return adEventConfig?.[key]?.[field] ?? fallback;
+}
+
 function renderAdEventRows(definitions = [], config = {}) {
   adEventDefinitions = definitions;
   adEventConfig = config || {};
@@ -261,7 +265,28 @@ function renderAdEventRows(definitions = [], config = {}) {
     enabled.dataset.adEnabled = "true";
     enabled.checked = adEventConfig?.[definition.key]?.enabled !== false;
     enabledLabel.append(enabled, " Enabled");
-    eventCell.append(title, description, enabledLabel);
+    const parameterGrid = document.createElement("div");
+    parameterGrid.className = "ad-event-parameters";
+    const valueLabel = document.createElement("label");
+    valueLabel.textContent = "Default value";
+    const value = document.createElement("input");
+    value.type = "number";
+    value.min = "0";
+    value.step = "0.01";
+    value.dataset.adValue = "true";
+    const configuredValue = adEventRootValue(definition.key, "value", "");
+    value.value = configuredValue === null || configuredValue === undefined ? "" : configuredValue;
+    valueLabel.appendChild(value);
+    const currencyLabel = document.createElement("label");
+    currencyLabel.textContent = "Currency";
+    const currency = document.createElement("input");
+    currency.maxLength = 3;
+    currency.autocomplete = "off";
+    currency.dataset.adCurrency = "true";
+    currency.value = adEventRootValue(definition.key, "currency", "").toString().toUpperCase();
+    currencyLabel.appendChild(currency);
+    parameterGrid.append(valueLabel, currencyLabel);
+    eventCell.append(title, description, enabledLabel, parameterGrid);
 
     const platformCell = (platform, fallbackEventName) => {
       const cell = document.createElement("div");
@@ -308,8 +333,12 @@ function collectAdEventConfig() {
   const config = {};
   for (const row of el.adEventRows.querySelectorAll("[data-ad-event-key]")) {
     const key = row.dataset.adEventKey;
+    const valueInput = row.querySelector("[data-ad-value]")?.value.trim();
+    const currencyInput = row.querySelector("[data-ad-currency]")?.value.trim().toUpperCase();
     config[key] = {
       enabled: Boolean(row.querySelector("[data-ad-enabled]")?.checked),
+      value: valueInput === "" ? null : Number(valueInput),
+      currency: currencyInput,
       meta: {
         eventName: row.querySelector('[data-ad-event-name="meta"]')?.value.trim() || "Lead",
         browser: Boolean(row.querySelector('[data-ad-toggle="meta-browser"]')?.checked),
