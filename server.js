@@ -5835,6 +5835,26 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
   });
 });
 
+app.get("/api/onboarding/subscription-plans", async (_req, res) => {
+  try {
+    const [plans, secretKey, webhookSecret] = await Promise.all([
+      activeSubscriptionPlans(),
+      systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
+      stripeWebhookSecret().then(Boolean),
+    ]);
+    res.json({
+      plans: plans.map(publicSubscriptionPlan),
+      stripe: {
+        ready: Boolean(secretKey && webhookSecret),
+        checkoutConfigured: Boolean(secretKey),
+        webhookConfigured: Boolean(webhookSecret),
+      },
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
   try {
     const session = await fastAgentSession(req.body.accessToken);
@@ -5894,6 +5914,168 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
     res.json({ profile: publicBusinessProfile(updated, updatedConfig) });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
+  try {
+    const session = await fastAgentSession(req.body.accessToken);
+    if (!session) return res.status(401).json({ error: "This demo session is invalid or expired" });
+    if (await prisma.user.findFirst({ where: { businessProfileId: session.businessProfileId } })) {
+      throw new Error("This business has already been claimed. Sign in to manage billing.");
+    }
+
+    const [settings, stripe, webhookSecretConfigured] = await Promise.all([
+      getSettings(),
+      stripeClient(),
+      stripeWebhookSecret().then(Boolean),
+    ]);
+    if (!webhookSecretConfigured) throw new Error("Stripe webhook secret is not configured");
+
+    const selectedPlanId = Number(req.body.subscriptionPlanId || req.body.planId || 0);
+    const selectedPlan = selectedPlanId
+      ? await prisma.subscriptionPlan.findFirst({ where: { id: selectedPlanId, active: true } })
+      : null;
+    if (!selectedPlan) throw new Error("Choose an active subscription plan before starting checkout");
+
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const typedClaimToken = String(req.body.claimToken || "").trim();
+    let claimToken = typedClaimToken;
+    let claimRecord = null;
+    if (claimToken) {
+      claimRecord = await prisma.accountClaimToken.findUnique({
+        where: { tokenHash: sessionTokenHash(claimToken) },
+      });
+      if (
+        !claimRecord ||
+        claimRecord.usedAt ||
+        claimRecord.expiresAt <= new Date() ||
+        claimRecord.businessProfileId !== session.businessProfileId
+      ) {
+        throw new Error("This setup link is invalid or expired");
+      }
+      if (email) {
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Enter a valid email address");
+        if (await prisma.user.findUnique({ where: { email } })) throw new Error("That email already belongs to an account");
+        if (!claimRecord.email) {
+          claimRecord = await prisma.accountClaimToken.update({ where: { id: claimRecord.id }, data: { email } });
+        }
+      }
+    } else {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Enter a valid email address");
+      if (await prisma.user.findUnique({ where: { email } })) throw new Error("That email already belongs to an account");
+      await prisma.accountClaimToken.deleteMany({ where: { businessProfileId: session.businessProfileId, usedAt: null } });
+      const issued = issueToken();
+      const expiresAt = new Date(Date.now() + settings.claimLinkDays * 24 * 60 * 60 * 1000);
+      claimToken = issued.token;
+      claimRecord = await prisma.accountClaimToken.create({
+        data: { tokenHash: issued.tokenHash, email, businessProfileId: session.businessProfileId, expiresAt },
+      });
+    }
+
+    const baseUrl = await webhookBaseUrl(req);
+    const successUrl = new URL("/set-password/", `${baseUrl}/`);
+    successUrl.searchParams.set("token", claimToken);
+    successUrl.searchParams.set("billing", "success");
+    const cancelUrl = new URL("/fastagent/", `${baseUrl}/`);
+    cancelUrl.searchParams.set("token", String(req.body.accessToken || ""));
+    cancelUrl.searchParams.set("claim_token", claimToken);
+    cancelUrl.searchParams.set("billing", "cancelled");
+
+    const profile = await prisma.businessProfile.findUnique({
+      where: { id: session.businessProfileId },
+      select: { id: true, businessName: true, stripeCustomerId: true },
+    });
+    const metadata = {
+      businessProfileId: String(session.businessProfileId),
+      checkoutType: "subscription",
+      subscriptionPlanId: String(selectedPlan.id),
+      subscriptionPlanName: selectedPlan.name,
+      creditAmount: String(Math.max(0, Math.round(Number(selectedPlan.monthlyCredits || 0)))),
+      onboardingSource: "fastagent",
+      accountClaimTokenId: claimRecord?.id ? String(claimRecord.id) : "",
+    };
+    const sessionParams = {
+      mode: "subscription",
+      success_url: successUrl.toString(),
+      cancel_url: cancelUrl.toString(),
+      client_reference_id: String(session.businessProfileId),
+      metadata,
+      subscription_data: { metadata },
+    };
+    if (profile?.stripeCustomerId) {
+      sessionParams.customer = profile.stripeCustomerId;
+    } else if (email || claimRecord?.email) {
+      sessionParams.customer_email = email || claimRecord.email;
+    }
+    if (selectedPlan.stripePriceId) {
+      sessionParams.line_items = [{ price: selectedPlan.stripePriceId, quantity: 1 }];
+    } else {
+      if (selectedPlan.monthlyPriceCents < 50) throw new Error("Plan price must be at least $0.50 or use a Stripe price ID");
+      sessionParams.line_items = [
+        {
+          price_data: {
+            currency: "usd",
+            unit_amount: selectedPlan.monthlyPriceCents,
+            recurring: { interval: "month" },
+            product_data: {
+              name: selectedPlan.name,
+              description: selectedPlan.description || `${selectedPlan.monthlyCredits} RingPort credits per month`,
+            },
+          },
+          quantity: 1,
+        },
+      ];
+    }
+
+    const stripeSession = await stripe.checkout.sessions.create(sessionParams);
+    await prisma.stripeCheckoutSession.create({
+      data: {
+        businessProfileId: session.businessProfileId,
+        subscriptionPlanId: selectedPlan.id,
+        stripeSessionId: stripeSession.id,
+        mode: stripeSession.mode || "subscription",
+        status: stripeSession.status || "created",
+        creditAmount: Math.max(0, Math.round(Number(selectedPlan.monthlyCredits || 0))),
+        amountTotal: stripeSession.amount_total ?? null,
+        currency: stripeSession.currency || null,
+        stripeCustomerId: stripeCheckoutCustomer(stripeSession),
+        stripeSubscriptionId: stripeCheckoutSubscription(stripeSession),
+        url: stripeSession.url || null,
+        metadata: jsonSafe(metadata),
+      },
+    });
+
+    const trackingEventId = `stripe_checkout_started_${stripeSession.id}`;
+    const trackingCustomData = {
+      checkout_type: "subscription",
+      value: stripeSession.amount_total ? Number(stripeSession.amount_total) / 100 : Number(selectedPlan.monthlyPriceCents || 0) / 100,
+      currency: String(stripeSession.currency || "USD").toUpperCase(),
+      content_name: selectedPlan.name,
+      credit_amount: selectedPlan.monthlyCredits,
+    };
+    trackAdEvent({
+      req,
+      settings,
+      eventKey: "checkout_started",
+      eventId: trackingEventId,
+      sourceUrl: successUrl.toString(),
+      customData: trackingCustomData,
+      userData: email || claimRecord?.email
+        ? { email: email || claimRecord.email, externalId: `business:${session.businessProfileId}` }
+        : { externalId: `business:${session.businessProfileId}` },
+      source: "fastagent_checkout",
+    }).catch((error) => console.warn(`[ads] fastagent checkout_started tracking skipped: ${error.message}`));
+
+    res.status(201).json({
+      url: stripeSession.url,
+      sessionId: stripeSession.id,
+      claimToken,
+      trackingEventId,
+      trackingCustomData,
+    });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message });
   }
 });
 

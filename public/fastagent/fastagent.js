@@ -38,6 +38,9 @@ const state = {
   agentSpeakingUntil: 0,
   adTracking: null,
   adTrackedEvents: new Set(),
+  subscriptionPlans: [],
+  selectedPlanId: null,
+  billingReady: false,
 };
 
 const el = Object.fromEntries(
@@ -84,6 +87,9 @@ const el = Object.fromEntries(
     "finishSetupLink",
     "claimForm",
     "claimEmail",
+    "paidPlanSection",
+    "paidPlanList",
+    "paidCheckoutButton",
     "claimMessage",
     "transcript",
   ].map((id) => [id, document.querySelector(`#${id}`)]),
@@ -228,6 +234,14 @@ function showError(message) {
 function setCallStatus(text, live = false) {
   el.callStatus.textContent = text;
   el.callStatus.classList.toggle("live", live);
+}
+
+function moneyFromCents(cents) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(Number(cents || 0) / 100);
 }
 
 function appendTranscript(speaker, text) {
@@ -395,6 +409,65 @@ function profilePayload() {
     services: el.profileServices.value,
     language: el.profileLanguage.value,
   };
+}
+
+function fastPlanFeatures(plan) {
+  return [
+    `${plan.monthlyCredits || 0} monthly credits`,
+    `${plan.maxPhoneNumbers || 1} phone number${Number(plan.maxPhoneNumbers || 1) === 1 ? "" : "s"}`,
+    plan.outboundQualificationEnabled ? "Outbound lead calling" : null,
+    plan.smartReviewsEnabled ? "Review links and recovery" : null,
+    plan.callTransfersEnabled ? "Call transfers" : null,
+    plan.appointmentRemindersEnabled ? "Appointment reminders" : null,
+    plan.prioritySupport ? "Priority support" : null,
+  ].filter(Boolean);
+}
+
+function selectPaidPlan(planId) {
+  state.selectedPlanId = Number(planId || 0) || null;
+  for (const card of el.paidPlanList.querySelectorAll(".fast-plan-option")) {
+    card.classList.toggle("active", Number(card.dataset.planId) === state.selectedPlanId);
+  }
+  el.paidCheckoutButton.disabled = !state.selectedPlanId;
+}
+
+function renderPaidPlans() {
+  if (!el.paidPlanSection || !el.paidPlanList) return;
+  const plans = state.subscriptionPlans || [];
+  el.paidPlanList.innerHTML = "";
+  el.paidPlanSection.hidden = !state.billingReady || !plans.length;
+  if (el.paidPlanSection.hidden) return;
+
+  if (!state.selectedPlanId || !plans.some((plan) => plan.id === state.selectedPlanId)) {
+    state.selectedPlanId = plans[0]?.id || null;
+  }
+
+  for (const plan of plans) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "fast-plan-option";
+    card.dataset.planId = String(plan.id);
+    card.innerHTML = '<span class="fast-plan-top"><strong></strong><b></b></span><small></small>';
+    card.querySelector("strong").textContent = plan.name || "Plan";
+    card.querySelector("b").textContent = `${moneyFromCents(plan.monthlyPriceCents)}/mo`;
+    card.querySelector("small").textContent = fastPlanFeatures(plan).join(" · ");
+    card.addEventListener("click", () => selectPaidPlan(plan.id));
+    el.paidPlanList.appendChild(card);
+  }
+  selectPaidPlan(state.selectedPlanId);
+  window.lucide?.createIcons();
+}
+
+async function loadSubscriptionPlans() {
+  try {
+    const data = await api("/api/onboarding/subscription-plans");
+    state.subscriptionPlans = data.plans || [];
+    state.billingReady = Boolean(data.stripe?.ready);
+  } catch {
+    state.subscriptionPlans = [];
+    state.billingReady = false;
+  }
+  renderPaidPlans();
 }
 
 function renderProfileFields(profile) {
@@ -721,6 +794,7 @@ async function initialize() {
       localStorage.setItem(storageKey, state.accessToken);
     }
     renderAgent(data);
+    loadSubscriptionPlans();
     if (createdAgent) {
       const customData = {
         content_name: data.profile?.businessName || businessName,
@@ -796,6 +870,34 @@ el.claimForm.addEventListener("submit", async (event) => {
     button.disabled = false;
   }
 });
+
+el.paidCheckoutButton.addEventListener("click", async () => {
+  el.paidCheckoutButton.disabled = true;
+  el.claimMessage.textContent = "Opening secure checkout";
+  try {
+    await saveProfile({ silent: true });
+    const email = state.claimToken ? "" : el.claimEmail.value.trim();
+    if (!state.claimToken && !email) {
+      el.claimEmail.focus();
+      throw new Error("Enter your email before checkout.");
+    }
+    const data = await api("/api/onboarding/fast-agent/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        accessToken: state.accessToken,
+        claimToken: state.claimToken,
+        email,
+        subscriptionPlanId: state.selectedPlanId,
+      }),
+    });
+    location.assign(data.url);
+  } catch (error) {
+    el.claimMessage.textContent = error.message;
+    el.paidCheckoutButton.disabled = !state.selectedPlanId;
+  }
+});
+
 el.finishSetupLink.addEventListener("click", async (event) => {
   if (!state.profileDirty) return;
   event.preventDefault();

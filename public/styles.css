@@ -657,6 +657,87 @@ body {
   color: #fff;
 }
 
+.fast-paid-start {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.fast-paid-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #bed0c9;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.fast-paid-divider::before,
+.fast-paid-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.fast-plan-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.fast-plan-option {
+  display: grid;
+  gap: 8px;
+  min-height: 112px;
+  padding: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  text-align: left;
+  box-shadow: none;
+}
+
+.fast-plan-option:hover,
+.fast-plan-option.active {
+  border-color: #72c79d;
+  background: rgba(114, 199, 157, 0.16);
+}
+
+.fast-plan-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fast-plan-top strong {
+  font-size: 0.95rem;
+}
+
+.fast-plan-top b {
+  color: #d8f4e7;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.fast-plan-option small {
+  color: #bed0c9;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.fast-paid-button {
+  justify-self: end;
+  border-color: transparent;
+  background: #fff;
+  color: #20352e;
+  font-weight: 850;
+}
+
 .fast-transcript-wrap {
   border-top: 1px solid var(--line);
 }
@@ -732,6 +813,7 @@ body {
   .fast-inline-form { flex-wrap: wrap; }
   .fast-claim .button-link { width: 100%; }
   .fast-claim .fast-inline-form button { width: 100%; }
+  .fast-paid-button { width: 100%; justify-self: stretch; }
 }
 
 [hidden] {
