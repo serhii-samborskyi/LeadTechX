@@ -1748,6 +1748,20 @@ body {
   line-height: 1.35;
 }
 
+.business-plan-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.business-plan-control select,
+.business-plan-control button {
+  min-height: 36px;
+  padding: 0 10px;
+  font-size: 0.82rem;
+}
+
 .business-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2025,6 +2039,21 @@ button {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.plan-disabled {
+  background: #f3f7f5;
+}
+
+.plan-gate-note {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #d8e7df;
+  border-radius: 8px;
+  background: #f7fbf8;
+  color: #2f6f5b;
+  font-size: 0.92rem;
+  line-height: 1.35;
 }
 
 button.primary {

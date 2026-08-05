@@ -1083,6 +1083,145 @@ function publicSubscriptionPlan(plan) {
   };
 }
 
+const BASIC_TRIAL_ENTITLEMENTS = Object.freeze({
+  id: null,
+  name: "Basic trial",
+  slug: "basic-trial",
+  description: "Basic receptionist access before a paid plan is selected.",
+  monthlyPriceCents: 0,
+  monthlyCredits: 0,
+  maxPhoneNumbers: 1,
+  maxTransferTargets: 0,
+  maxUsers: 1,
+  outboundQualificationEnabled: false,
+  smartReviewsEnabled: false,
+  callTransfersEnabled: false,
+  leadWebhookEnabled: false,
+  messageInboxEnabled: true,
+  appointmentRemindersEnabled: false,
+  prioritySupport: false,
+  allowCreditTopups: true,
+  supportLevel: "trial",
+  stripePriceConfigured: false,
+  active: true,
+  sortOrder: 0,
+});
+
+const PLAN_FEATURE_LABELS = Object.freeze({
+  outboundQualificationEnabled: "Outbound qualification",
+  smartReviewsEnabled: "Smart reviews and complaint recovery",
+  callTransfersEnabled: "Call transfers",
+  leadWebhookEnabled: "Lead webhook integrations",
+  messageInboxEnabled: "Message inbox",
+  appointmentRemindersEnabled: "Appointment reminders",
+  allowCreditTopups: "Credit top-ups",
+});
+
+function planFeatureLabel(featureKey) {
+  return PLAN_FEATURE_LABELS[featureKey] || featureKey;
+}
+
+function planGateError(message, code = "plan_required") {
+  const error = new Error(message);
+  error.statusCode = 403;
+  error.code = code;
+  return error;
+}
+
+function featurePlanHint(entitlements) {
+  if (entitlements?.plan?.name && entitlements.source === "plan") return `Current plan: ${entitlements.plan.name}.`;
+  return "Choose a paid plan to unlock this feature.";
+}
+
+async function profileWithPlan(profileOrId) {
+  if (!profileOrId) return null;
+  if (typeof profileOrId === "object" && profileOrId.subscriptionPlan !== undefined) return profileOrId;
+  const id = typeof profileOrId === "object" ? profileOrId.id : Number(profileOrId);
+  if (!id) return null;
+  return prisma.businessProfile.findUnique({
+    where: { id },
+    include: { subscriptionPlan: true },
+  });
+}
+
+function effectiveBusinessEntitlements(profile) {
+  const currentPlan = publicSubscriptionPlan(profile?.subscriptionPlan);
+  const expiredAccount = ["expired", "cancelled", "canceled", "suspended"].includes(String(profile?.accountStatus || "").toLowerCase());
+  const usablePlan = Boolean(currentPlan && currentPlan.active !== false && !profile?.archivedAt && !expiredAccount);
+  const plan = usablePlan ? currentPlan : { ...BASIC_TRIAL_ENTITLEMENTS };
+  return {
+    source: usablePlan ? "plan" : currentPlan ? "inactive_plan" : "basic_trial",
+    accountStatus: profile?.accountStatus || "unknown",
+    plan,
+    assignedPlan: currentPlan,
+    features: {
+      outboundQualificationEnabled: Boolean(plan.outboundQualificationEnabled),
+      smartReviewsEnabled: Boolean(plan.smartReviewsEnabled),
+      callTransfersEnabled: Boolean(plan.callTransfersEnabled),
+      leadWebhookEnabled: Boolean(plan.leadWebhookEnabled),
+      messageInboxEnabled: Boolean(plan.messageInboxEnabled),
+      appointmentRemindersEnabled: Boolean(plan.appointmentRemindersEnabled),
+      allowCreditTopups: Boolean(plan.allowCreditTopups),
+    },
+    limits: {
+      maxPhoneNumbers: Number(plan.maxPhoneNumbers || 1),
+      maxTransferTargets: Number(plan.maxTransferTargets || 0),
+      maxUsers: Number(plan.maxUsers || 1),
+    },
+  };
+}
+
+async function businessEntitlements(profileOrId) {
+  const profile = await profileWithPlan(profileOrId);
+  if (!profile) throw planGateError("Business profile was not found", "business_not_found");
+  return effectiveBusinessEntitlements(profile);
+}
+
+function attachEntitlements(config, entitlements) {
+  if (config && entitlements) {
+    Object.defineProperty(config, "__entitlements", {
+      value: entitlements,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return config;
+}
+
+async function ensureConfigEntitlements(profile, config) {
+  const entitlements = await businessEntitlements(profile);
+  attachEntitlements(config, entitlements);
+  return entitlements;
+}
+
+function entitlementFeatureEnabled(configOrEntitlements, featureKey) {
+  const entitlements = configOrEntitlements?.features ? configOrEntitlements : configOrEntitlements?.__entitlements;
+  if (!entitlements) return false;
+  return Boolean(entitlements.features?.[featureKey]);
+}
+
+async function requireBusinessFeature(profileOrId, featureKey) {
+  const entitlements = await businessEntitlements(profileOrId);
+  if (!entitlements.features?.[featureKey]) {
+    throw planGateError(`${planFeatureLabel(featureKey)} is not included in this plan. ${featurePlanHint(entitlements)}`);
+  }
+  return entitlements;
+}
+
+async function requireBusinessLimit(profileOrId, limitKey, currentCount, label) {
+  const entitlements = await businessEntitlements(profileOrId);
+  const max = Number(entitlements.limits?.[limitKey] ?? 0);
+  if (Number(currentCount || 0) >= max) {
+    throw planGateError(`${label} limit reached for this plan (${max}). Upgrade the plan or remove an existing ${label.toLowerCase()}.`, "plan_limit_reached");
+  }
+  return entitlements;
+}
+
+function errorStatus(error) {
+  return error?.statusCode || 400;
+}
+
 function adminSubscriptionPlan(plan) {
   if (!plan) return null;
   return {
@@ -3499,7 +3638,20 @@ async function allocateDemoNumber(profile, settings) {
 
 async function resolveInboundBusiness(voiceNumber, callerPhone) {
   if (!voiceNumber) return null;
-  if (voiceNumber.numberType !== "demo") return voiceNumber.businessProfile?.archivedAt ? null : voiceNumber.businessProfile || null;
+  if (voiceNumber.numberType !== "demo") {
+    const profile = voiceNumber.businessProfile?.archivedAt ? null : voiceNumber.businessProfile || null;
+    if (!profile || voiceNumber.numberType !== "regular") return profile;
+    const entitlements = await businessEntitlements(profile.id);
+    const maxNumbers = Math.max(0, Number(entitlements.limits.maxPhoneNumbers || 0));
+    const assignedRegularNumbers = await prisma.voiceNumber.findMany({
+      where: { businessProfileId: profile.id, status: "active", numberType: "regular" },
+      select: { id: true },
+      orderBy: { id: "asc" },
+    });
+    const activeIndex = assignedRegularNumbers.findIndex((number) => number.id === voiceNumber.id);
+    if (activeIndex < 0 || activeIndex >= maxNumbers) return null;
+    return profile;
+  }
   const now = new Date();
   const normalizedCaller = String(callerPhone || "").trim();
   const [binding, waiting] = await Promise.all([
@@ -3671,6 +3823,7 @@ async function sendTrackedEmail({
 }
 
 async function sendAppointmentSummary({ settings, profile, config, appointment, lead = null, voiceCallId = null, source = "agent_tool" }) {
+  await ensureConfigEntitlements(profile, config);
   const manageUrl = appointmentManageUrl({ settings, appointment });
   const message = appointmentSummaryText({ profile, appointment, config, manageUrl });
   const metadata = {
@@ -3688,7 +3841,7 @@ async function sendAppointmentSummary({ settings, profile, config, appointment, 
     textDeliveryId: null,
     emailDeliveryId: null,
   };
-  if (appointment.phone) {
+  if (appointment.phone && entitlementFeatureEnabled(config, "messageInboxEnabled")) {
     try {
       const textDelivery = await deliverBusinessMessage({
         settings,
@@ -3707,6 +3860,8 @@ async function sendAppointmentSummary({ settings, profile, config, appointment, 
     } catch (error) {
       result.textError = error.message;
     }
+  } else if (appointment.phone) {
+    result.textError = `${planFeatureLabel("messageInboxEnabled")} is not included in this plan`;
   }
   if (appointment.email) {
     try {
@@ -4596,10 +4751,12 @@ async function ensureBusinessConfig(profile) {
 async function adminContext(businessName, website, user) {
   if (user?.role === "business") {
     if (!user.businessProfileId) throw new Error("No business is assigned to this account");
-    const profile = await prisma.businessProfile.findUnique({ where: { id: user.businessProfileId } });
+    const profile = await prisma.businessProfile.findUnique({ where: { id: user.businessProfileId }, include: { subscriptionPlan: true } });
     if (!profile) throw new Error("Assigned business was not found");
     if (profile.archivedAt) throw new Error("This business account is archived");
-    return { profile, config: await ensureBusinessConfig(profile) };
+    const config = await ensureBusinessConfig(profile);
+    const entitlements = await ensureConfigEntitlements(profile, config);
+    return { profile, config, entitlements };
   }
   const settings = await getSettings();
   const { profile } = await researchBusiness({
@@ -4608,7 +4765,8 @@ async function adminContext(businessName, website, user) {
     researchModel: settings.researchModel,
   });
   const config = await ensureBusinessConfig(profile);
-  return { profile, config };
+  const entitlements = await ensureConfigEntitlements(profile, config);
+  return { profile, config, entitlements };
 }
 
 function priceDisplay(entry) {
@@ -4620,8 +4778,11 @@ function priceDisplay(entry) {
 }
 
 function activeTransferTargets(config) {
+  if (!entitlementFeatureEnabled(config, "callTransfersEnabled")) return [];
+  const maxTargets = Math.max(0, Number(config.__entitlements?.limits?.maxTransferTargets ?? Number.MAX_SAFE_INTEGER));
   return (config.transferTargets || [])
     .filter((target) => target.active !== false && target.phone)
+    .slice(0, maxTargets)
     .map((target) => ({
       id: target.id,
       label: target.label,
@@ -4650,6 +4811,7 @@ function runtimeBusinessInstructions(config) {
     category: entry.category,
   }));
   const transferTargets = activeTransferTargets(config);
+  const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
   return `
 Business-managed receptionist configuration:
 - Appointment mode: ${config.appointmentMode === "instant" ? "Book available slots immediately" : "Create pending appointment requests"}.
@@ -4661,7 +4823,7 @@ Business-managed receptionist configuration:
 - Call transfer targets: ${transferTargets.length ? JSON.stringify(transferTargets) : "none"}
 - Extra instructions: ${config.extraInstructions || "none"}
 - Smart review/recovery: ${
-    config.reviewRequestsEnabled
+    smartReviewsAvailable
       ? `enabled. ${config.reviewPromptInstructions || ""} Review link configured: ${config.reviewLink ? "yes" : "no"}. Complaint recovery instructions: ${config.complaintRecoveryInstructions || "none"}.`
       : "disabled"
   }
@@ -4673,9 +4835,9 @@ Phone-speed rules:
 - After get_available_slots returns, offer only the best matching slot or at most two options. Do not read a long list.
 - If the caller asks to book and has given a time, collect only missing required intake fields, then call schedule_appointment.
 - Do not repeat the same confirmation question after the caller already answered it.
-- If the caller asks for a person, department, manager, or topic you cannot answer from the configured knowledge, offer the best matching call transfer target. Only call transfer_call after the caller agrees to be transferred. After calling transfer_call, do not call end_call. If no transfer target fits, record a transfer_message instead.
+- If the caller asks for a person, department, manager, or topic you cannot answer from the configured knowledge, ${transferTargets.length ? "offer the best matching call transfer target. Only call transfer_call after the caller agrees to be transferred. After calling transfer_call, do not call end_call." : "record a transfer_message for human follow-up."} If no transfer target fits, record a transfer_message instead.
 
-Use get_available_slots before offering or scheduling a time. Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status="confirmed". For status="requested", say it is pending confirmation. If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint. Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
+Use get_available_slots before offering or scheduling a time. Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status="confirmed". For status="requested", say it is pending confirmation. ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
 
 function cellText(value) {
@@ -4725,6 +4887,7 @@ function toolDeclarations(config) {
   };
   const appointmentRequired = ["start"];
   const transferTargets = activeTransferTargets(config);
+  const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
   for (const field of config.intakeFields) {
     appointmentProperties[field.fieldKey] = {
       type: "STRING",
@@ -4827,56 +4990,60 @@ function toolDeclarations(config) {
           },
         ]
       : []),
-    {
-      name: "record_customer_feedback",
-      description:
-        "Record whether the customer is happy, neutral, or unhappy after a completed service, appointment, or follow-up conversation.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          sentiment: { type: "STRING", description: "happy, unhappy, neutral, or unknown." },
-          rating: { type: "INTEGER", description: "Optional 1-5 satisfaction rating." },
-          feedback: { type: "STRING", description: "What the customer said about the service." },
-          name: { type: "STRING" },
-          phone: { type: "STRING" },
-          email: { type: "STRING" },
-        },
-        required: ["sentiment"],
-      },
-    },
-    {
-      name: "send_review_request",
-      description:
-        "Text the configured review link to a happy customer after recording their positive satisfaction feedback.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          name: { type: "STRING" },
-          phone: { type: "STRING" },
-          email: { type: "STRING" },
-          feedback: { type: "STRING" },
-          rating: { type: "INTEGER" },
-        },
-        required: ["phone"],
-      },
-    },
-    {
-      name: "escalate_complaint",
-      description:
-        "Record an unhappy customer complaint and notify management using the configured manager notification phone.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          name: { type: "STRING" },
-          phone: { type: "STRING" },
-          email: { type: "STRING" },
-          complaint: { type: "STRING" },
-          requestedResolution: { type: "STRING" },
-          urgency: { type: "STRING" },
-        },
-        required: ["complaint"],
-      },
-    },
+    ...(smartReviewsAvailable
+      ? [
+          {
+            name: "record_customer_feedback",
+            description:
+              "Record whether the customer is happy, neutral, or unhappy after a completed service, appointment, or follow-up conversation.",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                sentiment: { type: "STRING", description: "happy, unhappy, neutral, or unknown." },
+                rating: { type: "INTEGER", description: "Optional 1-5 satisfaction rating." },
+                feedback: { type: "STRING", description: "What the customer said about the service." },
+                name: { type: "STRING" },
+                phone: { type: "STRING" },
+                email: { type: "STRING" },
+              },
+              required: ["sentiment"],
+            },
+          },
+          {
+            name: "send_review_request",
+            description:
+              "Text the configured review link to a happy customer after recording their positive satisfaction feedback.",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                name: { type: "STRING" },
+                phone: { type: "STRING" },
+                email: { type: "STRING" },
+                feedback: { type: "STRING" },
+                rating: { type: "INTEGER" },
+              },
+              required: ["phone"],
+            },
+          },
+          {
+            name: "escalate_complaint",
+            description:
+              "Record an unhappy customer complaint and notify management using the configured manager notification phone.",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                name: { type: "STRING" },
+                phone: { type: "STRING" },
+                email: { type: "STRING" },
+                complaint: { type: "STRING" },
+                requestedResolution: { type: "STRING" },
+                urgency: { type: "STRING" },
+              },
+              required: ["complaint"],
+            },
+          },
+        ]
+      : []),
     {
       name: "end_call",
       description:
@@ -5160,6 +5327,7 @@ async function runToolCall(profile, config, functionCall, context = {}) {
   }
 
   if (functionCall.name === "transfer_call") {
+    await requireBusinessFeature(profile.id, "callTransfersEnabled");
     let callControlId = context.callControlId || null;
     if (!callControlId && context.voiceCallId) {
       const voiceCall = await prisma.voiceCall.findUnique({
@@ -5242,6 +5410,7 @@ async function runToolCall(profile, config, functionCall, context = {}) {
   }
 
   if (functionCall.name === "record_customer_feedback") {
+    await requireBusinessFeature(profile.id, "smartReviewsEnabled");
     const sentiment = normalizeSentiment(args.sentiment);
     const phone = args.phone ? String(args.phone) : context.fromNumber || contextLead?.phone || null;
     const feedbackLead = contextLead || (context.qualificationLeadId ? await prisma.lead.findUnique({ where: { id: context.qualificationLeadId } }) : null);
@@ -5267,6 +5436,7 @@ async function runToolCall(profile, config, functionCall, context = {}) {
   }
 
   if (functionCall.name === "send_review_request") {
+    await requireBusinessFeature(profile.id, "smartReviewsEnabled");
     if (!config.reviewRequestsEnabled) throw new Error("Review requests are disabled for this business");
     const settings = await getSettings();
     const reviewUrl = await reviewRequestUrl({ settings, profile, config });
@@ -5313,6 +5483,7 @@ async function runToolCall(profile, config, functionCall, context = {}) {
   }
 
   if (functionCall.name === "escalate_complaint") {
+    await requireBusinessFeature(profile.id, "smartReviewsEnabled");
     const phone = args.phone ? String(args.phone) : context.fromNumber || contextLead?.phone || null;
     const complaintText = [args.complaint, args.requestedResolution ? `Requested resolution: ${args.requestedResolution}` : ""]
       .filter(Boolean)
@@ -6414,8 +6585,12 @@ app.post("/api/public/appointments/:token/reschedule", async (req, res) => {
 
 app.get("/api/public/reviews/:cacheKey", async (req, res) => {
   try {
-    const profile = await prisma.businessProfile.findUnique({ where: { cacheKey: req.params.cacheKey } });
+    const profile = await prisma.businessProfile.findUnique({ where: { cacheKey: req.params.cacheKey }, include: { subscriptionPlan: true } });
     if (!profile) return res.status(404).json({ error: "Business was not found" });
+    const entitlements = effectiveBusinessEntitlements(profile);
+    if (!entitlements.features.smartReviewsEnabled) {
+      return res.status(403).json({ error: `${planFeatureLabel("smartReviewsEnabled")} is not enabled for this business` });
+    }
     const links = await prisma.businessReviewLink.findMany({
       where: { businessProfileId: profile.id, active: true },
       orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
@@ -6425,7 +6600,7 @@ app.get("/api/public/reviews/:cacheKey", async (req, res) => {
       links: links.map((link) => ({ id: link.id, serviceName: link.serviceName, reviewUrl: link.reviewUrl })),
     });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -6891,6 +7066,15 @@ app.post("/api/admin/users", requireAuth, requireAdmin, async (req, res) => {
       website: req.body.website,
       researchModel: settings.researchModel,
     });
+    const subscriptionPlanId = req.body.subscriptionPlanId ? Number(req.body.subscriptionPlanId) : null;
+    if (subscriptionPlanId) {
+      const plan = await prisma.subscriptionPlan.findUnique({ where: { id: subscriptionPlanId } });
+      if (!plan) throw new Error("Subscription plan was not found");
+      if (!plan.active) throw new Error("Only active plans can be assigned to a business");
+      await prisma.businessProfile.update({ where: { id: profile.id }, data: { subscriptionPlanId } });
+    }
+    const existingUserCount = await prisma.user.count({ where: { businessProfileId: profile.id, role: "business" } });
+    await requireBusinessLimit(profile.id, "maxUsers", existingUserCount, "Business user");
     await ensureBusinessConfig(profile);
     const user = await prisma.user.create({
       data: {
@@ -6902,10 +7086,10 @@ app.post("/api/admin/users", requireAuth, requireAdmin, async (req, res) => {
       },
       include: { businessProfile: true },
     });
-    await prisma.businessProfile.update({ where: { id: profile.id }, data: { accountStatus: "paid" } });
+    await prisma.businessProfile.update({ where: { id: profile.id }, data: { accountStatus: "paid", subscriptionPlanId: subscriptionPlanId || undefined } });
     res.status(201).json({ user: { id: user.id, email: user.email, name: user.name, role: user.role, business: user.businessProfile } });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -7026,6 +7210,32 @@ app.patch("/api/admin/businesses/:id/archive", requireAuth, requireAdmin, async 
     res.json({ ok: true, business: updated });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+});
+
+app.patch("/api/admin/businesses/:id/plan", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const subscriptionPlanId = req.body?.subscriptionPlanId ? Number(req.body.subscriptionPlanId) : null;
+    const existing = await prisma.businessProfile.findUnique({ where: { id }, select: { id: true } });
+    if (!existing) return res.status(404).json({ error: "Business was not found" });
+    let plan = null;
+    if (subscriptionPlanId) {
+      plan = await prisma.subscriptionPlan.findUnique({ where: { id: subscriptionPlanId } });
+      if (!plan) throw new Error("Subscription plan was not found");
+      if (!plan.active) throw new Error("Only active plans can be assigned to a business");
+    }
+    const updated = await prisma.businessProfile.update({
+      where: { id },
+      data: {
+        subscriptionPlanId,
+        accountStatus: subscriptionPlanId ? "paid" : undefined,
+      },
+      include: { subscriptionPlan: true },
+    });
+    res.json({ ok: true, business: updated });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -7175,6 +7385,10 @@ app.post("/api/admin/telnyx/numbers/:id/assign", requireAuth, requireAdmin, asyn
     if (number.numberType !== "regular") {
       throw new Error("Only regular numbers can be assigned to a business. Save this number as Regular first.");
     }
+    const currentNumberCount = await prisma.voiceNumber.count({
+      where: { businessProfileId: business.id, id: { not: number.id }, numberType: "regular" },
+    });
+    await requireBusinessLimit(business.id, "maxPhoneNumbers", currentNumberCount, "Phone number");
     const connectionId = await systemSecret("telnyx_connection_id", "TELNYX_CONNECTION_ID");
     if (!connectionId) throw new Error("Telnyx connection ID is not configured");
     await telnyxRequest(`/phone_numbers/${encodeURIComponent(number.providerNumberId)}`, {
@@ -7188,7 +7402,7 @@ app.post("/api/admin/telnyx/numbers/:id/assign", requireAuth, requireAdmin, asyn
     });
     res.json({ number: updated });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -7286,14 +7500,33 @@ async function businessPhoneNumbers(profileId) {
 }
 
 async function businessAdminResponse(profile, config) {
-  const [phoneNumbers, reviewLinks] = await Promise.all([
+  const [phoneNumbers, reviewLinks, userCount, entitlements] = await Promise.all([
     businessPhoneNumbers(profile.id),
     prisma.businessReviewLink.findMany({
       where: { businessProfileId: profile.id },
       orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
     }),
+    prisma.user.count({ where: { businessProfileId: profile.id, role: "business" } }),
+    businessEntitlements(profile.id),
   ]);
-  return { profile, config, phoneNumbers, reviewLinks };
+  attachEntitlements(config, entitlements);
+  return {
+    profile,
+    config,
+    phoneNumbers,
+    reviewLinks,
+    entitlements,
+    planUsage: {
+      phoneNumbers: phoneNumbers.length,
+      transferTargets: config?.transferTargets?.length || 0,
+      users: userCount,
+      overLimit: {
+        phoneNumbers: phoneNumbers.length > entitlements.limits.maxPhoneNumbers,
+        transferTargets: (config?.transferTargets?.length || 0) > entitlements.limits.maxTransferTargets,
+        users: userCount > entitlements.limits.maxUsers,
+      },
+    },
+  };
 }
 
 function adminRequestIdentity(req) {
@@ -7362,14 +7595,24 @@ app.put("/api/business-admin/profile", async (req, res) => {
 
 app.put("/api/business-admin/config", async (req, res) => {
   try {
-    const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const { profile, config, entitlements } = await adminContext(req.body.businessName, req.body.website, req.user);
     const appointmentMode = req.body.appointmentMode === "request" ? "request" : "instant";
+    const nextQualificationEnabled =
+      req.body.qualificationEnabled === undefined ? config.qualificationEnabled : Boolean(req.body.qualificationEnabled);
+    const nextReviewRequestsEnabled =
+      req.body.reviewRequestsEnabled === undefined ? config.reviewRequestsEnabled : Boolean(req.body.reviewRequestsEnabled);
+    if (nextQualificationEnabled && !entitlements.features.outboundQualificationEnabled) {
+      throw planGateError(`${planFeatureLabel("outboundQualificationEnabled")} is not included in this plan. ${featurePlanHint(entitlements)}`);
+    }
+    if (nextReviewRequestsEnabled && !entitlements.features.smartReviewsEnabled) {
+      throw planGateError(`${planFeatureLabel("smartReviewsEnabled")} is not included in this plan. ${featurePlanHint(entitlements)}`);
+    }
     await prisma.businessConfig.update({
       where: { id: config.id },
       data: {
         extraInstructions: String(req.body.extraInstructions || ""),
         qualificationInstructions: String(req.body.qualificationInstructions || config.qualificationInstructions || ""),
-        qualificationEnabled: req.body.qualificationEnabled === undefined ? config.qualificationEnabled : Boolean(req.body.qualificationEnabled),
+        qualificationEnabled: nextQualificationEnabled,
         qualificationLaunchMode: ["approval", "immediate"].includes(String(req.body.qualificationLaunchMode))
           ? String(req.body.qualificationLaunchMode)
           : config.qualificationLaunchMode || "approval",
@@ -7384,8 +7627,7 @@ app.put("/api/business-admin/config", async (req, res) => {
           0,
           Number(req.body.leadWebhookDedupeWindowHours ?? config.leadWebhookDedupeWindowHours ?? 24),
         ),
-        reviewRequestsEnabled:
-          req.body.reviewRequestsEnabled === undefined ? config.reviewRequestsEnabled : Boolean(req.body.reviewRequestsEnabled),
+        reviewRequestsEnabled: nextReviewRequestsEnabled,
         reviewLink: String(req.body.reviewLink ?? config.reviewLink ?? "").trim(),
         reviewPromptInstructions: String(
           req.body.reviewPromptInstructions ?? config.reviewPromptInstructions ?? "",
@@ -7437,7 +7679,7 @@ app.put("/api/business-admin/config", async (req, res) => {
     }
     res.json(await refreshedAdmin(profile));
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -7612,6 +7854,8 @@ function normalizeTransferPhone(value) {
 app.post("/api/business-admin/transfer-targets", async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    await requireBusinessFeature(profile.id, "callTransfersEnabled");
+    await requireBusinessLimit(profile.id, "maxTransferTargets", config.transferTargets?.length || 0, "Transfer contact");
     const label = String(req.body.label || "").trim();
     if (!label) throw new Error("Transfer label is required");
     await prisma.businessTransferTarget.create({
@@ -7626,7 +7870,7 @@ app.post("/api/business-admin/transfer-targets", async (req, res) => {
     });
     res.status(201).json(await refreshedAdmin(profile));
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -7634,6 +7878,7 @@ app.put("/api/business-admin/transfer-targets/:id", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "callTransfersEnabled");
     const existing = await prisma.businessTransferTarget.findFirst({
       where: { id: Number(req.params.id), businessConfigId: config.id },
     });
@@ -7652,7 +7897,7 @@ app.put("/api/business-admin/transfer-targets/:id", async (req, res) => {
     });
     res.json(await refreshedAdmin(profile));
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -7852,6 +8097,7 @@ app.post("/api/business-admin/appointments/:id/summary", async (req, res) => {
 app.post("/api/business-admin/review-links", async (req, res) => {
   try {
     const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    await requireBusinessFeature(profile.id, "smartReviewsEnabled");
     const serviceName = String(req.body.serviceName || "").trim();
     const reviewUrl = String(req.body.reviewUrl || "").trim();
     if (!serviceName) throw new Error("Review service name is required");
@@ -7868,7 +8114,7 @@ app.post("/api/business-admin/review-links", async (req, res) => {
     const config = await ensureBusinessConfig(profile);
     res.status(201).json(await businessAdminResponse(profile, config));
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -7876,6 +8122,7 @@ app.put("/api/business-admin/review-links/:id", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "smartReviewsEnabled");
     const existing = await prisma.businessReviewLink.findFirst({
       where: { id: Number(req.params.id), businessProfileId: profile.id },
     });
@@ -7895,7 +8142,7 @@ app.put("/api/business-admin/review-links/:id", async (req, res) => {
     });
     res.json(await businessAdminResponse(profile, config));
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -8561,6 +8808,22 @@ async function processLeadWebhookSubmission({ token, payload, profile = null, so
     });
     return { statusCode: 404, body: { error: "Lead webhook was not found or is disabled" } };
   }
+  const entitlements = await businessEntitlements(targetProfile.id);
+  if (!entitlements.features.leadWebhookEnabled) {
+    await prisma.leadWebhookEvent.create({
+      data: {
+        businessProfileId: targetProfile.id,
+        token: cleanToken || targetProfile.leadWebhookToken,
+        status: "rejected",
+        payload,
+        error: `${planFeatureLabel("leadWebhookEnabled")} is not included in this plan`,
+      },
+    });
+    return {
+      statusCode: 403,
+      body: { ok: false, status: "rejected", error: `${planFeatureLabel("leadWebhookEnabled")} is not included in this plan` },
+    };
+  }
 
   const config = await ensureBusinessConfig(targetProfile);
   const normalized = normalizeLeadWebhookPayload(payload);
@@ -8675,6 +8938,7 @@ function nextQualificationTime(config, desiredDate = new Date()) {
 async function maybeAutoStartQualification({ profile, config, lead }) {
   if (!qualificationAutoLaunchEnabled(config)) return { started: false };
   try {
+    await requireBusinessFeature(profile.id, "outboundQualificationEnabled");
     const delaySeconds = randomQualificationDelaySeconds(config);
     const requestedFor = new Date(Date.now() + delaySeconds * 1000);
     const scheduledFor = nextQualificationTime(config, requestedFor);
@@ -8717,20 +8981,25 @@ const QUALIFICATION_DISPATCH_STALE_MS = 5 * 60 * 1000;
 const QUALIFICATION_CALL_STALE_MS = 2 * 60 * 60 * 1000;
 
 async function assignedOutboundNumber(profile) {
-  const number = await prisma.voiceNumber.findFirst({
+  const entitlements = await businessEntitlements(profile.id);
+  const maxNumbers = Math.max(0, Number(entitlements.limits.maxPhoneNumbers || 0));
+  const numbers = await prisma.voiceNumber.findMany({
     where: {
       businessProfileId: profile.id,
       status: "active",
       numberType: { in: ["regular", "demo"] },
     },
-    orderBy: [{ numberType: "desc" }, { updatedAt: "desc" }],
+    orderBy: [{ numberType: "desc" }, { id: "asc" }],
   });
+  const regularNumbers = numbers.filter((number) => number.numberType === "regular").slice(0, maxNumbers);
+  const number = regularNumbers[0] || numbers.find((item) => item.numberType === "demo") || null;
   if (!number) throw new Error("Assign an active Telnyx number to this business before making outbound calls");
   return number;
 }
 
 async function prepareQualificationAttempt({ config, lead, status = "queued", scheduledFor = null }) {
   if (!config.qualificationEnabled) throw new Error("Outbound qualification is disabled for this business");
+  await requireBusinessFeature(lead.businessProfileId, "outboundQualificationEnabled");
   const toNumber = normalizeE164Phone(lead.phone);
   if (!/^\+[1-9]\d{7,14}$/.test(toNumber)) throw new Error("Lead phone must be in a valid E.164 format");
   const existingOpenAttempt = await prisma.outboundQualificationCall.findFirst({
@@ -8765,6 +9034,7 @@ async function startOutboundQualificationCall({ profile, config, lead, attemptId
     }
     throw new Error("Outbound qualification is disabled for this business");
   }
+  await requireBusinessFeature(profile.id, "outboundQualificationEnabled");
   const prepared = attemptId
     ? {
         attempt: await prisma.outboundQualificationCall.findFirst({
@@ -9070,6 +9340,16 @@ app.post("/webhooks/leads/:token", async (req, res) => {
 app.get("/api/business-admin/lead-webhook", async (req, res) => {
   try {
     const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const entitlements = await businessEntitlements(profile.id);
+    if (!entitlements.features.leadWebhookEnabled) {
+      return res.json({
+        enabled: false,
+        gated: true,
+        message: `${planFeatureLabel("leadWebhookEnabled")} is not included in this plan. ${featurePlanHint(entitlements)}`,
+        webhookUrl: "",
+        ...leadWebhookHelp(),
+      });
+    }
     const updatedProfile = await ensureLeadWebhook(profile);
     const baseUrl = await webhookBaseUrl(req);
     res.json({
@@ -9086,6 +9366,7 @@ app.post("/api/business-admin/lead-webhook/rotate", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "leadWebhookEnabled");
     const updatedProfile = await prisma.businessProfile.update({
       where: { id: profile.id },
       data: { leadWebhookToken: issueLeadWebhookToken(), leadWebhookEnabled: true },
@@ -9097,7 +9378,7 @@ app.post("/api/business-admin/lead-webhook/rotate", async (req, res) => {
       ...leadWebhookHelp(),
     });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9105,6 +9386,7 @@ app.post("/api/business-admin/lead-webhook/test", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "leadWebhookEnabled");
     const updatedProfile = await ensureLeadWebhook(profile);
     const payload = req.body.payload && typeof req.body.payload === "object" ? req.body.payload : req.body;
     const result = await processLeadWebhookSubmission({
@@ -9115,7 +9397,7 @@ app.post("/api/business-admin/lead-webhook/test", async (req, res) => {
     });
     res.status(result.statusCode).json(result.body);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9282,6 +9564,7 @@ app.post("/api/business-admin/crm/:id/qualify-call", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "outboundQualificationEnabled");
     const lead = await prisma.lead.findFirst({
       where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
     });
@@ -9289,7 +9572,7 @@ app.post("/api/business-admin/crm/:id/qualify-call", async (req, res) => {
     const result = await startOutboundQualificationCall({ profile, config, lead });
     res.status(result.reused ? 200 : 201).json({ attempt: result.attempt, reused: result.reused });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9297,6 +9580,7 @@ app.post("/api/business-admin/crm/:id/feedback", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "smartReviewsEnabled");
     const lead = await prisma.lead.findFirst({
       where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
       include: { voiceCall: true },
@@ -9320,7 +9604,7 @@ app.post("/api/business-admin/crm/:id/feedback", async (req, res) => {
     });
     res.status(201).json({ feedback });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9328,6 +9612,7 @@ app.post("/api/business-admin/crm/:id/review-request", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "smartReviewsEnabled");
     const lead = await prisma.lead.findFirst({
       where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
       include: { voiceCall: true },
@@ -9377,7 +9662,7 @@ app.post("/api/business-admin/crm/:id/review-request", async (req, res) => {
     await updateLeadFeedbackState({ lead, feedback: updatedFeedback, sentiment: "happy", extraFields: { reviewRequestedAt: updatedFeedback.reviewRequestedAt } });
     res.status(201).json({ feedback: updatedFeedback, delivery: delivery.delivery });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9385,6 +9670,7 @@ app.post("/api/business-admin/crm/:id/escalate-complaint", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "smartReviewsEnabled");
     const lead = await prisma.lead.findFirst({
       where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
       include: { voiceCall: true },
@@ -9448,7 +9734,7 @@ app.post("/api/business-admin/crm/:id/escalate-complaint", async (req, res) => {
     await updateLeadFeedbackState({ lead, feedback: escalatedFeedback, sentiment: "unhappy", extraFields: { transferMessageId: transfer.id } });
     res.status(201).json({ feedback: escalatedFeedback, transferMessage: transfer, delivery });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9456,6 +9742,7 @@ app.post("/api/business-admin/crm/:id/qualify-retry", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "outboundQualificationEnabled");
     const lead = await prisma.lead.findFirst({
       where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
     });
@@ -9466,7 +9753,7 @@ app.post("/api/business-admin/crm/:id/qualify-retry", async (req, res) => {
     scheduleQualificationWorker(1000);
     res.status(prepared.reused ? 200 : 201).json({ attempt: prepared.attempt, reused: prepared.reused });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9533,6 +9820,7 @@ app.get("/api/business-admin/lead-webhook/events", async (req, res) => {
 app.get("/api/business-admin/messages", async (req, res) => {
   try {
     const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    await requireBusinessFeature(profile.id, "messageInboxEnabled");
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
     const [messages, inboundMessages] = await Promise.all([
       prisma.messageDelivery.findMany({
@@ -9558,7 +9846,7 @@ app.get("/api/business-admin/messages", async (req, res) => {
     ]);
     res.json({ messages, inboundMessages });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9566,6 +9854,7 @@ app.post("/api/business-admin/messages/test", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "messageInboxEnabled");
     const settings = await getSettings();
     const message = String(req.body.message || `Test message from ${profile.businessName}`).trim();
     const result = await deliverBusinessMessage({
@@ -9579,7 +9868,7 @@ app.post("/api/business-admin/messages/test", async (req, res) => {
     });
     res.status(201).json({ ok: true, provider: result.provider, delivery: result.delivery });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9587,6 +9876,7 @@ app.post("/api/business-admin/messages/manual", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "messageInboxEnabled");
     const settings = await getSettings();
     const toPhone = normalizeE164Phone(req.body.toPhone);
     const message = String(req.body.message || "").trim();
@@ -9609,7 +9899,7 @@ app.post("/api/business-admin/messages/manual", async (req, res) => {
     });
     res.status(201).json({ ok: true, provider: result.provider, delivery: result.delivery });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9617,6 +9907,7 @@ app.post("/api/business-admin/crm/:id/missed-call-followup", async (req, res) =>
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "messageInboxEnabled");
     const lead = await prisma.lead.findFirst({
       where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
       include: { voiceCall: true },
@@ -9642,7 +9933,7 @@ app.post("/api/business-admin/crm/:id/missed-call-followup", async (req, res) =>
     });
     res.status(201).json({ ok: true, provider: result.provider, delivery: result.delivery });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -9650,6 +9941,7 @@ app.post("/api/business-admin/appointments/:id/reminder", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    await requireBusinessFeature(profile.id, "appointmentRemindersEnabled");
     const appointment = await prisma.appointment.findFirst({
       where: { id: Number(req.params.id), businessName: profile.businessName, website: profile.website },
     });
@@ -9684,7 +9976,7 @@ app.post("/api/business-admin/appointments/:id/reminder", async (req, res) => {
     });
     res.status(201).json({ ok: true, provider: result.provider, delivery: result.delivery });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -10233,6 +10525,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
 
   let profile = call.businessProfile;
   let config = profile ? await ensureBusinessConfig(profile) : null;
+  if (profile && config) await ensureConfigEntitlements(profile, config);
   let onboardingSession = call.onboardingSession;
   const qualificationAttempt = call.outboundQualificationCall;
   const qualificationLead = qualificationAttempt?.lead || null;
@@ -11778,6 +12071,7 @@ wss.on("connection", (clientWs, request) => {
         }
         profile = result.profile;
         businessConfig = await ensureBusinessConfig(profile);
+        await ensureConfigEntitlements(profile, businessConfig);
         identity = sessionIdentity(businessConfig.agentName || settings.agentName, businessConfig.language || settings.language);
         sendClient({ type: "business", cached: result.cached, profile });
         sendClient({ type: "debug", message: `Business profile loaded. Cache: ${result.cached ? "yes" : "no"}.` });

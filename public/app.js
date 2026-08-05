@@ -24,6 +24,8 @@ const state = {
   crmSearchTimer: null,
   selectedMessageThreadKey: "",
   messageData: { messages: [], inboundMessages: [] },
+  entitlements: null,
+  planUsage: null,
   adTracking: null,
   businessName: params.get("business_name") || "Business Name",
   website: params.get("website") || "",
@@ -998,6 +1000,115 @@ function renderTransferTargets(entries = []) {
   }
 }
 
+const PLAN_FEATURE_LABELS = {
+  outboundQualificationEnabled: "Outbound qualification",
+  smartReviewsEnabled: "Smart reviews and complaint recovery",
+  callTransfersEnabled: "Call transfers",
+  leadWebhookEnabled: "Lead webhook integrations",
+  messageInboxEnabled: "Message inbox",
+  appointmentRemindersEnabled: "Appointment reminders",
+};
+
+function planAllows(featureKey) {
+  if (!state.entitlements?.features) return true;
+  return state.entitlements.features[featureKey] !== false;
+}
+
+function planGateMessage(featureKey) {
+  const plan = state.entitlements?.assignedPlan || state.entitlements?.plan;
+  const planText = plan?.name && state.entitlements?.source === "plan" ? `Current plan: ${plan.name}.` : "Choose a paid plan to unlock it.";
+  return `${PLAN_FEATURE_LABELS[featureKey] || "This feature"} is not included in this plan. ${planText}`;
+}
+
+function setNodesDisabled(nodes, disabled) {
+  for (const node of nodes.filter(Boolean)) {
+    node.disabled = Boolean(disabled);
+    node.classList.toggle("plan-disabled", Boolean(disabled));
+  }
+}
+
+function planNotice(container, featureKey, locked) {
+  if (!container) return;
+  const existing = container.querySelector(`.plan-gate-note[data-feature="${featureKey}"]`);
+  if (!locked) {
+    existing?.remove();
+    return;
+  }
+  const notice = existing || document.createElement("div");
+  notice.className = "plan-gate-note";
+  notice.dataset.feature = featureKey;
+  notice.textContent = planGateMessage(featureKey);
+  if (!existing) container.appendChild(notice);
+}
+
+function applyPlanLocks() {
+  const outboundLocked = !planAllows("outboundQualificationEnabled");
+  const reviewsLocked = !planAllows("smartReviewsEnabled");
+  const transfersLocked = !planAllows("callTransfersEnabled");
+  const leadWebhookLocked = !planAllows("leadWebhookEnabled");
+  const messageLocked = !planAllows("messageInboxEnabled");
+  const remindersLocked = !planAllows("appointmentRemindersEnabled");
+
+  setNodesDisabled(
+    [
+      el.qualificationEnabled,
+      el.qualificationLaunchMode,
+      el.qualificationInstructions,
+      el.qualificationDelayMinSeconds,
+      el.qualificationDelayMaxSeconds,
+      el.qualificationMaxAttempts,
+      el.qualificationRetryDelayMinutes,
+    ],
+    outboundLocked,
+  );
+  planNotice(document.querySelector('[data-automation-section="qualification"] .automation-section-heading'), "outboundQualificationEnabled", outboundLocked);
+
+  setNodesDisabled(
+    [
+      el.reviewRequestsEnabled,
+      el.reviewLink,
+      el.managerNotificationPhone,
+      el.reviewPromptInstructions,
+      el.reviewRequestTemplate,
+      el.complaintRecoveryInstructions,
+      el.complaintEscalationTemplate,
+      el.reviewServiceName,
+      el.reviewServiceUrl,
+      el.reviewServiceSort,
+      el.addReviewLinkButton,
+    ],
+    reviewsLocked,
+  );
+  setNodesDisabled(
+    Array.from(el.reviewLinkList.querySelectorAll("input, button[data-action='save-review-link']")),
+    reviewsLocked,
+  );
+  planNotice(document.querySelector('[data-automation-section="reviews"] .automation-section-heading'), "smartReviewsEnabled", reviewsLocked);
+
+  setNodesDisabled(
+    [el.transferLabel, el.transferPhone, el.transferDescription, el.transferSortOrder, el.transferActive, el.addTransferTargetButton],
+    transfersLocked,
+  );
+  setNodesDisabled(
+    Array.from(el.transferTargetList.querySelectorAll("input, button[data-action='save-transfer-target']")),
+    transfersLocked,
+  );
+  planNotice(document.querySelector('[data-view="transfers"] .admin-view-heading'), "callTransfersEnabled", transfersLocked);
+
+  setNodesDisabled([el.copyCrmWebhookButton, el.rotateCrmWebhookButton, el.sendCrmWebhookTestButton], leadWebhookLocked);
+  planNotice(document.querySelector('[data-view="leads"] .admin-view-heading'), "leadWebhookEnabled", leadWebhookLocked);
+
+  setNodesDisabled([el.refreshMessagesButton, el.testMessageProvider, el.testMessagePhone, el.testMessageBody, el.sendTestMessageButton], messageLocked);
+  planNotice(document.querySelector('[data-view="messages"] .admin-view-heading'), "messageInboxEnabled", messageLocked);
+  if (messageLocked) {
+    el.messageList.className = "message-inbox empty";
+    el.messageList.textContent = planGateMessage("messageInboxEnabled");
+  }
+
+  setNodesDisabled([el.appointmentReminderTemplate], remindersLocked);
+  planNotice(document.querySelector('[data-automation-section="followup"] .automation-section-heading'), "appointmentRemindersEnabled", remindersLocked);
+}
+
 function renderAvailability(rules) {
   const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   el.availabilityRules.innerHTML = "";
@@ -1019,6 +1130,8 @@ function renderAvailability(rules) {
 
 function applyAdminData(data) {
   state.admin = data.config;
+  state.entitlements = data.entitlements || null;
+  state.planUsage = data.planUsage || null;
   renderNumberStatus(data.phoneNumbers || data.profile.voiceNumbers || []);
   const raw = data.profile.rawData || {};
   el.profileBusinessName.value = data.profile.businessName || "";
@@ -1064,6 +1177,7 @@ function applyAdminData(data) {
   renderReviewLinks(data.reviewLinks || [], data.profile);
   renderTransferTargets(data.config.transferTargets || []);
   renderAvailability(data.config.availabilityRules);
+  applyPlanLocks();
   setAdminStatus(`Loaded for ${data.profile.businessName}`);
 }
 
@@ -1124,7 +1238,7 @@ async function saveBusinessConfig() {
   const payload = {
     ...adminIdentity(),
     extraInstructions: el.extraInstructions.value,
-    qualificationEnabled: el.qualificationEnabled.checked,
+    qualificationEnabled: planAllows("outboundQualificationEnabled") ? el.qualificationEnabled.checked : false,
     qualificationLaunchMode: el.qualificationLaunchMode.value,
     qualificationInstructions: el.qualificationInstructions.value,
     qualificationDelayMinSeconds: Number(el.qualificationDelayMinSeconds.value || 0),
@@ -1132,7 +1246,7 @@ async function saveBusinessConfig() {
     qualificationMaxAttempts: Number(el.qualificationMaxAttempts.value || 3),
     qualificationRetryDelayMinutes: Number(el.qualificationRetryDelayMinutes.value || 120),
     leadWebhookDedupeWindowHours: Number(el.leadWebhookDedupeWindowHours.value || 0),
-    reviewRequestsEnabled: el.reviewRequestsEnabled.checked,
+    reviewRequestsEnabled: planAllows("smartReviewsEnabled") ? el.reviewRequestsEnabled.checked : false,
     reviewLink: el.reviewLink.value,
     managerNotificationPhone: el.managerNotificationPhone.value,
     reviewPromptInstructions: el.reviewPromptInstructions.value,
@@ -1727,10 +1841,13 @@ async function loadLeadWebhook() {
   const data = await apiJson(`/api/business-admin/lead-webhook?${query}`);
   setLeadWebhookDocsUrl(data.webhookUrl || "");
   const accepted = data.acceptedFields?.join(", ") || "name, phone, email, service, source, notes";
-  el.crmWebhookHelp.textContent = `Accepted fields: ${accepted}. POST JSON or form data.`;
+  el.crmWebhookHelp.textContent = data.gated
+    ? data.message || planGateMessage("leadWebhookEnabled")
+    : `Accepted fields: ${accepted}. POST JSON or form data.`;
   if (!el.crmWebhookTestPayload.value.trim()) {
     el.crmWebhookTestPayload.value = JSON.stringify(data.examplePayload || webhookSamplePayload(), null, 2);
   }
+  applyPlanLocks();
 }
 
 function setLeadWebhookDocsUrl(webhookUrl) {
@@ -2173,6 +2290,10 @@ function renderMessages(messages = [], inboundMessages = []) {
 
 async function loadMessages() {
   if (!state.admin) return;
+  if (!planAllows("messageInboxEnabled")) {
+    applyPlanLocks();
+    return;
+  }
   const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
   const data = await apiJson(`/api/business-admin/messages?${query}`);

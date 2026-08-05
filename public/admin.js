@@ -93,6 +93,7 @@ const el = {
   emailDiagnostics: document.querySelector("#emailDiagnostics"),
   createAccountForm: document.querySelector("#createAccountForm"),
   createAccountButton: document.querySelector("#createAccountButton"),
+  accountSubscriptionPlan: document.querySelector("#accountSubscriptionPlan"),
   accountMessage: document.querySelector("#accountMessage"),
   accountList: document.querySelector("#accountList"),
   businessList: document.querySelector("#businessList"),
@@ -707,6 +708,7 @@ function planFeatureLabels(plan) {
 
 function renderPlans(plans = []) {
   subscriptionPlans = plans;
+  renderAccountPlanOptions();
   el.planList.innerHTML = "";
   for (const plan of plans) {
     const row = document.createElement("div");
@@ -784,6 +786,25 @@ function renderPlans(plans = []) {
   }
   if (!plans.length) el.planList.textContent = "No subscription plans yet.";
   window.lucide?.createIcons();
+}
+
+function renderAccountPlanOptions() {
+  if (!el.accountSubscriptionPlan) return;
+  const previous = el.accountSubscriptionPlan.value;
+  el.accountSubscriptionPlan.innerHTML = "";
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "No app plan";
+  el.accountSubscriptionPlan.appendChild(empty);
+  for (const plan of subscriptionPlans.filter((item) => item.active)) {
+    const option = document.createElement("option");
+    option.value = String(plan.id);
+    option.textContent = `${plan.name} · ${planPriceDisplay(plan.monthlyPriceCents)}/mo`;
+    el.accountSubscriptionPlan.appendChild(option);
+  }
+  el.accountSubscriptionPlan.value = Array.from(el.accountSubscriptionPlan.options).some((option) => option.value === previous)
+    ? previous
+    : "";
 }
 
 async function loadPlans() {
@@ -1140,6 +1161,35 @@ async function loadAccounts() {
       : business.stripeSubscriptionStatus
         ? `Subscription · ${business.stripeSubscriptionStatus}`
         : "No subscription";
+    const planControls = document.createElement("div");
+    planControls.className = "business-plan-control";
+    const planSelect = document.createElement("select");
+    const noPlanOption = document.createElement("option");
+    noPlanOption.value = "";
+    noPlanOption.textContent = "No app plan";
+    planSelect.appendChild(noPlanOption);
+    const activePlans = subscriptionPlans.filter((item) => item.active || item.id === business.subscriptionPlanId);
+    for (const item of activePlans) {
+      const option = document.createElement("option");
+      option.value = String(item.id);
+      option.textContent = `${item.name} · ${planPriceDisplay(item.monthlyPriceCents)}/mo`;
+      option.selected = item.id === business.subscriptionPlanId;
+      planSelect.appendChild(option);
+    }
+    planSelect.value = business.subscriptionPlanId ? String(business.subscriptionPlanId) : "";
+    const savePlan = document.createElement("button");
+    savePlan.type = "button";
+    savePlan.textContent = "Save plan";
+    savePlan.addEventListener("click", async () => {
+      await api(`/api/admin/businesses/${business.id}/plan`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscriptionPlanId: planSelect.value ? Number(planSelect.value) : null }),
+      });
+      await Promise.all([loadAccounts(), loadPlans()]);
+    });
+    planControls.append(planSelect, savePlan);
+    plan.appendChild(planControls);
     const agent = document.createElement("div");
     agent.innerHTML = `<b>Agent</b><span></span>`;
     agent.querySelector("span").textContent = business.config
@@ -1578,7 +1628,8 @@ async function enterAdmin(user) {
   if (user.role !== "admin") throw new Error("This account is not an administrator");
   el.auth.hidden = true;
   el.app.hidden = false;
-  await Promise.all([loadSystem(), loadAccounts()]);
+  await loadSystem();
+  await loadAccounts();
 }
 
 el.loginForm.addEventListener("submit", async (event) => {
@@ -1773,6 +1824,7 @@ el.createAccountForm.addEventListener("submit", async (event) => {
         name: document.querySelector("#accountName").value,
         email,
         password,
+        subscriptionPlanId: el.accountSubscriptionPlan?.value ? Number(el.accountSubscriptionPlan.value) : null,
       }),
     });
     el.createAccountForm.reset();
