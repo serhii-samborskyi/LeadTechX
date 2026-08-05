@@ -2538,13 +2538,19 @@ async function loadBilling() {
   renderBilling(data);
 }
 
+async function refreshBillingTab() {
+  const results = await Promise.allSettled([loadUsage(), loadBilling()]);
+  const failures = results.filter((result) => result.status === "rejected");
+  if (failures.length === results.length) throw failures[0].reason;
+  if (failures.length) setAdminStatus(failures[0].reason?.message || "Billing loaded with partial data", true);
+}
+
 async function loadUsage() {
   if (!state.admin) return;
   const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
   const data = await apiJson(`/api/business-admin/usage?${query}`);
   renderUsage(data);
-  await loadBilling();
 }
 
 async function startBillingCheckout(checkoutType) {
@@ -2703,7 +2709,7 @@ async function startCall() {
       loadCalendar();
       loadCrm().catch(() => {});
       loadMessages().catch(() => {});
-      loadUsage().catch(() => {});
+      refreshBillingTab().catch(() => {});
     }
     if (message.type === "status" && message.status === "agent_closed") {
       const reason = message.reason ? ` Reason: ${message.reason}` : "";
@@ -2819,7 +2825,7 @@ for (const tab of el.adminTabs) {
     if (tab.dataset.tab === "calendar") runAdmin(loadCalendar);
     if (tab.dataset.tab === "leads") runAdmin(loadCrm);
     if (tab.dataset.tab === "messages") runAdmin(loadMessages);
-    if (tab.dataset.tab === "billing") runAdmin(loadUsage);
+    if (tab.dataset.tab === "billing") runAdmin(refreshBillingTab);
   });
 }
 
