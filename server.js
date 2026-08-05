@@ -5837,17 +5837,19 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
 
 app.get("/api/onboarding/subscription-plans", async (_req, res) => {
   try {
-    const [plans, secretKey, webhookSecret] = await Promise.all([
+    const [plans, secretKeyStatus, webhookSecretStatus] = await Promise.all([
       activeSubscriptionPlans(),
-      systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
-      stripeWebhookSecret().then(Boolean),
+      systemSecretConfigured("stripe_secret_key", "STRIPE_SECRET_KEY"),
+      systemSecretConfigured("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
     ]);
+    const checkoutConfigured = Boolean(secretKeyStatus.configured && secretKeyStatus.ok);
+    const webhookConfigured = Boolean(webhookSecretStatus.configured && webhookSecretStatus.ok);
     res.json({
       plans: plans.map(publicSubscriptionPlan),
       stripe: {
-        ready: Boolean(secretKey && webhookSecret),
-        checkoutConfigured: Boolean(secretKey),
-        webhookConfigured: Boolean(webhookSecret),
+        ready: Boolean(checkoutConfigured && webhookConfigured),
+        checkoutConfigured,
+        webhookConfigured,
       },
     });
   } catch (error) {
@@ -5925,12 +5927,15 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
       throw new Error("This business has already been claimed. Sign in to manage billing.");
     }
 
-    const [settings, stripe, webhookSecretConfigured] = await Promise.all([
+    const [settings, secretKeyStatus, webhookSecretStatus] = await Promise.all([
       getSettings(),
-      stripeClient(),
-      stripeWebhookSecret().then(Boolean),
+      systemSecretConfigured("stripe_secret_key", "STRIPE_SECRET_KEY"),
+      systemSecretConfigured("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
     ]);
-    if (!webhookSecretConfigured) throw new Error("Stripe webhook secret is not configured");
+    if (!secretKeyStatus.configured || !secretKeyStatus.ok || !webhookSecretStatus.configured || !webhookSecretStatus.ok) {
+      throw new Error("Stripe billing is not fully configured. Ask the platform admin to re-save Stripe settings.");
+    }
+    const stripe = await stripeClient();
 
     const selectedPlanId = Number(req.body.subscriptionPlanId || req.body.planId || 0);
     const selectedPlan = selectedPlanId
@@ -10221,10 +10226,10 @@ app.get("/api/business-admin/billing", async (req, res) => {
   try {
     const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
     const creditBuckets = await creditBucketBreakdown(profile.id);
-    const [settings, secretKey, webhookSecret, current, sessions, plans] = await Promise.all([
+    const [settings, secretKeyStatus, webhookSecretStatus, current, sessions, plans] = await Promise.all([
       getSettings(),
-      systemSecret("stripe_secret_key", "STRIPE_SECRET_KEY").then(Boolean),
-      stripeWebhookSecret().then(Boolean),
+      systemSecretConfigured("stripe_secret_key", "STRIPE_SECRET_KEY"),
+      systemSecretConfigured("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
       prisma.businessProfile.findUnique({
         where: { id: profile.id },
         select: {
@@ -10245,6 +10250,12 @@ app.get("/api/business-admin/billing", async (req, res) => {
       }),
       activeSubscriptionPlans(),
     ]);
+    const checkoutConfigured = Boolean(secretKeyStatus.configured && secretKeyStatus.ok);
+    const webhookConfigured = Boolean(webhookSecretStatus.configured && webhookSecretStatus.ok);
+    const configurationErrors = [
+      secretKeyStatus.ok ? null : secretKeyStatus.detail,
+      webhookSecretStatus.ok ? null : webhookSecretStatus.detail,
+    ].filter(Boolean);
     res.json({
       accountStatus: current?.accountStatus || profile.accountStatus,
       creditBalance: creditBuckets.creditBalance ?? current?.creditBalance ?? profile.creditBalance,
@@ -10252,9 +10263,13 @@ app.get("/api/business-admin/billing", async (req, res) => {
       currentPlan: publicSubscriptionPlan(current?.subscriptionPlan),
       availablePlans: plans.map(publicSubscriptionPlan),
       stripe: {
-        checkoutConfigured: secretKey,
-        webhookConfigured: webhookSecret,
-        ready: Boolean(secretKey && webhookSecret),
+        checkoutConfigured,
+        webhookConfigured,
+        ready: Boolean(checkoutConfigured && webhookConfigured),
+        configurationError: configurationErrors.length
+          ? "Billing settings need attention. Ask the platform admin to re-save Stripe settings."
+          : "",
+        configurationDetail: req.user?.role === "admin" ? configurationErrors.join("; ") : "",
         customerConfigured: Boolean(current?.stripeCustomerId),
         subscriptionConfigured: Boolean(current?.stripeSubscriptionId),
         subscriptionStatus: current?.stripeSubscriptionStatus || "",
@@ -10274,7 +10289,14 @@ app.get("/api/business-admin/billing", async (req, res) => {
 app.post("/api/business-admin/billing/checkout", async (req, res) => {
   try {
     const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
-    const settings = await getSettings();
+    const [settings, secretKeyStatus, webhookSecretStatus] = await Promise.all([
+      getSettings(),
+      systemSecretConfigured("stripe_secret_key", "STRIPE_SECRET_KEY"),
+      systemSecretConfigured("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
+    ]);
+    if (!secretKeyStatus.configured || !secretKeyStatus.ok || !webhookSecretStatus.configured || !webhookSecretStatus.ok) {
+      throw new Error("Stripe billing is not fully configured. Re-save Stripe settings in the admin panel.");
+    }
     const stripe = await stripeClient();
     const checkoutType = String(req.body.checkoutType || "credits").trim().toLowerCase();
     if (!["credits", "subscription"].includes(checkoutType)) throw new Error("Checkout type must be credits or subscription");

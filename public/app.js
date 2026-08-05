@@ -2469,6 +2469,8 @@ function renderBilling(data) {
   const ready = Boolean(stripe.ready);
   const subscriptionReady = ready && Boolean(plans.length);
   const statusParts = [
+    stripe.configurationError || null,
+    stripe.configurationDetail || null,
     ready ? "Stripe ready" : "Stripe not ready",
     stripe.webhookConfigured ? "webhook configured" : "webhook missing",
     currentPlan ? `plan ${currentPlan.name}` : "no active plan",
