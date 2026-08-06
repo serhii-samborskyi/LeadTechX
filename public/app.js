@@ -624,11 +624,37 @@ function initTikTokPixel(pixelId) {
   window.ttq.load(pixelId);
 }
 
+function persistRedditClickId() {
+  const clickId = new URLSearchParams(location.search).get("rdt_cid");
+  if (!clickId) return;
+  const secure = location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `_rdt_cid=${encodeURIComponent(clickId)}; Path=/; Max-Age=${90 * 24 * 60 * 60}; SameSite=Lax${secure}`;
+}
+
+function initRedditPixel(pixelId) {
+  if (!pixelId) return;
+  if (!window.rdt) {
+    const rdt = function () {
+      rdt.sendEvent ? rdt.sendEvent.apply(rdt, arguments) : rdt.callQueue.push(arguments);
+    };
+    rdt.callQueue = [];
+    window.rdt = rdt;
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://www.redditstatic.com/ads/pixel.js";
+    const firstScript = document.getElementsByTagName("script")[0];
+    firstScript.parentNode.insertBefore(script, firstScript);
+  }
+  window.rdt("init", pixelId);
+}
+
 async function loadAdTracking() {
   try {
+    persistRedditClickId();
     state.adTracking = await apiJson("/api/ad-platforms/config");
     initMetaPixel(state.adTracking.meta?.pixelId);
     initTikTokPixel(state.adTracking.tiktok?.pixelId);
+    initRedditPixel(state.adTracking.reddit?.pixelId);
   } catch {
     state.adTracking = null;
   }
@@ -656,6 +682,10 @@ function trackBrowserAdEvent(eventKey, eventId, customData = {}) {
   const tiktok = state.adTracking.tiktok?.events?.[eventKey];
   if (tiktok?.enabled && tiktok.browser && state.adTracking.tiktok?.pixelId && window.ttq) {
     window.ttq.track(tiktok.eventName, pixelCustomData(tiktok), { event_id: eventId });
+  }
+  const reddit = state.adTracking.reddit?.events?.[eventKey];
+  if (reddit?.enabled && reddit.browser && state.adTracking.reddit?.pixelId && window.rdt) {
+    window.rdt("track", reddit.eventName, { ...pixelCustomData(reddit), conversion_id: eventId });
   }
 }
 

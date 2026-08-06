@@ -164,11 +164,37 @@ function initTikTokPixel(pixelId) {
   window.ttq.load(pixelId);
 }
 
+function persistRedditClickId() {
+  const clickId = new URLSearchParams(location.search).get("rdt_cid");
+  if (!clickId) return;
+  const secure = location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `_rdt_cid=${encodeURIComponent(clickId)}; Path=/; Max-Age=${90 * 24 * 60 * 60}; SameSite=Lax${secure}`;
+}
+
+function initRedditPixel(pixelId) {
+  if (!pixelId) return;
+  if (!window.rdt) {
+    const rdt = function () {
+      rdt.sendEvent ? rdt.sendEvent.apply(rdt, arguments) : rdt.callQueue.push(arguments);
+    };
+    rdt.callQueue = [];
+    window.rdt = rdt;
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://www.redditstatic.com/ads/pixel.js";
+    const firstScript = document.getElementsByTagName("script")[0];
+    firstScript.parentNode.insertBefore(script, firstScript);
+  }
+  window.rdt("init", pixelId);
+}
+
 async function loadAdTracking() {
   try {
+    persistRedditClickId();
     state.adTracking = await api("/api/ad-platforms/config");
     initMetaPixel(state.adTracking.meta?.pixelId);
     initTikTokPixel(state.adTracking.tiktok?.pixelId);
+    initRedditPixel(state.adTracking.reddit?.pixelId);
   } catch {
     state.adTracking = null;
   }
@@ -197,13 +223,18 @@ async function trackAdEvent(eventKey, customData = {}, userData = {}) {
   const eventId = adEventId(eventKey);
   const meta = platformEventConfig("meta", eventKey);
   const tiktok = platformEventConfig("tiktok", eventKey);
+  const reddit = platformEventConfig("reddit", eventKey);
   const metaCustomData = adPixelCustomData(meta, customData);
   const tiktokCustomData = adPixelCustomData(tiktok, customData);
+  const redditCustomData = { ...adPixelCustomData(reddit, customData), conversion_id: eventId };
   if (meta?.enabled && meta.browser && state.adTracking.meta?.pixelId && window.fbq) {
     window.fbq("track", meta.eventName, metaCustomData, { eventID: eventId });
   }
   if (tiktok?.enabled && tiktok.browser && state.adTracking.tiktok?.pixelId && window.ttq) {
     window.ttq.track(tiktok.eventName, tiktokCustomData, { event_id: eventId });
+  }
+  if (reddit?.enabled && reddit.browser && state.adTracking.reddit?.pixelId && window.rdt) {
+    window.rdt("track", reddit.eventName, redditCustomData);
   }
   state.adTrackedEvents.add(eventKey);
   try {
@@ -215,7 +246,8 @@ async function trackAdEvent(eventKey, customData = {}, userData = {}) {
         eventId,
         sourceUrl: location.href,
         referrer: document.referrer,
-        customData: adPixelCustomData(meta || tiktok, customData),
+        rdt_cid: new URLSearchParams(location.search).get("rdt_cid") || "",
+        customData: adPixelCustomData(meta || tiktok || reddit, customData),
         userData,
       }),
     });

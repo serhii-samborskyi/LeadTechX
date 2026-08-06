@@ -9,125 +9,125 @@ datasource db {
 }
 
 model BusinessProfile {
-  id                 Int                    @id @default(autoincrement())
-  cacheKey           String                 @unique
-  businessName       String
-  website            String?
-  normalized         String
-  summary            String
-  hours              String?
-  services           String?
-  serviceArea        String?
-  contact            String?
-  rawData            Json
-  systemPrompt       String
-  researchModel      String
-  sourceUrls         Json?
-  accountStatus      String                 @default("unclaimed")
-  trialStartedAt     DateTime?
-  trialEndsAt        DateTime?
-  creditBalance      Int                    @default(0)
-  stripeCustomerId   String?
-  stripeSubscriptionId String?
-  stripeSubscriptionStatus String?
+  id                           Int                     @id @default(autoincrement())
+  cacheKey                     String                  @unique
+  businessName                 String
+  website                      String?
+  normalized                   String
+  summary                      String
+  hours                        String?
+  services                     String?
+  serviceArea                  String?
+  contact                      String?
+  rawData                      Json
+  systemPrompt                 String
+  researchModel                String
+  sourceUrls                   Json?
+  accountStatus                String                  @default("unclaimed")
+  trialStartedAt               DateTime?
+  trialEndsAt                  DateTime?
+  creditBalance                Int                     @default(0)
+  stripeCustomerId             String?
+  stripeSubscriptionId         String?
+  stripeSubscriptionStatus     String?
   subscriptionCurrentPeriodEnd DateTime?
-  subscriptionPlanId Int?
-  subscriptionPlan   SubscriptionPlan?    @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
-  archivedAt         DateTime?
-  leadWebhookToken   String?                @unique
-  leadWebhookEnabled Boolean                @default(true)
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
-  config             BusinessConfig?
-  users              User[]
-  voiceNumbers       VoiceNumber[]
-  voiceCalls         VoiceCall[]
-  leads              Lead[]
-  fastAgentSessions  FastAgentSession[]
-  claimTokens        AccountClaimToken[]
-  demoAssignments    DemoNumberAssignment[]
-  onboardingSessions OnboardingSession[]
-  customerFeedback    CustomerFeedback[]
-  leadWebhookEvents   LeadWebhookEvent[]
-  messageDeliveries   MessageDelivery[]
-  usageEvents         UsageEvent[]
-  creditTransactions  CreditTransaction[]
-  creditBuckets       CreditBucket[]
-  stripeCheckoutSessions StripeCheckoutSession[]
-  inboundMessages    MessageInbound[]
-  reviewLinks        BusinessReviewLink[]
-  trafficEvents      TrafficEvent[]
+  subscriptionPlanId           Int?
+  subscriptionPlan             SubscriptionPlan?       @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
+  archivedAt                   DateTime?
+  leadWebhookToken             String?                 @unique
+  leadWebhookEnabled           Boolean                 @default(true)
+  createdAt                    DateTime                @default(now())
+  updatedAt                    DateTime                @updatedAt
+  config                       BusinessConfig?
+  users                        User[]
+  voiceNumbers                 VoiceNumber[]
+  voiceCalls                   VoiceCall[]
+  leads                        Lead[]
+  fastAgentSessions            FastAgentSession[]
+  claimTokens                  AccountClaimToken[]
+  demoAssignments              DemoNumberAssignment[]
+  onboardingSessions           OnboardingSession[]
+  customerFeedback             CustomerFeedback[]
+  leadWebhookEvents            LeadWebhookEvent[]
+  messageDeliveries            MessageDelivery[]
+  usageEvents                  UsageEvent[]
+  creditTransactions           CreditTransaction[]
+  creditBuckets                CreditBucket[]
+  stripeCheckoutSessions       StripeCheckoutSession[]
+  inboundMessages              MessageInbound[]
+  reviewLinks                  BusinessReviewLink[]
+  trafficEvents                TrafficEvent[]
 }
 
 model SubscriptionPlan {
-  id                Int              @id @default(autoincrement())
-  name              String
-  slug              String           @unique
-  description       String?
-  monthlyPriceCents Int              @default(0)
-  monthlyCredits    Int              @default(0)
-  maxPhoneNumbers    Int              @default(1)
-  maxTransferTargets Int              @default(1)
-  maxUsers           Int              @default(1)
-  outboundQualificationEnabled Boolean @default(false)
-  smartReviewsEnabled Boolean        @default(false)
-  callTransfersEnabled Boolean       @default(false)
-  leadWebhookEnabled Boolean         @default(true)
-  messageInboxEnabled Boolean        @default(true)
-  appointmentRemindersEnabled Boolean @default(false)
-  prioritySupport    Boolean          @default(false)
-  allowCreditTopups  Boolean          @default(true)
-  supportLevel       String           @default("standard")
-  stripePriceId     String?
-  active            Boolean          @default(true)
-  sortOrder         Int              @default(0)
-  businessProfiles  BusinessProfile[]
-  checkoutSessions  StripeCheckoutSession[]
-  creditBuckets     CreditBucket[]
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  id                           Int                     @id @default(autoincrement())
+  name                         String
+  slug                         String                  @unique
+  description                  String?
+  monthlyPriceCents            Int                     @default(0)
+  monthlyCredits               Int                     @default(0)
+  maxPhoneNumbers              Int                     @default(1)
+  maxTransferTargets           Int                     @default(1)
+  maxUsers                     Int                     @default(1)
+  outboundQualificationEnabled Boolean                 @default(false)
+  smartReviewsEnabled          Boolean                 @default(false)
+  callTransfersEnabled         Boolean                 @default(false)
+  leadWebhookEnabled           Boolean                 @default(true)
+  messageInboxEnabled          Boolean                 @default(true)
+  appointmentRemindersEnabled  Boolean                 @default(false)
+  prioritySupport              Boolean                 @default(false)
+  allowCreditTopups            Boolean                 @default(true)
+  supportLevel                 String                  @default("standard")
+  stripePriceId                String?
+  active                       Boolean                 @default(true)
+  sortOrder                    Int                     @default(0)
+  businessProfiles             BusinessProfile[]
+  checkoutSessions             StripeCheckoutSession[]
+  creditBuckets                CreditBucket[]
+  createdAt                    DateTime                @default(now())
+  updatedAt                    DateTime                @updatedAt
 
   @@index([active, sortOrder])
 }
 
 model BusinessConfig {
-  id                  Int                @id @default(autoincrement())
-  businessProfileId   Int                @unique
-  businessProfile     BusinessProfile    @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
-  extraInstructions   String             @default("")
-  qualificationInstructions String        @default("You are an outbound lead qualification agent. Confirm you are speaking with the lead, ask if now is a good time, confirm what they need, urgency, location or service area, budget or price expectations when relevant, and whether they want an appointment or callback. Keep the call brief, professional, and honest.")
-  qualificationEnabled Boolean            @default(true)
-  qualificationLaunchMode String          @default("approval")
-  qualificationDelayMinSeconds Int        @default(30)
-  qualificationDelayMaxSeconds Int        @default(100)
-  qualificationMaxAttempts Int            @default(3)
-  qualificationRetryDelayMinutes Int       @default(120)
-  leadWebhookDedupeWindowHours Int         @default(24)
-  reviewRequestsEnabled Boolean            @default(false)
-  reviewLink          String             @default("")
-  reviewPromptInstructions String         @default("After a completed service or appointment, ask whether the customer is happy with the service. If they are happy, offer to text the review link. If they are not happy, apologize, collect the issue, and escalate it to management.")
-  reviewRequestTemplate String            @default("Thank you for choosing {{business_name}}. If you were happy with the service, please leave us a review: {{review_link}}")
-  complaintRecoveryInstructions String     @default("Apologize, collect what happened, ask what resolution they want, and tell the customer management will be notified.")
-  complaintEscalationTemplate String       @default("Complaint for {{business_name}}. Customer: {{customer_name}}. Phone: {{customer_phone}}. Issue: {{complaint}}")
-  managerNotificationPhone String          @default("")
-  missedCallFollowupTemplate String        @default("Sorry we missed your call to {{business_name}}. Reply here and we will help.")
-  appointmentReminderTemplate String       @default("Reminder: you have an appointment with {{business_name}} on {{appointment_time}}. Reply if you need to reschedule.")
-  appointmentMode     String             @default("instant")
-  slotDurationMinutes Int                @default(30)
-  bufferMinutes       Int                @default(0)
-  timezone            String             @default("America/Chicago")
-  calendarProvider    String             @default("internal")
-  providerConfig      Json?
-  voiceName           String             @default("Puck")
-  language            String             @default("English")
-  agentName           String             @default("Alex")
-  intakeFields        IntakeField[]
-  knowledgeEntries    KnowledgeEntry[]
-  priceEntries        PriceEntry[]
-  availabilityRules   AvailabilityRule[]
-  transferTargets     BusinessTransferTarget[]
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
+  id                             Int                      @id @default(autoincrement())
+  businessProfileId              Int                      @unique
+  businessProfile                BusinessProfile          @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  extraInstructions              String                   @default("")
+  qualificationInstructions      String                   @default("You are an outbound lead qualification agent. Confirm you are speaking with the lead, ask if now is a good time, confirm what they need, urgency, location or service area, budget or price expectations when relevant, and whether they want an appointment or callback. Keep the call brief, professional, and honest.")
+  qualificationEnabled           Boolean                  @default(true)
+  qualificationLaunchMode        String                   @default("approval")
+  qualificationDelayMinSeconds   Int                      @default(30)
+  qualificationDelayMaxSeconds   Int                      @default(100)
+  qualificationMaxAttempts       Int                      @default(3)
+  qualificationRetryDelayMinutes Int                      @default(120)
+  leadWebhookDedupeWindowHours   Int                      @default(24)
+  reviewRequestsEnabled          Boolean                  @default(false)
+  reviewLink                     String                   @default("")
+  reviewPromptInstructions       String                   @default("After a completed service or appointment, ask whether the customer is happy with the service. If they are happy, offer to text the review link. If they are not happy, apologize, collect the issue, and escalate it to management.")
+  reviewRequestTemplate          String                   @default("Thank you for choosing {{business_name}}. If you were happy with the service, please leave us a review: {{review_link}}")
+  complaintRecoveryInstructions  String                   @default("Apologize, collect what happened, ask what resolution they want, and tell the customer management will be notified.")
+  complaintEscalationTemplate    String                   @default("Complaint for {{business_name}}. Customer: {{customer_name}}. Phone: {{customer_phone}}. Issue: {{complaint}}")
+  managerNotificationPhone       String                   @default("")
+  missedCallFollowupTemplate     String                   @default("Sorry we missed your call to {{business_name}}. Reply here and we will help.")
+  appointmentReminderTemplate    String                   @default("Reminder: you have an appointment with {{business_name}} on {{appointment_time}}. Reply if you need to reschedule.")
+  appointmentMode                String                   @default("instant")
+  slotDurationMinutes            Int                      @default(30)
+  bufferMinutes                  Int                      @default(0)
+  timezone                       String                   @default("America/Chicago")
+  calendarProvider               String                   @default("internal")
+  providerConfig                 Json?
+  voiceName                      String                   @default("Puck")
+  language                       String                   @default("English")
+  agentName                      String                   @default("Alex")
+  intakeFields                   IntakeField[]
+  knowledgeEntries               KnowledgeEntry[]
+  priceEntries                   PriceEntry[]
+  availabilityRules              AvailabilityRule[]
+  transferTargets                BusinessTransferTarget[]
+  createdAt                      DateTime                 @default(now())
+  updatedAt                      DateTime                 @updatedAt
 }
 
 model BusinessTransferTarget {
@@ -214,55 +214,55 @@ model AvailabilityRule {
 }
 
 model Appointment {
-  id               Int       @id @default(autoincrement())
-  businessName     String
-  website          String?
-  customerName     String
-  phone            String?
-  email            String?
-  requestedAt      String
-  scheduledStart   DateTime?
-  scheduledEnd     DateTime?
-  durationMinutes  Int?
-  timezone         String?
-  intakeData       Json?
-  calendarProvider String    @default("internal")
-  bookingKey       String?   @unique
-  externalId       String?
-  reason           String?
-  status           String    @default("requested")
-  createdAt        DateTime  @default(now())
+  id                Int                @id @default(autoincrement())
+  businessName      String
+  website           String?
+  customerName      String
+  phone             String?
+  email             String?
+  requestedAt       String
+  scheduledStart    DateTime?
+  scheduledEnd      DateTime?
+  durationMinutes   Int?
+  timezone          String?
+  intakeData        Json?
+  calendarProvider  String             @default("internal")
+  bookingKey        String?            @unique
+  externalId        String?
+  reason            String?
+  status            String             @default("requested")
+  createdAt         DateTime           @default(now())
   feedback          CustomerFeedback[]
   messageDeliveries MessageDelivery[]
-  inboundMessages    MessageInbound[]
+  inboundMessages   MessageInbound[]
 }
 
 model Lead {
-  id                Int              @id @default(autoincrement())
-  businessName      String
-  website           String?
-  businessProfileId Int?
-  businessProfile   BusinessProfile? @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
-  voiceCallId       Int?             @unique
-  voiceCall         VoiceCall?       @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
-  name              String
-  phone             String?
-  email             String?
-  need              String?
-  status            String           @default("new")
-  source            String           @default("agent")
-  summary           String?
-  transcript        String?
-  notes             String?
-  extractedFields   Json?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  id                 Int                         @id @default(autoincrement())
+  businessName       String
+  website            String?
+  businessProfileId  Int?
+  businessProfile    BusinessProfile?            @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  voiceCallId        Int?                        @unique
+  voiceCall          VoiceCall?                  @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  name               String
+  phone              String?
+  email              String?
+  need               String?
+  status             String                      @default("new")
+  source             String                      @default("agent")
+  summary            String?
+  transcript         String?
+  notes              String?
+  extractedFields    Json?
+  createdAt          DateTime                    @default(now())
+  updatedAt          DateTime                    @updatedAt
   qualificationCalls OutboundQualificationCall[]
-  feedback          CustomerFeedback[]
-  leadWebhookEvents LeadWebhookEvent[]
-  messageDeliveries MessageDelivery[]
+  feedback           CustomerFeedback[]
+  leadWebhookEvents  LeadWebhookEvent[]
+  messageDeliveries  MessageDelivery[]
   inboundMessages    MessageInbound[]
-  usageEvents       UsageEvent[]
+  usageEvents        UsageEvent[]
 
   @@index([businessProfileId, createdAt])
   @@index([phone, createdAt])
@@ -282,49 +282,58 @@ model TransferMessage {
 }
 
 model AppSettings {
-  id                      Int      @id @default(1)
-  researchModel           String   @default("gemini-3.1-pro-preview")
-  liveModel               String   @default("models/gemini-3.1-flash-live-preview")
-  voiceName               String   @default("Puck")
-  language                String   @default("English")
-  agentName               String   @default("Alex")
-  platformBusinessRules   String   @default("Use only the language configured for the business agent. Do not switch languages automatically when the caller speaks another language. If the caller asks for another language, explain briefly in the configured language that the receptionist is set to use only that language unless the business changes settings.")
-  publicBaseUrl           String   @default("")
-  trialDays               Int      @default(7)
-  claimLinkDays           Int      @default(30)
-  trialCredits            Int      @default(900)
-  tokenUsd                Float    @default(0.01)
-  lowBalanceTokens        Int      @default(100)
-  voiceMinuteCredits      Int      @default(10)
-  geminiMinuteCredits     Int      @default(10)
-  outboundCallCredits     Int      @default(20)
-  messageCredits          Int      @default(5)
-  stripeCreditPackCredits Int      @default(1000)
-  recordingRetentionDays  Int      @default(30)
-  demoNumberCapacity      Int      @default(10)
-  demoCallerLimit         Int      @default(3)
-  smtpHost                String   @default("")
-  smtpPort                Int      @default(587)
-  smtpSecure              Boolean  @default(false)
-  smtpFromEmail           String   @default("")
-  smtpFromName            String   @default("RingPort")
-  onboardingLookupUrl     String   @default("")
-  onboardingVoiceName     String   @default("Puck")
-  onboardingInstructions  String   @default("You are the RingPort platform onboarding specialist. Collect the company name and website, text those details to the caller for confirmation, build the agent only after confirmation, and send the secure setup link when it is ready. Keep the call brief.")
-  onboardingRecordCalls   Boolean  @default(false)
-  onboardingTranscription Boolean  @default(true)
-  messagePrimaryProvider  String   @default("bluebubbles")
-  messageFailoverProvider String   @default("sentdm")
-  blueBubblesBaseUrl      String   @default("")
-  blueBubblesSendPath     String   @default("/api/v1/message/text")
-  sentDmTemplateId        String   @default("")
-  sentDmTemplateName      String   @default("")
-  sentDmProfileId         String   @default("")
-  metaPixelId             String   @default("")
-  metaTestEventCode       String   @default("")
-  tiktokPixelId           String   @default("")
-  adEventConfig           Json?
-  updatedAt               DateTime @updatedAt
+  id                       Int      @id @default(1)
+  researchModel            String   @default("gemini-3.1-pro-preview")
+  liveModel                String   @default("models/gemini-3.1-flash-live-preview")
+  voiceName                String   @default("Puck")
+  language                 String   @default("English")
+  agentName                String   @default("Alex")
+  platformBusinessRules    String   @default("Use only the language configured for the business agent. Do not switch languages automatically when the caller speaks another language. If the caller asks for another language, explain briefly in the configured language that the receptionist is set to use only that language unless the business changes settings.")
+  publicBaseUrl            String   @default("")
+  trialDays                Int      @default(7)
+  claimLinkDays            Int      @default(30)
+  trialCredits             Int      @default(900)
+  tokenUsd                 Float    @default(0.01)
+  lowBalanceTokens         Int      @default(100)
+  voiceMinuteCredits       Int      @default(10)
+  geminiMinuteCredits      Int      @default(10)
+  outboundCallCredits      Int      @default(20)
+  messageCredits           Int      @default(5)
+  stripeCreditPackCredits  Int      @default(1000)
+  recordingRetentionDays   Int      @default(30)
+  demoNumberCapacity       Int      @default(10)
+  demoCallerLimit          Int      @default(3)
+  smtpHost                 String   @default("")
+  smtpPort                 Int      @default(587)
+  smtpSecure               Boolean  @default(false)
+  smtpFromEmail            String   @default("")
+  smtpFromName             String   @default("RingPort")
+  onboardingLookupUrl      String   @default("")
+  onboardingVoiceName      String   @default("Puck")
+  onboardingInstructions   String   @default("You are the RingPort platform onboarding specialist. Collect the company name and website, text those details to the caller for confirmation, build the agent only after confirmation, and send the secure setup link when it is ready. Keep the call brief.")
+  onboardingRecordCalls    Boolean  @default(false)
+  onboardingTranscription  Boolean  @default(true)
+  messagePrimaryProvider   String   @default("bluebubbles")
+  messageFailoverProvider  String   @default("sentdm")
+  blueBubblesBaseUrl       String   @default("")
+  blueBubblesSendPath      String   @default("/api/v1/message/text")
+  sentDmTemplateId         String   @default("")
+  sentDmTemplateName       String   @default("")
+  sentDmProfileId          String   @default("")
+  metaPixelId              String   @default("")
+  metaTestEventCode        String   @default("")
+  tiktokPixelId            String   @default("")
+  redditPixelId            String   @default("")
+  adEventConfig            Json?
+  postbackEnabled          Boolean  @default(false)
+  postbackUrl              String   @default("")
+  postbackMethod           String   @default("POST")
+  postbackEvents           Json?
+  postbackParamKeys        String   @default("utm_source,utm_medium,utm_campaign,utm_content,utm_term,utm_id,fbclid,ttclid,rdt_cid,gclid,gbraid,wbraid,msclkid,click_id,subid,sub_id,external_id,lead_id")
+  postbackIncludeAllParams Boolean  @default(false)
+  postbackIncludeEmail     Boolean  @default(true)
+  postbackIncludePhone     Boolean  @default(false)
+  updatedAt                DateTime @updatedAt
 }
 
 model AdPlatformEvent {
@@ -466,58 +475,58 @@ model DemoCallerBinding {
 }
 
 model VoiceCall {
-  id                Int                @id @default(autoincrement())
-  provider          String             @default("telnyx")
-  callControlId     String             @unique
-  callSessionId     String?
-  fromNumber        String?
-  toNumber          String?
-  status            String             @default("initiated")
-  hangupCause       String?
-  lastError         String?
-  callMode          String             @default("business")
-  recordingUrl      String?
-  transcript        String?
-  healthFlags       Json?
-  metrics           Json?
-  businessProfileId Int?
-  businessProfile   BusinessProfile?   @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
-  startedAt         DateTime           @default(now())
-  answeredAt        DateTime?
-  endedAt           DateTime?
-  updatedAt         DateTime           @updatedAt
-  events            VoiceCallEvent[]
-  onboardingSession OnboardingSession?
-  lead              Lead?
+  id                        Int                        @id @default(autoincrement())
+  provider                  String                     @default("telnyx")
+  callControlId             String                     @unique
+  callSessionId             String?
+  fromNumber                String?
+  toNumber                  String?
+  status                    String                     @default("initiated")
+  hangupCause               String?
+  lastError                 String?
+  callMode                  String                     @default("business")
+  recordingUrl              String?
+  transcript                String?
+  healthFlags               Json?
+  metrics                   Json?
+  businessProfileId         Int?
+  businessProfile           BusinessProfile?           @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  startedAt                 DateTime                   @default(now())
+  answeredAt                DateTime?
+  endedAt                   DateTime?
+  updatedAt                 DateTime                   @updatedAt
+  events                    VoiceCallEvent[]
+  onboardingSession         OnboardingSession?
+  lead                      Lead?
   outboundQualificationCall OutboundQualificationCall?
-  feedback          CustomerFeedback[]
-  messageDeliveries MessageDelivery[]
-  inboundMessages    MessageInbound[]
-  usageEvents       UsageEvent[]
+  feedback                  CustomerFeedback[]
+  messageDeliveries         MessageDelivery[]
+  inboundMessages           MessageInbound[]
+  usageEvents               UsageEvent[]
 }
 
 model OutboundQualificationCall {
-  id                Int              @id @default(autoincrement())
-  leadId            Int
-  lead              Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  voiceCallId       Int?             @unique
-  voiceCall         VoiceCall?       @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
-  attemptNumber     Int              @default(1)
-  status            String           @default("queued")
-  resultStatus      String?
-  fromNumber        String?
-  toNumber          String
-  summary           String?
-  transcript        String?
-  notes             String?
-  extractedFields   Json?
-  lastError         String?
-  scheduledFor      DateTime?
-  startedAt         DateTime?
-  answeredAt        DateTime?
-  endedAt           DateTime?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  id              Int        @id @default(autoincrement())
+  leadId          Int
+  lead            Lead       @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  voiceCallId     Int?       @unique
+  voiceCall       VoiceCall? @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  attemptNumber   Int        @default(1)
+  status          String     @default("queued")
+  resultStatus    String?
+  fromNumber      String?
+  toNumber        String
+  summary         String?
+  transcript      String?
+  notes           String?
+  extractedFields Json?
+  lastError       String?
+  scheduledFor    DateTime?
+  startedAt       DateTime?
+  answeredAt      DateTime?
+  endedAt         DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
   @@index([leadId, createdAt])
   @@index([status, createdAt])
@@ -689,19 +698,19 @@ model UsageEvent {
 }
 
 model CreditTransaction {
-  id                Int              @id @default(autoincrement())
+  id                Int             @id @default(autoincrement())
   businessProfileId Int
-  businessProfile   BusinessProfile  @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
-  usageEventId      Int?             @unique
-  usageEvent        UsageEvent?      @relation(fields: [usageEventId], references: [id], onDelete: SetNull)
+  businessProfile   BusinessProfile @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  usageEventId      Int?            @unique
+  usageEvent        UsageEvent?     @relation(fields: [usageEventId], references: [id], onDelete: SetNull)
   creditBucketId    Int?
-  creditBucket      CreditBucket?    @relation(fields: [creditBucketId], references: [id], onDelete: SetNull)
+  creditBucket      CreditBucket?   @relation(fields: [creditBucketId], references: [id], onDelete: SetNull)
   type              String
   amount            Int
   balanceAfter      Int
   note              String?
   metadata          Json?
-  createdAt         DateTime         @default(now())
+  createdAt         DateTime        @default(now())
 
   @@index([businessProfileId, createdAt])
   @@index([type, createdAt])
@@ -732,24 +741,24 @@ model CreditBucket {
 }
 
 model StripeCheckoutSession {
-  id                Int              @id @default(autoincrement())
-  businessProfileId Int
-  businessProfile   BusinessProfile  @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
-  subscriptionPlanId Int?
-  subscriptionPlan   SubscriptionPlan? @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
-  stripeSessionId   String           @unique
-  mode              String
-  status            String           @default("created")
-  creditAmount      Int              @default(0)
-  amountTotal       Int?
-  currency          String?
-  stripeCustomerId  String?
+  id                   Int               @id @default(autoincrement())
+  businessProfileId    Int
+  businessProfile      BusinessProfile   @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  subscriptionPlanId   Int?
+  subscriptionPlan     SubscriptionPlan? @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
+  stripeSessionId      String            @unique
+  mode                 String
+  status               String            @default("created")
+  creditAmount         Int               @default(0)
+  amountTotal          Int?
+  currency             String?
+  stripeCustomerId     String?
   stripeSubscriptionId String?
-  url               String?
-  metadata          Json?
-  completedAt       DateTime?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  url                  String?
+  metadata             Json?
+  completedAt          DateTime?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
 
   @@index([businessProfileId, createdAt])
   @@index([subscriptionPlanId, createdAt])
@@ -757,13 +766,13 @@ model StripeCheckoutSession {
 }
 
 model StripeWebhookEvent {
-  id              Int      @id @default(autoincrement())
-  stripeEventId   String   @unique
-  eventType       String
-  payload         Json?
-  processedAt     DateTime?
-  error           String?
-  createdAt       DateTime @default(now())
+  id            Int       @id @default(autoincrement())
+  stripeEventId String    @unique
+  eventType     String
+  payload       Json?
+  processedAt   DateTime?
+  error         String?
+  createdAt     DateTime  @default(now())
 
   @@index([eventType, createdAt])
 }

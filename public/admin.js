@@ -49,6 +49,18 @@ const el = {
   metaTestEventCode: document.querySelector("#metaTestEventCode"),
   tiktokPixelId: document.querySelector("#tiktokPixelId"),
   tiktokAccessToken: document.querySelector("#tiktokAccessToken"),
+  redditPixelId: document.querySelector("#redditPixelId"),
+  redditConversionAccessToken: document.querySelector("#redditConversionAccessToken"),
+  postbackEnabled: document.querySelector("#postbackEnabled"),
+  postbackUrl: document.querySelector("#postbackUrl"),
+  postbackMethod: document.querySelector("#postbackMethod"),
+  postbackEventTrial: document.querySelector("#postbackEventTrial"),
+  postbackEventPaidPlan: document.querySelector("#postbackEventPaidPlan"),
+  postbackEventCreditTopup: document.querySelector("#postbackEventCreditTopup"),
+  postbackParamKeys: document.querySelector("#postbackParamKeys"),
+  postbackIncludeAllParams: document.querySelector("#postbackIncludeAllParams"),
+  postbackIncludeEmail: document.querySelector("#postbackIncludeEmail"),
+  postbackIncludePhone: document.querySelector("#postbackIncludePhone"),
   adEventRows: document.querySelector("#adEventRows"),
   blueBubblesWebhookUrl: document.querySelector("#blueBubblesWebhookUrl"),
   copyBlueBubblesWebhookUrl: document.querySelector("#copyBlueBubblesWebhookUrl"),
@@ -152,6 +164,9 @@ let modelRateLimits = [];
 let adEventDefinitions = [];
 let adEventConfig = {};
 let trafficRange = "today";
+const DEFAULT_POSTBACK_EVENTS = ["trial_started", "paid_plan", "credit_topup"];
+const DEFAULT_POSTBACK_PARAM_KEYS =
+  "utm_source,utm_medium,utm_campaign,utm_content,utm_term,utm_id,fbclid,ttclid,rdt_cid,gclid,gbraid,wbraid,msclkid,click_id,subid,sub_id,external_id,lead_id";
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -257,7 +272,7 @@ function renderAdEventRows(definitions = [], config = {}) {
   }
   const header = document.createElement("div");
   header.className = "ad-event-row ad-event-header";
-  header.innerHTML = "<span>Event</span><span>Meta</span><span>TikTok</span>";
+  header.innerHTML = "<span>Event</span><span>Meta</span><span>TikTok</span><span>Reddit</span>";
   el.adEventRows.appendChild(header);
   for (const definition of definitions) {
     const row = document.createElement("div");
@@ -326,7 +341,7 @@ function renderAdEventRows(definitions = [], config = {}) {
       capi.type = "checkbox";
       capi.dataset.adToggle = `${platform}-capi`;
       capi.checked = Boolean(adEventValue(definition.key, platform, "capi", false));
-      capiLabel.append(capi, platform === "meta" ? " CAPI" : " Events API");
+      capiLabel.append(capi, platform === "meta" || platform === "reddit" ? " CAPI" : " Events API");
       toggles.append(browserLabel, capiLabel);
       cell.append(eventNameLabel, toggles);
       return cell;
@@ -336,6 +351,7 @@ function renderAdEventRows(definitions = [], config = {}) {
       eventCell,
       platformCell("meta", definition.metaEventName || "Lead"),
       platformCell("tiktok", definition.tiktokEventName || "SubmitForm"),
+      platformCell("reddit", definition.redditEventName || "Lead"),
     );
     el.adEventRows.appendChild(row);
   }
@@ -361,9 +377,40 @@ function collectAdEventConfig() {
         browser: Boolean(row.querySelector('[data-ad-toggle="tiktok-browser"]')?.checked),
         capi: Boolean(row.querySelector('[data-ad-toggle="tiktok-capi"]')?.checked),
       },
+      reddit: {
+        eventName: row.querySelector('[data-ad-event-name="reddit"]')?.value.trim() || "Lead",
+        browser: Boolean(row.querySelector('[data-ad-toggle="reddit-browser"]')?.checked),
+        capi: Boolean(row.querySelector('[data-ad-toggle="reddit-capi"]')?.checked),
+      },
     };
   }
   return config;
+}
+
+function normalizePostbackEvents(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  if (value && typeof value === "object") {
+    return Object.entries(value)
+      .filter(([, enabled]) => Boolean(enabled))
+      .map(([key]) => key);
+  }
+  if (typeof value === "string" && value.trim()) return value.split(",").map((item) => item.trim()).filter(Boolean);
+  return DEFAULT_POSTBACK_EVENTS;
+}
+
+function setPostbackEvents(value) {
+  const events = new Set(normalizePostbackEvents(value));
+  el.postbackEventTrial.checked = events.has("trial_started");
+  el.postbackEventPaidPlan.checked = events.has("paid_plan");
+  el.postbackEventCreditTopup.checked = events.has("credit_topup");
+}
+
+function collectPostbackEvents() {
+  const events = [];
+  if (el.postbackEventTrial.checked) events.push("trial_started");
+  if (el.postbackEventPaidPlan.checked) events.push("paid_plan");
+  if (el.postbackEventCreditTopup.checked) events.push("credit_topup");
+  return events;
 }
 
 async function loadModelOptions() {
@@ -422,11 +469,22 @@ async function loadSystem() {
     "metaPixelId",
     "metaTestEventCode",
     "tiktokPixelId",
+    "redditPixelId",
+    "postbackUrl",
+    "postbackMethod",
+    "postbackParamKeys",
   ]) {
     el[key].value = data.settings[key] ?? "";
   }
+  if (!el.postbackMethod.value) el.postbackMethod.value = "POST";
+  if (!el.postbackParamKeys.value) el.postbackParamKeys.value = DEFAULT_POSTBACK_PARAM_KEYS;
+  setPostbackEvents(data.settings.postbackEvents);
   renderAdEventRows(data.adEvents?.definitions || [], data.adEvents?.config || {});
   el.smtpSecure.checked = Boolean(data.settings.smtpSecure);
+  el.postbackEnabled.checked = Boolean(data.settings.postbackEnabled);
+  el.postbackIncludeAllParams.checked = Boolean(data.settings.postbackIncludeAllParams);
+  el.postbackIncludeEmail.checked = data.settings.postbackIncludeEmail !== false;
+  el.postbackIncludePhone.checked = Boolean(data.settings.postbackIncludePhone);
   secretState("geminiApiKey", data.secrets.geminiApiKey);
   secretState("placesApiKey", data.secrets.placesApiKey);
   secretState("telnyxApiKey", data.secrets.telnyxApiKey);
@@ -438,6 +496,7 @@ async function loadSystem() {
   secretState("stripeWebhookSecret", data.secrets.stripeWebhookSecret);
   secretState("metaAccessToken", data.secrets.metaAccessToken);
   secretState("tiktokAccessToken", data.secrets.tiktokAccessToken);
+  secretState("redditConversionAccessToken", data.secrets.redditConversionAccessToken);
   secretState("blueBubblesPassword", data.secrets.blueBubblesPassword);
   secretState("sentDmApiKey", data.secrets.sentDmApiKey);
   if (!el.emailTestRecipient.value && el.smtpFromEmail.value) el.emailTestRecipient.value = el.smtpFromEmail.value;
@@ -1697,7 +1756,17 @@ el.systemForm.addEventListener("submit", async (event) => {
         metaTestEventCode: el.metaTestEventCode.value,
         tiktokPixelId: el.tiktokPixelId.value,
         tiktokAccessToken: el.tiktokAccessToken.value,
+        redditPixelId: el.redditPixelId.value,
+        redditConversionAccessToken: el.redditConversionAccessToken.value,
         adEventConfig: collectAdEventConfig(),
+        postbackEnabled: el.postbackEnabled.checked,
+        postbackUrl: el.postbackUrl.value,
+        postbackMethod: el.postbackMethod.value,
+        postbackEvents: collectPostbackEvents(),
+        postbackParamKeys: el.postbackParamKeys.value,
+        postbackIncludeAllParams: el.postbackIncludeAllParams.checked,
+        postbackIncludeEmail: el.postbackIncludeEmail.checked,
+        postbackIncludePhone: el.postbackIncludePhone.checked,
         recordingRetentionDays: Number(el.recordingRetentionDays.value),
         demoNumberCapacity: Number(el.demoNumberCapacity.value),
         demoCallerLimit: Number(el.demoCallerLimit.value),
@@ -1731,6 +1800,7 @@ el.systemForm.addEventListener("submit", async (event) => {
       el.stripeWebhookSecret,
       el.metaAccessToken,
       el.tiktokAccessToken,
+      el.redditConversionAccessToken,
       el.blueBubblesPassword,
       el.sentDmApiKey,
     ]) input.value = "";

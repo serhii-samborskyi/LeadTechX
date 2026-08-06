@@ -184,7 +184,7 @@
             </div>
           </section>
           <section class="system-panel" data-system-panel="ad-platforms">
-            <div class="system-panel-heading"><h3>Ad platforms</h3><p>Meta and TikTok browser pixels plus server-side conversion API tracking with event_id deduplication.</p></div>
+            <div class="system-panel-heading"><h3>Ad platforms</h3><p>Meta, TikTok, Reddit, and outbound postbacks for server-side conversion tracking with deduplication.</p></div>
             <div class="ad-platform-settings">
               <div class="messaging-card ad-platform-card">
                 <div class="messaging-card-heading">
@@ -207,10 +207,41 @@
                   <label>Events API access token<input id="tiktokAccessToken" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="tiktokAccessTokenState"></small></label>
                 </div>
               </div>
+              <div class="messaging-card ad-platform-card">
+                <div class="messaging-card-heading">
+                  <h4>Reddit</h4>
+                  <p>Use Reddit Pixel in the browser and Conversions API on the server.</p>
+                </div>
+                <div class="form-grid secret-grid messaging-card-grid">
+                  <label>Pixel ID<input id="redditPixelId" placeholder="Reddit pixel ID" /></label>
+                  <label>Conversion access token<input id="redditConversionAccessToken" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="redditConversionAccessTokenState"></small></label>
+                </div>
+              </div>
+              <div class="messaging-card ad-platform-card">
+                <div class="messaging-card-heading">
+                  <h4>Postback webhook</h4>
+                  <p>Send trial and purchase conversions to an external tracker with the URL variables captured during registration.</p>
+                </div>
+                <div class="form-grid secret-grid messaging-card-grid">
+                  <label class="check-label"><input id="postbackEnabled" type="checkbox" /> Enable postbacks</label>
+                  <label>Method<select id="postbackMethod"><option value="POST">POST JSON</option><option value="GET">GET query string</option></select></label>
+                  <label class="wide-field">Postback URL<input id="postbackUrl" placeholder="https://tracker.example.com/postback" /></label>
+                  <div class="postback-event-options wide-field">
+                    <strong>Send postback for</strong>
+                    <label class="check-label"><input id="postbackEventTrial" type="checkbox" /> Trial started</label>
+                    <label class="check-label"><input id="postbackEventPaidPlan" type="checkbox" /> Paid plan</label>
+                    <label class="check-label"><input id="postbackEventCreditTopup" type="checkbox" /> Credit top-up</label>
+                  </div>
+                  <label class="wide-field postback-param-field">URL variables to forward<textarea id="postbackParamKeys" rows="3" placeholder="utm_source, fbclid, ttclid, rdt_cid, click_id"></textarea><small>Comma or line separated. Turn on all variables when your tracker needs the full registration query string.</small></label>
+                  <label class="check-label"><input id="postbackIncludeAllParams" type="checkbox" /> Forward all URL variables</label>
+                  <label class="check-label"><input id="postbackIncludeEmail" type="checkbox" /> Include customer email when available</label>
+                  <label class="check-label"><input id="postbackIncludePhone" type="checkbox" /> Include phone when available</label>
+                </div>
+              </div>
               <div class="messaging-card ad-event-card">
                 <div class="messaging-card-heading">
                   <h4>Tracked events</h4>
-                  <p>Configure every funnel event separately. Browser Pixel and CAPI use the same event_id for deduplication.</p>
+                  <p>Configure every funnel event separately. Browser Pixel and CAPI use the same event_id/conversion_id for deduplication.</p>
                 </div>
                 <div id="adEventRows" class="ad-event-rows"></div>
               </div>

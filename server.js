@@ -51,6 +51,7 @@ const AD_EVENT_DEFINITIONS = [
     description: "Visitor opened the Fast Agent builder page.",
     metaEventName: "PageView",
     tiktokEventName: "ViewContent",
+    redditEventName: "PageVisit",
     defaultBrowser: true,
     defaultCapi: false,
   },
@@ -60,6 +61,7 @@ const AD_EVENT_DEFINITIONS = [
     description: "Fast Agent researched a business and created a live trial receptionist.",
     metaEventName: "Lead",
     tiktokEventName: "SubmitForm",
+    redditEventName: "Lead",
     defaultBrowser: true,
     defaultCapi: true,
   },
@@ -69,6 +71,7 @@ const AD_EVENT_DEFINITIONS = [
     description: "A new trial profile/session was created.",
     metaEventName: "StartTrial",
     tiktokEventName: "StartTrial",
+    redditEventName: "SignUp",
     defaultBrowser: true,
     defaultCapi: true,
     defaultValue: 0,
@@ -80,6 +83,7 @@ const AD_EVENT_DEFINITIONS = [
     description: "A business started Stripe checkout for a plan or credit top-up.",
     metaEventName: "InitiateCheckout",
     tiktokEventName: "InitiateCheckout",
+    redditEventName: "AddToCart",
     defaultBrowser: true,
     defaultCapi: true,
   },
@@ -89,6 +93,7 @@ const AD_EVENT_DEFINITIONS = [
     description: "A paid subscription checkout was completed.",
     metaEventName: "Subscribe",
     tiktokEventName: "Subscribe",
+    redditEventName: "Purchase",
     defaultBrowser: false,
     defaultCapi: true,
   },
@@ -98,6 +103,7 @@ const AD_EVENT_DEFINITIONS = [
     description: "A credit pack checkout was completed.",
     metaEventName: "Purchase",
     tiktokEventName: "CompletePayment",
+    redditEventName: "Purchase",
     defaultBrowser: false,
     defaultCapi: true,
   },
@@ -537,6 +543,11 @@ function defaultAdEventConfig() {
           capi: Boolean(definition.defaultCapi),
           eventName: definition.tiktokEventName,
         },
+        reddit: {
+          browser: Boolean(definition.defaultBrowser),
+          capi: Boolean(definition.defaultCapi),
+          eventName: definition.redditEventName,
+        },
       },
     ]),
   );
@@ -561,6 +572,7 @@ function normalizeAdEventConfig(rawConfig = {}) {
       const incoming = raw[definition.key] && typeof raw[definition.key] === "object" ? raw[definition.key] : {};
       const incomingMeta = incoming.meta && typeof incoming.meta === "object" ? incoming.meta : {};
       const incomingTikTok = incoming.tiktok && typeof incoming.tiktok === "object" ? incoming.tiktok : {};
+      const incomingReddit = incoming.reddit && typeof incoming.reddit === "object" ? incoming.reddit : {};
       const fallback = defaults[definition.key];
       return [
         definition.key,
@@ -577,6 +589,11 @@ function normalizeAdEventConfig(rawConfig = {}) {
             browser: typeof incomingTikTok.browser === "boolean" ? incomingTikTok.browser : fallback.tiktok.browser,
             capi: typeof incomingTikTok.capi === "boolean" ? incomingTikTok.capi : fallback.tiktok.capi,
             eventName: String(incomingTikTok.eventName || fallback.tiktok.eventName).trim() || fallback.tiktok.eventName,
+          },
+          reddit: {
+            browser: typeof incomingReddit.browser === "boolean" ? incomingReddit.browser : fallback.reddit.browser,
+            capi: typeof incomingReddit.capi === "boolean" ? incomingReddit.capi : fallback.reddit.capi,
+            eventName: String(incomingReddit.eventName || fallback.reddit.eventName).trim() || fallback.reddit.eventName,
           },
         },
       ];
@@ -635,6 +652,21 @@ function publicAdTrackingConfig(settings) {
         ]),
       ),
     },
+    reddit: {
+      pixelId: String(settings?.redditPixelId || "").trim(),
+      events: Object.fromEntries(
+        Object.entries(events).map(([key, config]) => [
+          key,
+          {
+            enabled: config.enabled,
+            browser: Boolean(config.reddit.browser),
+            eventName: config.reddit.eventName,
+            value: config.value,
+            currency: config.currency,
+          },
+        ]),
+      ),
+    },
     definitions: AD_EVENT_DEFINITIONS.map(({ key, label, description }) => ({ key, label, description })),
   };
 }
@@ -672,6 +704,7 @@ const TRAFFIC_TRACKING_KEYS = [
   "gbraid",
   "wbraid",
   "ttclid",
+  "rdt_cid",
   "msclkid",
   "campaign",
   "adset",
@@ -679,6 +712,27 @@ const TRAFFIC_TRACKING_KEYS = [
   "placement",
   "source",
   "medium",
+];
+const DEFAULT_POSTBACK_EVENTS = ["trial_started", "paid_plan", "credit_topup"];
+const DEFAULT_POSTBACK_PARAM_KEYS = [
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_content",
+  "utm_term",
+  "utm_id",
+  "fbclid",
+  "ttclid",
+  "rdt_cid",
+  "gclid",
+  "gbraid",
+  "wbraid",
+  "msclkid",
+  "click_id",
+  "subid",
+  "sub_id",
+  "external_id",
+  "lead_id",
 ];
 
 function trafficQueryParams(sourceUrl = "") {
@@ -722,12 +776,14 @@ function inferTrafficPlatform({ referrer = "", queryParams = {}, trackingTags = 
   if (source) return source.toLowerCase();
   if (queryParams.fbclid) return "meta";
   if (queryParams.ttclid) return "tiktok";
+  if (queryParams.rdt_cid) return "reddit";
   if (queryParams.gclid || queryParams.gbraid || queryParams.wbraid) return "google";
   if (queryParams.msclkid) return "microsoft";
   const host = trafficHost(referrer);
   if (!host) return "direct";
   if (host.includes("facebook") || host.includes("instagram")) return "meta";
   if (host.includes("tiktok")) return "tiktok";
+  if (host.includes("reddit")) return "reddit";
   if (host.includes("google")) return "google";
   if (host.includes("bing") || host.includes("microsoft")) return "microsoft";
   return host;
@@ -739,6 +795,229 @@ function trafficBusinessProfileId(customData = {}, userData = {}) {
   const external = String(userData.externalId || "");
   const match = external.match(/^business:(\d+)$/);
   return match ? Number(match[1]) : null;
+}
+
+function normalizePostbackMethod(value) {
+  return String(value || "POST").trim().toUpperCase() === "GET" ? "GET" : "POST";
+}
+
+function normalizePostbackUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("Postback URL must be a valid URL");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Postback URL must start with http:// or https://");
+  return parsed.toString();
+}
+
+function normalizePostbackParamKeys(value, fallback = DEFAULT_POSTBACK_PARAM_KEYS) {
+  if (value === undefined || value === null) return fallback.join(",");
+  const keys = String(value)
+    .split(/[\n,]/)
+    .map((key) => key.trim())
+    .filter((key) => key && key.length <= 120 && !/[&=?#\s]/.test(key));
+  return [...new Set(keys)].join(",");
+}
+
+function postbackParamKeyList(settings) {
+  const clean = normalizePostbackParamKeys(settings?.postbackParamKeys);
+  return clean
+    .split(",")
+    .map((key) => key.trim())
+    .filter(Boolean);
+}
+
+function normalizePostbackEvents(value, fallback = DEFAULT_POSTBACK_EVENTS) {
+  const validEvents = new Set(AD_EVENT_DEFINITIONS.map((definition) => definition.key));
+  let incoming = value;
+  if (incoming === undefined || incoming === null) incoming = fallback;
+  if (typeof incoming === "string") {
+    const trimmed = incoming.trim();
+    if (!trimmed) incoming = [];
+    else if (trimmed.startsWith("[")) {
+      try {
+        incoming = JSON.parse(trimmed);
+      } catch {
+        incoming = trimmed.split(",");
+      }
+    } else {
+      incoming = trimmed.split(",");
+    }
+  } else if (incoming && typeof incoming === "object" && !Array.isArray(incoming)) {
+    incoming = Object.entries(incoming)
+      .filter(([, enabled]) => Boolean(enabled))
+      .map(([key]) => key);
+  }
+  const cleanEvents = Array.isArray(incoming)
+    ? incoming.map((key) => String(key || "").trim()).filter((key) => key && validEvents.has(key))
+    : [];
+  return [...new Set(cleanEvents)];
+}
+
+function jsonObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function postbackPayloadValue(value) {
+  if (value === undefined || value === null || value === "") return "";
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(postbackPayloadValue).filter(Boolean).join(",");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function postbackSelectedParams(settings, trafficEvent) {
+  const queryParams = jsonObject(trafficEvent?.queryParams);
+  if (settings?.postbackIncludeAllParams) return queryParams;
+  const keys = postbackParamKeyList(settings);
+  return Object.fromEntries(keys.filter((key) => queryParams[key] !== undefined).map((key) => [key, queryParams[key]]));
+}
+
+async function findPostbackTrafficEvent({ eventId, businessProfileId }) {
+  const cleanEventId = String(eventId || "").trim();
+  if (cleanEventId) {
+    const direct = await prisma.trafficEvent.findUnique({ where: { eventId: cleanEventId } }).catch(() => null);
+    if (direct) return direct;
+  }
+  const profileId = Number(businessProfileId || 0);
+  if (!profileId) return null;
+  const registration = await prisma.trafficEvent.findFirst({
+    where: {
+      businessProfileId: profileId,
+      eventKey: { in: ["trial_started", "fastagent_agent_built", "fastagent_page_visit"] },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  if (registration) return registration;
+  return prisma.trafficEvent.findFirst({
+    where: { businessProfileId: profileId },
+    orderBy: { createdAt: "asc" },
+  });
+}
+
+function buildPostbackPayload({ settings, eventKey, eventId, sourceUrl, customData = {}, userData = {}, trafficEvent = null }) {
+  const selectedParams = postbackSelectedParams(settings, trafficEvent);
+  const businessProfileId = trafficBusinessProfileId(customData, userData) || trafficEvent?.businessProfileId || null;
+  const uniqueId = String(userData.externalId || (businessProfileId ? `business:${businessProfileId}` : "") || eventId || "").trim();
+  return {
+    event: eventKey,
+    event_id: eventId,
+    unique_id: uniqueId,
+    business_profile_id: businessProfileId,
+    email: settings?.postbackIncludeEmail === false ? undefined : userData.email || undefined,
+    phone: settings?.postbackIncludePhone ? userData.phone || undefined : undefined,
+    value: customData.value,
+    currency: customData.currency,
+    content_name: customData.content_name,
+    checkout_type: customData.checkout_type,
+    credit_amount: customData.credit_amount,
+    platform: trafficEvent?.platform || undefined,
+    landing_path: trafficEvent?.landingPath || undefined,
+    source_url: trafficEvent?.sourceUrl || sourceUrl || undefined,
+    referrer: trafficEvent?.referrer || undefined,
+    url_params: selectedParams,
+    tracking_tags: jsonObject(trafficEvent?.trackingTags),
+    occurred_at: new Date().toISOString(),
+  };
+}
+
+function postbackGetUrl(baseUrl, payload) {
+  const url = new URL(baseUrl);
+  for (const [key, value] of Object.entries(payload.url_params || {})) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const cleanValue = postbackPayloadValue(item);
+        if (cleanValue) url.searchParams.append(key, cleanValue);
+      }
+    } else {
+      const cleanValue = postbackPayloadValue(value);
+      if (cleanValue) url.searchParams.set(key, cleanValue);
+    }
+  }
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === "url_params" || key === "tracking_tags") continue;
+    const cleanValue = postbackPayloadValue(value);
+    if (cleanValue) url.searchParams.set(key, cleanValue);
+  }
+  return url.toString();
+}
+
+async function sendPostbackWebhook({ settings, eventKey, eventId, req, sourceUrl = "", customData = {}, userData = {}, source = "server" }) {
+  if (!settings?.postbackEnabled) return { skipped: true, reason: "Postback disabled" };
+  const enabledEvents = new Set(normalizePostbackEvents(settings.postbackEvents));
+  if (!enabledEvents.has(eventKey)) return { skipped: true, reason: "Postback not enabled for event" };
+  let postbackUrl = "";
+  try {
+    postbackUrl = normalizePostbackUrl(settings.postbackUrl);
+  } catch (error) {
+    await logAdPlatformEvent({
+      platform: "postback",
+      eventKey,
+      eventName: "postback",
+      eventId,
+      source,
+      status: "failed",
+      error: error.message,
+    });
+    throw error;
+  }
+  if (!postbackUrl) return { skipped: true, reason: "Postback URL is missing" };
+  const method = normalizePostbackMethod(settings.postbackMethod);
+  const businessProfileId = trafficBusinessProfileId(customData, userData);
+  const trafficEvent = await findPostbackTrafficEvent({ eventId, businessProfileId });
+  const payload = adCustomData(buildPostbackPayload({ settings, eventKey, eventId, sourceUrl, customData, userData, trafficEvent }));
+  const targetUrl = method === "GET" ? postbackGetUrl(postbackUrl, payload) : postbackUrl;
+  const requestPayload =
+    method === "GET"
+      ? { method, url: targetUrl, payload }
+      : { method, url: targetUrl, payload };
+  let response;
+  let responsePayload = null;
+  try {
+    response = await fetch(targetUrl, {
+      method,
+      headers: method === "POST" ? { "Content-Type": "application/json" } : undefined,
+      body: method === "POST" ? JSON.stringify(payload) : undefined,
+      signal: AbortSignal.timeout(8000),
+    });
+    const text = await response.text();
+    try {
+      responsePayload = text ? JSON.parse(text) : null;
+    } catch {
+      responsePayload = text ? { text: text.slice(0, 2000) } : null;
+    }
+  } catch (error) {
+    const message = error.name === "TimeoutError" || error.name === "AbortError" ? "Postback webhook timed out" : error.message;
+    await logAdPlatformEvent({
+      platform: "postback",
+      eventKey,
+      eventName: "postback",
+      eventId,
+      source,
+      status: "failed",
+      requestPayload,
+      error: message,
+    });
+    throw new Error(message);
+  }
+  await logAdPlatformEvent({
+    platform: "postback",
+    eventKey,
+    eventName: "postback",
+    eventId,
+    source,
+    status: response.ok ? "sent" : "failed",
+    httpStatus: response.status,
+    requestPayload,
+    responsePayload,
+    error: response.ok ? "" : `Postback webhook failed with HTTP ${response.status}`,
+  });
+  if (!response.ok) throw new Error(`Postback webhook failed with HTTP ${response.status}`);
+  return { ok: true, status: response.status, response: responsePayload };
 }
 
 async function recordTrafficEvent({ req, eventKey, eventId, sourceUrl = "", referrer = "", customData = {}, userData = {}, source = "browser" }) {
@@ -785,6 +1064,27 @@ function adEventUrl(req, explicitUrl = "") {
   if (/^https?:\/\//i.test(supplied)) return supplied;
   const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
   return `${protocol}://${req.get("host")}${req.originalUrl || req.url || ""}`;
+}
+
+function queryValueFromUrl(urlValue, key) {
+  try {
+    const parsed = new URL(String(urlValue || ""));
+    return String(parsed.searchParams.get(key) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function redditClickId(req, sourceUrl = "") {
+  return (
+    queryValueFromUrl(sourceUrl, "rdt_cid") ||
+    queryValueFromUrl(req.body?.sourceUrl, "rdt_cid") ||
+    queryValueFromUrl(req.headers.referer, "rdt_cid") ||
+    String(req.body?.rdt_cid || req.body?.rdtCid || "").trim() ||
+    cookieValue(req, "_rdt_cid") ||
+    cookieValue(req, "rdt_cid") ||
+    ""
+  );
 }
 
 function emptyAdRequest() {
@@ -931,6 +1231,86 @@ async function sendTikTokEventsApiEvent({ settings, accessToken, eventKey, event
   return { ok: true, response: body };
 }
 
+const REDDIT_TRACKING_TYPE_MAPPING = Object.freeze({
+  PageVisit: "PAGE_VISIT",
+  ViewContent: "VIEW_CONTENT",
+  Search: "SEARCH",
+  AddToCart: "ADD_TO_CART",
+  AddToWishlist: "ADD_TO_WISHLIST",
+  Purchase: "PURCHASE",
+  Lead: "LEAD",
+  SignUp: "SIGN_UP",
+  Custom: "CUSTOM",
+});
+
+function redditEventType(eventName) {
+  const cleanName = String(eventName || "").trim() || "Custom";
+  const trackingType = REDDIT_TRACKING_TYPE_MAPPING[cleanName] || (Object.values(REDDIT_TRACKING_TYPE_MAPPING).includes(cleanName) ? cleanName : "");
+  if (trackingType) {
+    return { tracking_type: trackingType, custom_event_name: trackingType === "CUSTOM" && cleanName === "Custom" ? "RingPort Event" : undefined };
+  }
+  return { tracking_type: "CUSTOM", custom_event_name: cleanName.slice(0, 64) };
+}
+
+async function sendRedditCapiEvent({ settings, accessToken, eventKey, eventName, eventId, req, sourceUrl, customData = {}, userData = {}, source = "server" }) {
+  const pixelId = String(settings.redditPixelId || "").trim();
+  if (!pixelId || !accessToken) return { skipped: true, reason: "Reddit Pixel ID or conversion access token is missing" };
+  const eventSourceUrl = adEventUrl(req, sourceUrl);
+  const payload = {
+    data: {
+      partner: "RingPort",
+      partner_version: "1.0.0",
+      events: [
+        {
+          event_at: Date.now(),
+          action_source: "WEBSITE",
+          event_source_url: eventSourceUrl,
+          type: redditEventType(eventName),
+          click_id: redditClickId(req, eventSourceUrl) || undefined,
+          metadata: adCustomData({
+            conversion_id: eventId,
+            value: customData.value,
+            currency: customData.currency,
+          }),
+          user: adCustomData({
+            email: userData.email ? sha256Value(userData.email) : undefined,
+            phone_number: userData.phone ? sha256Value(String(userData.phone).replace(/\D/g, "")) : undefined,
+            external_id: userData.externalId ? sha256Value(userData.externalId) : undefined,
+            ip_address: adRequestIp(req),
+            user_agent: String(req.headers["user-agent"] || ""),
+          }),
+        },
+      ],
+    },
+  };
+  payload.data.events[0].type = adCustomData(payload.data.events[0].type);
+  const response = await fetch(`https://ads-api.reddit.com/api/v3/pixels/${encodeURIComponent(pixelId)}/conversion_events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "User-Agent": "RingPort/1.0.0",
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json().catch(() => ({}));
+  const ok = response.ok;
+  await logAdPlatformEvent({
+    platform: "reddit",
+    eventKey,
+    eventName,
+    eventId,
+    source,
+    status: ok ? "sent" : "failed",
+    httpStatus: response.status,
+    requestPayload: payload,
+    responsePayload: body,
+    error: ok ? "" : body.message || body.error?.message || `Reddit CAPI failed with HTTP ${response.status}`,
+  });
+  if (!ok) throw new Error(body.message || body.error?.message || `Reddit CAPI failed with HTTP ${response.status}`);
+  return { ok: true, response: body };
+}
+
 async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", customData = {}, userData = {}, source = "server" }) {
   const cleanEventKey = String(eventKey || "").trim();
   const definition = AD_EVENT_DEFINITIONS.find((event) => event.key === cleanEventKey);
@@ -940,9 +1320,10 @@ async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", 
   const cleanEventId =
     String(eventId || "").trim() ||
     `rp_${definition.key}_${Date.now().toString(36)}_${crypto.randomBytes(8).toString("hex")}`;
-  const [metaToken, tiktokToken] = await Promise.all([
+  const [metaToken, tiktokToken, redditToken] = await Promise.all([
     systemSecret("meta_capi_access_token", "META_CAPI_ACCESS_TOKEN").catch(() => ""),
     systemSecret("tiktok_events_api_access_token", "TIKTOK_EVENTS_API_ACCESS_TOKEN").catch(() => ""),
+    systemSecret("reddit_conversion_access_token", "REDDIT_CONVERSION_ACCESS_TOKEN").catch(() => ""),
   ]);
   const eventCustomData = mergeAdCustomData(eventConfig, customData);
   const results = {};
@@ -980,6 +1361,40 @@ async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", 
       });
     } catch (error) {
       results.tiktok = { ok: false, error: error.message };
+    }
+  }
+  if (eventConfig.reddit.capi && settings.redditPixelId) {
+    try {
+      results.reddit = await sendRedditCapiEvent({
+        settings,
+        accessToken: redditToken,
+        eventKey: definition.key,
+        eventName: eventConfig.reddit.eventName,
+        eventId: cleanEventId,
+        req,
+        sourceUrl,
+        customData: eventCustomData,
+        userData,
+        source,
+      });
+    } catch (error) {
+      results.reddit = { ok: false, error: error.message };
+    }
+  }
+  if (settings.postbackEnabled) {
+    try {
+      results.postback = await sendPostbackWebhook({
+        settings,
+        eventKey: definition.key,
+        eventId: cleanEventId,
+        req,
+        sourceUrl,
+        customData: eventCustomData,
+        userData,
+        source,
+      });
+    } catch (error) {
+      results.postback = { ok: false, error: error.message };
     }
   }
   return { ok: true, eventId: cleanEventId, results };
@@ -3314,6 +3729,8 @@ async function getSettings() {
       platformBusinessRules: DEFAULT_PLATFORM_BUSINESS_RULES,
       onboardingInstructions: DEFAULT_ONBOARDING_INSTRUCTIONS,
       adEventConfig: defaultAdEventConfig(),
+      postbackEvents: DEFAULT_POSTBACK_EVENTS,
+      postbackParamKeys: DEFAULT_POSTBACK_PARAM_KEYS.join(","),
     },
     update: {},
   });
@@ -6058,6 +6475,7 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
       currency: String(stripeSession.currency || "USD").toUpperCase(),
       content_name: selectedPlan.name,
       credit_amount: selectedPlan.monthlyCredits,
+      business_profile_id: session.businessProfileId,
     };
     trackAdEvent({
       req,
@@ -6822,6 +7240,7 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
       stripeWebhookSecret: secretState("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
       metaAccessToken: secretState("meta_capi_access_token", "META_CAPI_ACCESS_TOKEN"),
       tiktokAccessToken: secretState("tiktok_events_api_access_token", "TIKTOK_EVENTS_API_ACCESS_TOKEN"),
+      redditConversionAccessToken: secretState("reddit_conversion_access_token", "REDDIT_CONVERSION_ACCESS_TOKEN"),
     },
     adEvents: {
       definitions: AD_EVENT_DEFINITIONS,
@@ -7001,7 +7420,16 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         metaPixelId: String(req.body.metaPixelId || "").trim(),
         metaTestEventCode: String(req.body.metaTestEventCode || "").trim(),
         tiktokPixelId: String(req.body.tiktokPixelId || "").trim(),
+        redditPixelId: String(req.body.redditPixelId || "").trim(),
         adEventConfig: normalizeAdEventConfig(req.body.adEventConfig),
+        postbackEnabled: Boolean(req.body.postbackEnabled),
+        postbackUrl: normalizePostbackUrl(req.body.postbackUrl),
+        postbackMethod: normalizePostbackMethod(req.body.postbackMethod),
+        postbackEvents: normalizePostbackEvents(req.body.postbackEvents),
+        postbackParamKeys: normalizePostbackParamKeys(req.body.postbackParamKeys),
+        postbackIncludeAllParams: Boolean(req.body.postbackIncludeAllParams),
+        postbackIncludeEmail: req.body.postbackIncludeEmail !== false,
+        postbackIncludePhone: Boolean(req.body.postbackIncludePhone),
       },
       update: {
         researchModel: req.body.researchModel || undefined,
@@ -7063,7 +7491,20 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         metaTestEventCode:
           typeof req.body.metaTestEventCode === "string" ? req.body.metaTestEventCode.trim() : undefined,
         tiktokPixelId: typeof req.body.tiktokPixelId === "string" ? req.body.tiktokPixelId.trim() : undefined,
+        redditPixelId: typeof req.body.redditPixelId === "string" ? req.body.redditPixelId.trim() : undefined,
         adEventConfig: req.body.adEventConfig ? normalizeAdEventConfig(req.body.adEventConfig) : undefined,
+        postbackEnabled: typeof req.body.postbackEnabled === "boolean" ? req.body.postbackEnabled : undefined,
+        postbackUrl: typeof req.body.postbackUrl === "string" ? normalizePostbackUrl(req.body.postbackUrl) : undefined,
+        postbackMethod: typeof req.body.postbackMethod === "string" ? normalizePostbackMethod(req.body.postbackMethod) : undefined,
+        postbackEvents: req.body.postbackEvents === undefined ? undefined : normalizePostbackEvents(req.body.postbackEvents, []),
+        postbackParamKeys:
+          typeof req.body.postbackParamKeys === "string" ? normalizePostbackParamKeys(req.body.postbackParamKeys) : undefined,
+        postbackIncludeAllParams:
+          typeof req.body.postbackIncludeAllParams === "boolean" ? req.body.postbackIncludeAllParams : undefined,
+        postbackIncludeEmail:
+          typeof req.body.postbackIncludeEmail === "boolean" ? req.body.postbackIncludeEmail : undefined,
+        postbackIncludePhone:
+          typeof req.body.postbackIncludePhone === "boolean" ? req.body.postbackIncludePhone : undefined,
       },
     });
     await Promise.all([
@@ -7080,6 +7521,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
       saveSystemSecret("stripe_webhook_secret", req.body.stripeWebhookSecret),
       saveSystemSecret("meta_capi_access_token", req.body.metaAccessToken),
       saveSystemSecret("tiktok_events_api_access_token", req.body.tiktokAccessToken),
+      saveSystemSecret("reddit_conversion_access_token", req.body.redditConversionAccessToken),
     ]);
     res.json({ ok: true, settings });
   } catch (error) {
@@ -8439,6 +8881,10 @@ function stripeCheckoutSubscription(session) {
   return stripeId(session.subscription);
 }
 
+function stripeCheckoutEmail(session) {
+  return String(session.customer_details?.email || session.customer_email || "").trim();
+}
+
 function stripeInvoiceCreditPeriod(invoice) {
   const line = invoice.lines?.data?.[0] || {};
   const periodStart = stripeTimestamp(line.period?.start) || stripeTimestamp(invoice.period_start) || new Date();
@@ -8568,6 +9014,7 @@ async function processStripeCheckoutSession(session, req = null) {
   const profileId = Number(completed?.businessProfileId || session.metadata?.businessProfileId || 0);
   const settings = await getSettings();
   const eventKey = checkoutType === "subscription" || session.mode === "subscription" ? "paid_plan" : "credit_topup";
+  const checkoutEmail = stripeCheckoutEmail(session);
   trackAdEvent({
     req: req || emptyAdRequest(),
     settings,
@@ -8580,8 +9027,12 @@ async function processStripeCheckoutSession(session, req = null) {
       currency: String(session.currency || "USD").toUpperCase(),
       content_name: session.metadata?.subscriptionPlanName || (eventKey === "paid_plan" ? "Paid plan" : "Credit top-up"),
       credit_amount: completed?.creditAmount || Number(session.metadata?.creditAmount || 0) || undefined,
+      business_profile_id: profileId || undefined,
     },
-    userData: profileId ? { externalId: `business:${profileId}` } : {},
+    userData: adCustomData({
+      email: checkoutEmail,
+      externalId: profileId ? `business:${profileId}` : undefined,
+    }),
     source: "stripe_webhook",
   }).catch((error) => console.warn(`[ads] ${eventKey} tracking skipped: ${error.message}`));
   return completed;
@@ -10409,6 +10860,7 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
       currency: String(session.currency || "USD").toUpperCase(),
       content_name: selectedPlan?.name || "Credit top-up",
       credit_amount: creditAmount,
+      business_profile_id: profile.id,
     };
     trackAdEvent({
       req,
