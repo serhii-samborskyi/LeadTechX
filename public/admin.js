@@ -52,6 +52,8 @@ const el = {
   redditPixelId: document.querySelector("#redditPixelId"),
   redditConversionAccessToken: document.querySelector("#redditConversionAccessToken"),
   redditTestId: document.querySelector("#redditTestId"),
+  openAiAdsPixelId: document.querySelector("#openAiAdsPixelId"),
+  openAiAdsCapiKey: document.querySelector("#openAiAdsCapiKey"),
   postbackEnabled: document.querySelector("#postbackEnabled"),
   postbackUrl: document.querySelector("#postbackUrl"),
   postbackMethod: document.querySelector("#postbackMethod"),
@@ -273,7 +275,7 @@ function renderAdEventRows(definitions = [], config = {}) {
   }
   const header = document.createElement("div");
   header.className = "ad-event-row ad-event-header";
-  header.innerHTML = "<span>Event</span><span>Meta</span><span>TikTok</span><span>Reddit</span>";
+  header.innerHTML = "<span>Event</span><span>Meta</span><span>TikTok</span><span>Reddit</span><span>OpenAI Ads</span>";
   el.adEventRows.appendChild(header);
   for (const definition of definitions) {
     const row = document.createElement("div");
@@ -342,7 +344,7 @@ function renderAdEventRows(definitions = [], config = {}) {
       capi.type = "checkbox";
       capi.dataset.adToggle = `${platform}-capi`;
       capi.checked = Boolean(adEventValue(definition.key, platform, "capi", false));
-      capiLabel.append(capi, platform === "meta" || platform === "reddit" ? " CAPI" : " Events API");
+      capiLabel.append(capi, platform === "tiktok" ? " Events API" : " CAPI");
       toggles.append(browserLabel, capiLabel);
       cell.append(eventNameLabel, toggles);
       return cell;
@@ -353,6 +355,7 @@ function renderAdEventRows(definitions = [], config = {}) {
       platformCell("meta", definition.metaEventName || "Lead"),
       platformCell("tiktok", definition.tiktokEventName || "SubmitForm"),
       platformCell("reddit", definition.redditEventName || "Lead"),
+      platformCell("openai", definition.openAiEventName || "lead_created"),
     );
     el.adEventRows.appendChild(row);
   }
@@ -382,6 +385,11 @@ function collectAdEventConfig() {
         eventName: row.querySelector('[data-ad-event-name="reddit"]')?.value.trim() || "Lead",
         browser: Boolean(row.querySelector('[data-ad-toggle="reddit-browser"]')?.checked),
         capi: Boolean(row.querySelector('[data-ad-toggle="reddit-capi"]')?.checked),
+      },
+      openai: {
+        eventName: row.querySelector('[data-ad-event-name="openai"]')?.value.trim() || "lead_created",
+        browser: Boolean(row.querySelector('[data-ad-toggle="openai-browser"]')?.checked),
+        capi: Boolean(row.querySelector('[data-ad-toggle="openai-capi"]')?.checked),
       },
     };
   }
@@ -472,6 +480,7 @@ async function loadSystem() {
     "tiktokPixelId",
     "redditPixelId",
     "redditTestId",
+    "openAiAdsPixelId",
     "postbackUrl",
     "postbackMethod",
     "postbackParamKeys",
@@ -499,6 +508,7 @@ async function loadSystem() {
   secretState("metaAccessToken", data.secrets.metaAccessToken);
   secretState("tiktokAccessToken", data.secrets.tiktokAccessToken);
   secretState("redditConversionAccessToken", data.secrets.redditConversionAccessToken);
+  secretState("openAiAdsCapiKey", data.secrets.openAiAdsCapiKey);
   secretState("blueBubblesPassword", data.secrets.blueBubblesPassword);
   secretState("sentDmApiKey", data.secrets.sentDmApiKey);
   if (!el.emailTestRecipient.value && el.smtpFromEmail.value) el.emailTestRecipient.value = el.smtpFromEmail.value;
@@ -1761,6 +1771,8 @@ el.systemForm.addEventListener("submit", async (event) => {
         redditPixelId: el.redditPixelId.value,
         redditConversionAccessToken: el.redditConversionAccessToken.value,
         redditTestId: el.redditTestId.value,
+        openAiAdsPixelId: el.openAiAdsPixelId.value,
+        openAiAdsCapiKey: el.openAiAdsCapiKey.value,
         adEventConfig: collectAdEventConfig(),
         postbackEnabled: el.postbackEnabled.checked,
         postbackUrl: el.postbackUrl.value,
@@ -1804,6 +1816,7 @@ el.systemForm.addEventListener("submit", async (event) => {
       el.metaAccessToken,
       el.tiktokAccessToken,
       el.redditConversionAccessToken,
+      el.openAiAdsCapiKey,
       el.blueBubblesPassword,
       el.sentDmApiKey,
     ]) input.value = "";

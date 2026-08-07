@@ -188,6 +188,23 @@ function initRedditPixel(pixelId) {
   window.rdt("init", pixelId);
 }
 
+function initOpenAiAdsPixel(pixelId) {
+  if (!pixelId) return;
+  if (!window.oaiq) {
+    window.oaiq = function () {
+      window.oaiq.callMethod ? window.oaiq.callMethod.apply(window.oaiq, arguments) : window.oaiq.queue.push(arguments);
+    };
+    window.oaiq.queue = [];
+    window.oaiq.version = "1.0.0";
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://bzrcdn.openai.com/sdk/oaiq.min.js";
+    const firstScript = document.getElementsByTagName("script")[0];
+    firstScript.parentNode.insertBefore(script, firstScript);
+  }
+  window.oaiq("init", { pixelId });
+}
+
 async function loadAdTracking() {
   try {
     persistRedditClickId();
@@ -195,6 +212,7 @@ async function loadAdTracking() {
     initMetaPixel(state.adTracking.meta?.pixelId);
     initTikTokPixel(state.adTracking.tiktok?.pixelId);
     initRedditPixel(state.adTracking.reddit?.pixelId);
+    initOpenAiAdsPixel(state.adTracking.openai?.pixelId);
   } catch {
     state.adTracking = null;
   }
@@ -218,15 +236,49 @@ function adPixelCustomData(eventConfig, customData = {}) {
   return data;
 }
 
+const OPENAI_ADS_CONTENT_EVENTS = new Set(["checkout_started", "contents_viewed", "items_added", "order_created", "page_viewed"]);
+const OPENAI_ADS_PLAN_EVENTS = new Set(["trial_started", "subscription_created"]);
+const OPENAI_ADS_CUSTOMER_ACTION_EVENTS = new Set(["lead_created", "registration_completed", "appointment_scheduled"]);
+
+function openAiAdsAmount(value) {
+  if (value === "" || value === null || value === undefined) return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return undefined;
+  return Math.round(number * 100);
+}
+
+function openAiAdsMeasurePayload(eventConfig, customData = {}) {
+  const eventName = String(eventConfig?.eventName || "custom").trim() || "custom";
+  const amount = openAiAdsAmount(customData.value);
+  const currency = String(customData.currency || "USD").trim().toUpperCase();
+  const baseValue = amount === undefined ? {} : { amount, currency: /^[A-Z]{3}$/.test(currency) ? currency : "USD" };
+
+  if (OPENAI_ADS_PLAN_EVENTS.has(eventName)) {
+    return {
+      eventName,
+      data: {
+        type: "plan_enrollment",
+        ...baseValue,
+        plan_id: String(customData.plan_id || customData.planId || customData.content_id || eventName).slice(0, 128),
+      },
+    };
+  }
+  if (OPENAI_ADS_CONTENT_EVENTS.has(eventName)) return { eventName, data: { type: "contents", ...baseValue } };
+  if (OPENAI_ADS_CUSTOMER_ACTION_EVENTS.has(eventName)) return { eventName, data: { type: "customer_action" } };
+  return { eventName: "custom", data: { type: "custom", ...baseValue }, options: { custom_event_name: eventName } };
+}
+
 async function trackAdEvent(eventKey, customData = {}, userData = {}) {
   if (!state.adTracking || state.adTrackedEvents.has(eventKey)) return;
   const eventId = adEventId(eventKey);
   const meta = platformEventConfig("meta", eventKey);
   const tiktok = platformEventConfig("tiktok", eventKey);
   const reddit = platformEventConfig("reddit", eventKey);
+  const openai = platformEventConfig("openai", eventKey);
   const metaCustomData = adPixelCustomData(meta, customData);
   const tiktokCustomData = adPixelCustomData(tiktok, customData);
   const redditCustomData = { ...adPixelCustomData(reddit, customData), conversionId: eventId };
+  const openAiPayload = openAiAdsMeasurePayload(openai, adPixelCustomData(openai, customData));
   if (meta?.enabled && meta.browser && state.adTracking.meta?.pixelId && window.fbq) {
     window.fbq("track", meta.eventName, metaCustomData, { eventID: eventId });
   }
@@ -235,6 +287,9 @@ async function trackAdEvent(eventKey, customData = {}, userData = {}) {
   }
   if (reddit?.enabled && reddit.browser && state.adTracking.reddit?.pixelId && window.rdt) {
     window.rdt("track", reddit.eventName, redditCustomData);
+  }
+  if (openai?.enabled && openai.browser && state.adTracking.openai?.pixelId && window.oaiq) {
+    window.oaiq("measure", openAiPayload.eventName, openAiPayload.data, { ...(openAiPayload.options || {}), event_id: eventId });
   }
   state.adTrackedEvents.add(eventKey);
   try {
@@ -247,7 +302,7 @@ async function trackAdEvent(eventKey, customData = {}, userData = {}) {
         sourceUrl: location.href,
         referrer: document.referrer,
         rdt_cid: new URLSearchParams(location.search).get("rdt_cid") || "",
-        customData: adPixelCustomData(meta || tiktok || reddit, customData),
+        customData: adPixelCustomData(meta || tiktok || reddit || openai, customData),
         userData,
       }),
     });

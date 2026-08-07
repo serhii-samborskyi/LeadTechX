@@ -184,7 +184,7 @@
             </div>
           </section>
           <section class="system-panel" data-system-panel="ad-platforms">
-            <div class="system-panel-heading"><h3>Ad platforms</h3><p>Meta, TikTok, Reddit, and outbound postbacks for server-side conversion tracking with deduplication.</p></div>
+            <div class="system-panel-heading"><h3>Ad platforms</h3><p>Meta, TikTok, Reddit, OpenAI Ads, and outbound postbacks for server-side conversion tracking with deduplication.</p></div>
             <div class="ad-platform-settings">
               <div class="messaging-card ad-platform-card">
                 <div class="messaging-card-heading">
@@ -220,6 +220,16 @@
               </div>
               <div class="messaging-card ad-platform-card">
                 <div class="messaging-card-heading">
+                  <h4>OpenAI Ads</h4>
+                  <p>Use OpenAI Ads Pixel in the browser and Conversions API on the server.</p>
+                </div>
+                <div class="form-grid secret-grid messaging-card-grid">
+                  <label>Pixel ID<input id="openAiAdsPixelId" placeholder="OpenAI Ads pixel ID" /></label>
+                  <label>Conversions API key<input id="openAiAdsCapiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="openAiAdsCapiKeyState"></small></label>
+                </div>
+              </div>
+              <div class="messaging-card ad-platform-card">
+                <div class="messaging-card-heading">
                   <h4>Postback webhook</h4>
                   <p>Send trial and purchase conversions to an external tracker with the URL variables captured during registration.</p>
                 </div>
@@ -242,7 +252,7 @@
               <div class="messaging-card ad-event-card">
                 <div class="messaging-card-heading">
                   <h4>Tracked events</h4>
-                  <p>Configure every funnel event separately. Browser Pixel and CAPI use the same event_id/conversion_id for deduplication.</p>
+                  <p>Configure every funnel event separately. Browser Pixel and server events use the same event_id/conversion_id for deduplication.</p>
                 </div>
                 <div id="adEventRows" class="ad-event-rows"></div>
               </div>

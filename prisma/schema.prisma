@@ -325,12 +325,13 @@ model AppSettings {
   tiktokPixelId            String   @default("")
   redditPixelId            String   @default("")
   redditTestId             String   @default("")
+  openAiAdsPixelId         String   @default("")
   adEventConfig            Json?
   postbackEnabled          Boolean  @default(false)
   postbackUrl              String   @default("")
   postbackMethod           String   @default("POST")
   postbackEvents           Json?
-  postbackParamKeys        String   @default("utm_source,utm_medium,utm_campaign,utm_content,utm_term,utm_id,fbclid,ttclid,rdt_cid,gclid,gbraid,wbraid,msclkid,click_id,subid,sub_id,external_id,lead_id")
+  postbackParamKeys        String   @default("utm_source,utm_medium,utm_campaign,utm_content,utm_term,utm_id,fbclid,ttclid,rdt_cid,oppref,obref,gclid,gbraid,wbraid,msclkid,click_id,subid,sub_id,external_id,lead_id")
   postbackIncludeAllParams Boolean  @default(false)
   postbackIncludeEmail     Boolean  @default(true)
   postbackIncludePhone     Boolean  @default(false)

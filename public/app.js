@@ -648,6 +648,23 @@ function initRedditPixel(pixelId) {
   window.rdt("init", pixelId);
 }
 
+function initOpenAiAdsPixel(pixelId) {
+  if (!pixelId) return;
+  if (!window.oaiq) {
+    window.oaiq = function () {
+      window.oaiq.callMethod ? window.oaiq.callMethod.apply(window.oaiq, arguments) : window.oaiq.queue.push(arguments);
+    };
+    window.oaiq.queue = [];
+    window.oaiq.version = "1.0.0";
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://bzrcdn.openai.com/sdk/oaiq.min.js";
+    const firstScript = document.getElementsByTagName("script")[0];
+    firstScript.parentNode.insertBefore(script, firstScript);
+  }
+  window.oaiq("init", { pixelId });
+}
+
 async function loadAdTracking() {
   try {
     persistRedditClickId();
@@ -655,9 +672,42 @@ async function loadAdTracking() {
     initMetaPixel(state.adTracking.meta?.pixelId);
     initTikTokPixel(state.adTracking.tiktok?.pixelId);
     initRedditPixel(state.adTracking.reddit?.pixelId);
+    initOpenAiAdsPixel(state.adTracking.openai?.pixelId);
   } catch {
     state.adTracking = null;
   }
+}
+
+const OPENAI_ADS_CONTENT_EVENTS = new Set(["checkout_started", "contents_viewed", "items_added", "order_created", "page_viewed"]);
+const OPENAI_ADS_PLAN_EVENTS = new Set(["trial_started", "subscription_created"]);
+const OPENAI_ADS_CUSTOMER_ACTION_EVENTS = new Set(["lead_created", "registration_completed", "appointment_scheduled"]);
+
+function openAiAdsAmount(value) {
+  if (value === "" || value === null || value === undefined) return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return undefined;
+  return Math.round(number * 100);
+}
+
+function openAiAdsMeasurePayload(eventConfig, customData = {}) {
+  const eventName = String(eventConfig?.eventName || "custom").trim() || "custom";
+  const amount = openAiAdsAmount(customData.value);
+  const currency = String(customData.currency || "USD").trim().toUpperCase();
+  const baseValue = amount === undefined ? {} : { amount, currency: /^[A-Z]{3}$/.test(currency) ? currency : "USD" };
+
+  if (OPENAI_ADS_PLAN_EVENTS.has(eventName)) {
+    return {
+      eventName,
+      data: {
+        type: "plan_enrollment",
+        ...baseValue,
+        plan_id: String(customData.plan_id || customData.planId || customData.content_id || eventName).slice(0, 128),
+      },
+    };
+  }
+  if (OPENAI_ADS_CONTENT_EVENTS.has(eventName)) return { eventName, data: { type: "contents", ...baseValue } };
+  if (OPENAI_ADS_CUSTOMER_ACTION_EVENTS.has(eventName)) return { eventName, data: { type: "customer_action" } };
+  return { eventName: "custom", data: { type: "custom", ...baseValue }, options: { custom_event_name: eventName } };
 }
 
 function trackBrowserAdEvent(eventKey, eventId, customData = {}) {
@@ -686,6 +736,11 @@ function trackBrowserAdEvent(eventKey, eventId, customData = {}) {
   const reddit = state.adTracking.reddit?.events?.[eventKey];
   if (reddit?.enabled && reddit.browser && state.adTracking.reddit?.pixelId && window.rdt) {
     window.rdt("track", reddit.eventName, { ...pixelCustomData(reddit), conversionId: eventId });
+  }
+  const openai = state.adTracking.openai?.events?.[eventKey];
+  if (openai?.enabled && openai.browser && state.adTracking.openai?.pixelId && window.oaiq) {
+    const payload = openAiAdsMeasurePayload(openai, pixelCustomData(openai));
+    window.oaiq("measure", payload.eventName, payload.data, { ...(payload.options || {}), event_id: eventId });
   }
 }
 

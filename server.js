@@ -52,6 +52,7 @@ const AD_EVENT_DEFINITIONS = [
     metaEventName: "PageView",
     tiktokEventName: "ViewContent",
     redditEventName: "PageVisit",
+    openAiEventName: "page_viewed",
     defaultBrowser: true,
     defaultCapi: false,
   },
@@ -62,6 +63,7 @@ const AD_EVENT_DEFINITIONS = [
     metaEventName: "Lead",
     tiktokEventName: "SubmitForm",
     redditEventName: "Lead",
+    openAiEventName: "lead_created",
     defaultBrowser: true,
     defaultCapi: true,
   },
@@ -72,6 +74,7 @@ const AD_EVENT_DEFINITIONS = [
     metaEventName: "StartTrial",
     tiktokEventName: "StartTrial",
     redditEventName: "SignUp",
+    openAiEventName: "trial_started",
     defaultBrowser: true,
     defaultCapi: true,
     defaultValue: 0,
@@ -84,6 +87,7 @@ const AD_EVENT_DEFINITIONS = [
     metaEventName: "InitiateCheckout",
     tiktokEventName: "InitiateCheckout",
     redditEventName: "AddToCart",
+    openAiEventName: "checkout_started",
     defaultBrowser: true,
     defaultCapi: true,
   },
@@ -94,6 +98,7 @@ const AD_EVENT_DEFINITIONS = [
     metaEventName: "Subscribe",
     tiktokEventName: "Subscribe",
     redditEventName: "Purchase",
+    openAiEventName: "subscription_created",
     defaultBrowser: false,
     defaultCapi: true,
   },
@@ -104,6 +109,7 @@ const AD_EVENT_DEFINITIONS = [
     metaEventName: "Purchase",
     tiktokEventName: "CompletePayment",
     redditEventName: "Purchase",
+    openAiEventName: "order_created",
     defaultBrowser: false,
     defaultCapi: true,
   },
@@ -548,6 +554,11 @@ function defaultAdEventConfig() {
           capi: Boolean(definition.defaultCapi),
           eventName: definition.redditEventName,
         },
+        openai: {
+          browser: Boolean(definition.defaultBrowser),
+          capi: Boolean(definition.defaultCapi),
+          eventName: definition.openAiEventName,
+        },
       },
     ]),
   );
@@ -573,6 +584,7 @@ function normalizeAdEventConfig(rawConfig = {}) {
       const incomingMeta = incoming.meta && typeof incoming.meta === "object" ? incoming.meta : {};
       const incomingTikTok = incoming.tiktok && typeof incoming.tiktok === "object" ? incoming.tiktok : {};
       const incomingReddit = incoming.reddit && typeof incoming.reddit === "object" ? incoming.reddit : {};
+      const incomingOpenAi = incoming.openai && typeof incoming.openai === "object" ? incoming.openai : {};
       const fallback = defaults[definition.key];
       return [
         definition.key,
@@ -594,6 +606,11 @@ function normalizeAdEventConfig(rawConfig = {}) {
             browser: typeof incomingReddit.browser === "boolean" ? incomingReddit.browser : fallback.reddit.browser,
             capi: typeof incomingReddit.capi === "boolean" ? incomingReddit.capi : fallback.reddit.capi,
             eventName: String(incomingReddit.eventName || fallback.reddit.eventName).trim() || fallback.reddit.eventName,
+          },
+          openai: {
+            browser: typeof incomingOpenAi.browser === "boolean" ? incomingOpenAi.browser : fallback.openai.browser,
+            capi: typeof incomingOpenAi.capi === "boolean" ? incomingOpenAi.capi : fallback.openai.capi,
+            eventName: String(incomingOpenAi.eventName || fallback.openai.eventName).trim() || fallback.openai.eventName,
           },
         },
       ];
@@ -667,6 +684,21 @@ function publicAdTrackingConfig(settings) {
         ]),
       ),
     },
+    openai: {
+      pixelId: String(settings?.openAiAdsPixelId || "").trim(),
+      events: Object.fromEntries(
+        Object.entries(events).map(([key, config]) => [
+          key,
+          {
+            enabled: config.enabled,
+            browser: Boolean(config.openai.browser),
+            eventName: config.openai.eventName,
+            value: config.value,
+            currency: config.currency,
+          },
+        ]),
+      ),
+    },
     definitions: AD_EVENT_DEFINITIONS.map(({ key, label, description }) => ({ key, label, description })),
   };
 }
@@ -705,6 +737,8 @@ const TRAFFIC_TRACKING_KEYS = [
   "wbraid",
   "ttclid",
   "rdt_cid",
+  "oppref",
+  "obref",
   "msclkid",
   "campaign",
   "adset",
@@ -724,6 +758,8 @@ const DEFAULT_POSTBACK_PARAM_KEYS = [
   "fbclid",
   "ttclid",
   "rdt_cid",
+  "oppref",
+  "obref",
   "gclid",
   "gbraid",
   "wbraid",
@@ -777,6 +813,7 @@ function inferTrafficPlatform({ referrer = "", queryParams = {}, trackingTags = 
   if (queryParams.fbclid) return "meta";
   if (queryParams.ttclid) return "tiktok";
   if (queryParams.rdt_cid) return "reddit";
+  if (queryParams.oppref || queryParams.obref) return "openai";
   if (queryParams.gclid || queryParams.gbraid || queryParams.wbraid) return "google";
   if (queryParams.msclkid) return "microsoft";
   const host = trafficHost(referrer);
@@ -784,6 +821,7 @@ function inferTrafficPlatform({ referrer = "", queryParams = {}, trackingTags = 
   if (host.includes("facebook") || host.includes("instagram")) return "meta";
   if (host.includes("tiktok")) return "tiktok";
   if (host.includes("reddit")) return "reddit";
+  if (host.includes("openai") || host.includes("chatgpt")) return "openai";
   if (host.includes("google")) return "google";
   if (host.includes("bing") || host.includes("microsoft")) return "microsoft";
   return host;
@@ -1312,6 +1350,117 @@ async function sendRedditCapiEvent({ settings, accessToken, eventKey, eventName,
   return { ok: true, response: body };
 }
 
+const OPENAI_ADS_CONTENT_EVENTS = new Set(["checkout_started", "contents_viewed", "items_added", "order_created", "page_viewed"]);
+const OPENAI_ADS_PLAN_EVENTS = new Set(["trial_started", "subscription_created"]);
+const OPENAI_ADS_CUSTOMER_ACTION_EVENTS = new Set(["lead_created", "registration_completed", "appointment_scheduled"]);
+
+function openAiAdsAmount(value) {
+  if (value === "" || value === null || value === undefined) return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return undefined;
+  return Math.round(number * 100);
+}
+
+function openAiAdsEventData(eventName, eventKey, customData = {}) {
+  const type = String(eventName || "custom").trim() || "custom";
+  const amount = openAiAdsAmount(customData.value);
+  const currency = cleanAdEventCurrency(customData.currency, "USD");
+  const baseValue = amount === undefined ? {} : { amount, currency: currency || "USD" };
+
+  if (OPENAI_ADS_PLAN_EVENTS.has(type)) {
+    return {
+      type,
+      data: adCustomData({
+        type: "plan_enrollment",
+        ...baseValue,
+        plan_id: String(customData.plan_id || customData.planId || customData.content_id || eventKey || type).slice(0, 128),
+      }),
+    };
+  }
+  if (OPENAI_ADS_CONTENT_EVENTS.has(type)) {
+    return {
+      type,
+      data: adCustomData({
+        type: "contents",
+        ...baseValue,
+      }),
+    };
+  }
+  if (OPENAI_ADS_CUSTOMER_ACTION_EVENTS.has(type)) {
+    return { type, data: { type: "customer_action" } };
+  }
+  return {
+    type: "custom",
+    customEventName: type,
+    data: adCustomData({
+      type: "custom",
+      ...baseValue,
+    }),
+  };
+}
+
+async function sendOpenAiAdsCapiEvent({ settings, apiKey, eventKey, eventName, eventId, req, sourceUrl, customData = {}, userData = {}, source = "server" }) {
+  const pixelId = String(settings.openAiAdsPixelId || "").trim();
+  if (!pixelId || !apiKey) return { skipped: true, reason: "OpenAI Ads Pixel ID or CAPI key is missing" };
+  const eventSourceUrl = adEventUrl(req, sourceUrl);
+  const eventPayload = openAiAdsEventData(eventName, eventKey, customData);
+  const user = adCustomData({
+    email_sha256: userData.email ? sha256Value(userData.email) : undefined,
+    external_id_sha256: userData.externalId ? sha256Value(userData.externalId) : undefined,
+    ip_address: adRequestIp(req),
+    user_agent: String(req.headers["user-agent"] || ""),
+    obref: cookieValue(req, "__obref") || cookieValue(req, "obref") || undefined,
+  });
+  const payload = {
+    validate_only: false,
+    integration_source: "ringport",
+    events: [
+      adCustomData({
+        type: eventPayload.type,
+        custom_event_name: eventPayload.customEventName,
+        timestamp_ms: Date.now(),
+        oppref: cookieValue(req, "__oppref") || cookieValue(req, "oppref") || undefined,
+        source_url: eventSourceUrl,
+        action_source: "web",
+        id: eventId,
+        data: eventPayload.data,
+        user,
+      }),
+    ],
+  };
+  const url = new URL("https://bzr.openai.com/v1/events");
+  url.searchParams.set("pid", pixelId);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const text = await response.text();
+  let body = {};
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = text ? { text: text.slice(0, 2000) } : {};
+  }
+  await logAdPlatformEvent({
+    platform: "openai",
+    eventKey,
+    eventName: eventPayload.type,
+    eventId,
+    source,
+    status: response.ok ? "sent" : "failed",
+    httpStatus: response.status,
+    requestPayload: payload,
+    responsePayload: body,
+    error: response.ok ? "" : body.error?.message || body.message || `OpenAI Ads CAPI failed with HTTP ${response.status}`,
+  });
+  if (!response.ok) throw new Error(body.error?.message || body.message || `OpenAI Ads CAPI failed with HTTP ${response.status}`);
+  return { ok: true, response: body };
+}
+
 async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", customData = {}, userData = {}, source = "server" }) {
   const cleanEventKey = String(eventKey || "").trim();
   const definition = AD_EVENT_DEFINITIONS.find((event) => event.key === cleanEventKey);
@@ -1321,10 +1470,11 @@ async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", 
   const cleanEventId =
     String(eventId || "").trim() ||
     `rp_${definition.key}_${Date.now().toString(36)}_${crypto.randomBytes(8).toString("hex")}`;
-  const [metaToken, tiktokToken, redditToken] = await Promise.all([
+  const [metaToken, tiktokToken, redditToken, openAiAdsCapiKey] = await Promise.all([
     systemSecret("meta_capi_access_token", "META_CAPI_ACCESS_TOKEN").catch(() => ""),
     systemSecret("tiktok_events_api_access_token", "TIKTOK_EVENTS_API_ACCESS_TOKEN").catch(() => ""),
     systemSecret("reddit_conversion_access_token", "REDDIT_CONVERSION_ACCESS_TOKEN").catch(() => ""),
+    systemSecret("openai_ads_capi_key", "OPENAI_ADS_CAPI_KEY").catch(() => ""),
   ]);
   const eventCustomData = mergeAdCustomData(eventConfig, customData);
   const results = {};
@@ -1380,6 +1530,24 @@ async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", 
       });
     } catch (error) {
       results.reddit = { ok: false, error: error.message };
+    }
+  }
+  if (eventConfig.openai.capi && settings.openAiAdsPixelId) {
+    try {
+      results.openai = await sendOpenAiAdsCapiEvent({
+        settings,
+        apiKey: openAiAdsCapiKey,
+        eventKey: definition.key,
+        eventName: eventConfig.openai.eventName,
+        eventId: cleanEventId,
+        req,
+        sourceUrl,
+        customData: eventCustomData,
+        userData,
+        source,
+      });
+    } catch (error) {
+      results.openai = { ok: false, error: error.message };
     }
   }
   if (settings.postbackEnabled) {
@@ -7242,6 +7410,7 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
       metaAccessToken: secretState("meta_capi_access_token", "META_CAPI_ACCESS_TOKEN"),
       tiktokAccessToken: secretState("tiktok_events_api_access_token", "TIKTOK_EVENTS_API_ACCESS_TOKEN"),
       redditConversionAccessToken: secretState("reddit_conversion_access_token", "REDDIT_CONVERSION_ACCESS_TOKEN"),
+      openAiAdsCapiKey: secretState("openai_ads_capi_key", "OPENAI_ADS_CAPI_KEY"),
     },
     adEvents: {
       definitions: AD_EVENT_DEFINITIONS,
@@ -7423,6 +7592,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         tiktokPixelId: String(req.body.tiktokPixelId || "").trim(),
         redditPixelId: String(req.body.redditPixelId || "").trim(),
         redditTestId: String(req.body.redditTestId || "").trim(),
+        openAiAdsPixelId: String(req.body.openAiAdsPixelId || "").trim(),
         adEventConfig: normalizeAdEventConfig(req.body.adEventConfig),
         postbackEnabled: Boolean(req.body.postbackEnabled),
         postbackUrl: normalizePostbackUrl(req.body.postbackUrl),
@@ -7495,6 +7665,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         tiktokPixelId: typeof req.body.tiktokPixelId === "string" ? req.body.tiktokPixelId.trim() : undefined,
         redditPixelId: typeof req.body.redditPixelId === "string" ? req.body.redditPixelId.trim() : undefined,
         redditTestId: typeof req.body.redditTestId === "string" ? req.body.redditTestId.trim() : undefined,
+        openAiAdsPixelId: typeof req.body.openAiAdsPixelId === "string" ? req.body.openAiAdsPixelId.trim() : undefined,
         adEventConfig: req.body.adEventConfig ? normalizeAdEventConfig(req.body.adEventConfig) : undefined,
         postbackEnabled: typeof req.body.postbackEnabled === "boolean" ? req.body.postbackEnabled : undefined,
         postbackUrl: typeof req.body.postbackUrl === "string" ? normalizePostbackUrl(req.body.postbackUrl) : undefined,
@@ -7525,6 +7696,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
       saveSystemSecret("meta_capi_access_token", req.body.metaAccessToken),
       saveSystemSecret("tiktok_events_api_access_token", req.body.tiktokAccessToken),
       saveSystemSecret("reddit_conversion_access_token", req.body.redditConversionAccessToken),
+      saveSystemSecret("openai_ads_capi_key", req.body.openAiAdsCapiKey),
     ]);
     res.json({ ok: true, settings });
   } catch (error) {
