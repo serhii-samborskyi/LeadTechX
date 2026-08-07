@@ -324,6 +324,7 @@ model AppSettings {
   metaTestEventCode        String   @default("")
   tiktokPixelId            String   @default("")
   redditPixelId            String   @default("")
+  redditTestId             String   @default("")
   adEventConfig            Json?
   postbackEnabled          Boolean  @default(false)
   postbackUrl              String   @default("")

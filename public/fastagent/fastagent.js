@@ -226,7 +226,7 @@ async function trackAdEvent(eventKey, customData = {}, userData = {}) {
   const reddit = platformEventConfig("reddit", eventKey);
   const metaCustomData = adPixelCustomData(meta, customData);
   const tiktokCustomData = adPixelCustomData(tiktok, customData);
-  const redditCustomData = { ...adPixelCustomData(reddit, customData), conversion_id: eventId };
+  const redditCustomData = { ...adPixelCustomData(reddit, customData), conversionId: eventId };
   if (meta?.enabled && meta.browser && state.adTracking.meta?.pixelId && window.fbq) {
     window.fbq("track", meta.eventName, metaCustomData, { eventID: eventId });
   }

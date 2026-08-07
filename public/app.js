@@ -685,7 +685,7 @@ function trackBrowserAdEvent(eventKey, eventId, customData = {}) {
   }
   const reddit = state.adTracking.reddit?.events?.[eventKey];
   if (reddit?.enabled && reddit.browser && state.adTracking.reddit?.pixelId && window.rdt) {
-    window.rdt("track", reddit.eventName, { ...pixelCustomData(reddit), conversion_id: eventId });
+    window.rdt("track", reddit.eventName, { ...pixelCustomData(reddit), conversionId: eventId });
   }
 }
 
