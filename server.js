@@ -421,6 +421,7 @@ function publicBusinessProfile(profile, config = null) {
     accountStatus: profile.accountStatus,
     trialEndsAt: profile.trialEndsAt,
     creditBalance: profile.creditBalance,
+    subscriptionPlanId: profile.subscriptionPlanId || null,
   };
 }
 
@@ -1781,6 +1782,37 @@ function publicSubscriptionPlan(plan) {
     createdAt: plan.createdAt,
     updatedAt: plan.updatedAt,
   };
+}
+
+function normalizePlanLookup(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+async function activeSubscriptionPlanFromParam(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const numericId = /^\d+$/.test(raw) ? Number(raw) : null;
+  if (numericId) {
+    const byId = await prisma.subscriptionPlan.findFirst({ where: { id: numericId, active: true } });
+    if (byId) return byId;
+  }
+  const lookup = normalizePlanLookup(raw);
+  if (!lookup) return null;
+  const plans = await activeSubscriptionPlans();
+  return (
+    plans.find(
+      (plan) =>
+        normalizePlanLookup(plan.slug) === lookup ||
+        normalizePlanLookup(plan.name) === lookup ||
+        normalizePlanLookup(plan.id) === lookup,
+    ) || null
+  );
 }
 
 const BASIC_TRIAL_ENTITLEMENTS = Object.freeze({
@@ -6430,6 +6462,9 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
     const placeId = cleanGooglePlaceId(req.body.placeId || req.body.place_id || req.query.place_id);
     const businessName = normalizeBusinessName(req.body.businessName || req.query.business_name);
     const website = normalizeWebsite(req.body.website || req.query.website);
+    const requestedPlan = await activeSubscriptionPlanFromParam(
+      req.body.plan || req.body.planSlug || req.body.subscriptionPlan || req.query.plan,
+    );
     if (!businessName && !placeId) throw new Error("Business name is required");
 
     const settings = await getSettings();
@@ -6471,6 +6506,7 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
           trialStartedAt,
           trialEndsAt,
           creditBalance: settings.trialCredits,
+          ...(requestedPlan ? { subscriptionPlanId: requestedPlan.id } : {}),
         },
       });
       await recordCreditGrant({
@@ -6481,6 +6517,11 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
         expiresAt: profile.trialEndsAt,
         metadata: { source: "browser_demo", trialStartedAt: trialStartedAt.toISOString(), trialDays: settings.trialDays },
       }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
+    } else if (requestedPlan && profile.subscriptionPlanId !== requestedPlan.id) {
+      profile = await prisma.businessProfile.update({
+        where: { id: profile.id },
+        data: { subscriptionPlanId: requestedPlan.id },
+      });
     }
     const config = await ensureBusinessConfig(profile);
     await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
@@ -6507,6 +6548,7 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
       },
       demoPhoneNumber: demoAssignment?.voiceNumber.phoneNumber || null,
       demoCallerLimit: settings.demoCallerLimit,
+      selectedPlan: publicSubscriptionPlan(requestedPlan),
     });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -6517,23 +6559,35 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
   const session = await fastAgentSession(req.query.token);
   if (!session) return res.status(401).json({ error: "This demo session is invalid or expired" });
   const settings = await getSettings();
+  const requestedPlan = await activeSubscriptionPlanFromParam(req.query.plan || req.query.planSlug || req.query.subscriptionPlan);
+  let sessionProfile = session.businessProfile;
+  if (requestedPlan && sessionProfile.accountStatus === "trial" && sessionProfile.subscriptionPlanId !== requestedPlan.id) {
+    const alreadyClaimed = await prisma.user.findFirst({ where: { businessProfileId: session.businessProfileId }, select: { id: true } });
+    if (!alreadyClaimed) {
+      sessionProfile = await prisma.businessProfile.update({
+        where: { id: session.businessProfileId },
+        data: { subscriptionPlanId: requestedPlan.id },
+      });
+    }
+  }
   let assignment = await prisma.demoNumberAssignment.findUnique({
     where: { businessProfileId: session.businessProfileId },
     include: { voiceNumber: true, callerBindings: { orderBy: { createdAt: "asc" } } },
   });
   if (!assignment) {
-    await allocateDemoNumber(session.businessProfile, settings);
+    await allocateDemoNumber(sessionProfile, settings);
     assignment = await prisma.demoNumberAssignment.findUnique({
       where: { businessProfileId: session.businessProfileId },
       include: { voiceNumber: true, callerBindings: { orderBy: { createdAt: "asc" } } },
     });
   }
-  const config = await ensureBusinessConfig(session.businessProfile);
+  const config = await ensureBusinessConfig(sessionProfile);
   res.json({
-    profile: publicBusinessProfile(session.businessProfile, config),
+    profile: publicBusinessProfile(sessionProfile, config),
     demoPhoneNumber: assignment?.voiceNumber.phoneNumber || null,
     callerPhones: assignment?.callerBindings.map((binding) => binding.callerPhone) || [],
     demoCallerLimit: settings.demoCallerLimit,
+    selectedPlan: publicSubscriptionPlan(requestedPlan),
   });
 });
 
@@ -6639,7 +6693,7 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
     }
     const stripe = await stripeClient();
 
-    const selectedPlanId = Number(req.body.subscriptionPlanId || req.body.planId || 0);
+    const selectedPlanId = Number(req.body.subscriptionPlanId || req.body.planId || session.businessProfile.subscriptionPlanId || 0);
     const selectedPlan = selectedPlanId
       ? await prisma.subscriptionPlan.findFirst({ where: { id: selectedPlanId, active: true } })
       : null;

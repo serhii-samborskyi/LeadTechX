@@ -10,6 +10,7 @@ const website = normalizeWebsiteInput(params.get("website"));
 const placeId = (params.get("place_id") || "").trim();
 const accessTokenFromUrl = (params.get("token") || params.get("access_token") || "").trim();
 const claimToken = (params.get("claim_token") || "").trim();
+const requestedPlan = (params.get("plan") || params.get("plan_slug") || params.get("subscription_plan") || "").trim();
 const storageKey = placeId
   ? `fastagent:place:${placeId}`
   : businessName || website
@@ -40,6 +41,7 @@ const state = {
   adTrackedEvents: new Set(),
   subscriptionPlans: [],
   selectedPlanId: null,
+  requestedPlan,
   billingReady: false,
 };
 
@@ -52,6 +54,7 @@ const el = Object.fromEntries(
     "businessNameInput",
     "websiteInput",
     "placeIdInput",
+    "planInput",
     "placesSuggestions",
     "placesAutocompleteStatus",
     "agentScreen",
@@ -94,6 +97,8 @@ const el = Object.fromEntries(
     "transcript",
   ].map((id) => [id, document.querySelector(`#${id}`)]),
 );
+
+if (el.planInput) el.planInput.value = requestedPlan;
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -518,12 +523,33 @@ function selectPaidPlan(planId) {
   el.paidCheckoutButton.disabled = !state.selectedPlanId;
 }
 
+function normalizePlanLookup(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function planMatchesParam(plan, value) {
+  const lookup = normalizePlanLookup(value);
+  if (!lookup) return false;
+  return [plan.id, plan.slug, plan.name].some((candidate) => normalizePlanLookup(candidate) === lookup);
+}
+
 function renderPaidPlans() {
   if (!el.paidPlanSection || !el.paidPlanList) return;
   const plans = state.subscriptionPlans || [];
   el.paidPlanList.innerHTML = "";
   el.paidPlanSection.hidden = !state.billingReady || !plans.length;
   if (el.paidPlanSection.hidden) return;
+
+  if (!state.selectedPlanId && state.requestedPlan) {
+    const requested = plans.find((plan) => planMatchesParam(plan, state.requestedPlan));
+    if (requested) state.selectedPlanId = requested.id;
+  }
 
   if (!state.selectedPlanId || !plans.some((plan) => plan.id === state.selectedPlanId)) {
     state.selectedPlanId = plans[0]?.id || null;
@@ -598,6 +624,11 @@ async function saveProfile({ silent = false } = {}) {
 
 function renderAgent(data) {
   state.profile = data.profile;
+  if (data.profile?.subscriptionPlanId) {
+    state.selectedPlanId = Number(data.profile.subscriptionPlanId);
+  } else if (data.selectedPlan?.id) {
+    state.selectedPlanId = Number(data.selectedPlan.id);
+  }
   el.loadingScreen.hidden = true;
   el.errorScreen.hidden = true;
   el.agentScreen.hidden = false;
@@ -847,7 +878,7 @@ function drawVisualizer() {
 
 async function initialize() {
   await loadAdTracking();
-  trackAdEvent("fastagent_page_visit", { page_type: "fastagent" });
+  trackAdEvent("fastagent_page_visit", { page_type: "fastagent", plan: state.requestedPlan || undefined });
   if (!businessName && !state.accessToken) {
     el.loadingScreen.hidden = true;
     el.entryScreen.hidden = false;
@@ -860,7 +891,10 @@ async function initialize() {
     let createdAgent = false;
     if (state.accessToken) {
       try {
-        data = await api(`/api/onboarding/fast-agent?token=${encodeURIComponent(state.accessToken)}`);
+        const sessionUrl = new URL("/api/onboarding/fast-agent", window.location.origin);
+        sessionUrl.searchParams.set("token", state.accessToken);
+        if (state.requestedPlan) sessionUrl.searchParams.set("plan", state.requestedPlan);
+        data = await api(`${sessionUrl.pathname}${sessionUrl.search}`);
       } catch (error) {
         if (accessTokenFromUrl || !businessName) throw error;
         if (storageKey) localStorage.removeItem(storageKey);
@@ -872,7 +906,7 @@ async function initialize() {
       data = await api("/api/onboarding/fast-agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ businessName, website, placeId }),
+        body: JSON.stringify({ businessName, website, placeId, plan: state.requestedPlan }),
       });
       state.accessToken = data.accessToken;
       createdAgent = true;
@@ -887,6 +921,8 @@ async function initialize() {
         content_name: data.profile?.businessName || businessName,
         business_profile_id: data.profile?.id,
         website: data.profile?.website || website || undefined,
+        plan: state.requestedPlan || undefined,
+        plan_id: data.profile?.subscriptionPlanId || data.selectedPlan?.id || undefined,
         trial_credits: data.profile?.creditBalance,
       };
       const userData = data.profile?.id ? { externalId: `business:${data.profile.id}` } : {};
