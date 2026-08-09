@@ -90,6 +90,7 @@ const el = {
   planAllowCreditTopups: document.querySelector("#planAllowCreditTopups"),
   planActive: document.querySelector("#planActive"),
   resetPlanButton: document.querySelector("#resetPlanButton"),
+  installDefaultPlansButton: document.querySelector("#installDefaultPlansButton"),
   planMessage: document.querySelector("#planMessage"),
   planList: document.querySelector("#planList"),
   recordingRetentionDays: document.querySelector("#recordingRetentionDays"),
@@ -882,6 +883,31 @@ async function loadPlans() {
   const data = await api("/api/admin/subscription-plans");
   renderPlans(data.plans || []);
   return data;
+}
+
+async function installDefaultPlans() {
+  if (
+    !window.confirm(
+      "Install or update Pay as you go, Starter, Professional, and Growth plans? Existing Stripe price IDs will be preserved.",
+    )
+  ) {
+    return;
+  }
+  el.planMessage.className = "form-message";
+  el.planMessage.textContent = "Installing RingPort plans";
+  el.installDefaultPlansButton.disabled = true;
+  try {
+    const data = await api("/api/admin/subscription-plans/defaults", { method: "POST" });
+    renderPlans(data.plans || []);
+    resetPlanForm();
+    el.planMessage.className = "form-message success";
+    el.planMessage.textContent = data.note || "RingPort plans installed";
+  } catch (error) {
+    el.planMessage.className = "form-message error";
+    el.planMessage.textContent = error.message;
+  } finally {
+    el.installDefaultPlansButton.disabled = false;
+  }
 }
 
 function adminMiniRow(parts) {
@@ -1849,6 +1875,7 @@ el.planForm.addEventListener("submit", async (event) => {
 });
 
 el.resetPlanButton.addEventListener("click", resetPlanForm);
+el.installDefaultPlansButton.addEventListener("click", installDefaultPlans);
 el.publicBaseUrl.addEventListener("input", refreshSystemWebhookUrls);
 el.blueBubblesPassword.addEventListener("input", refreshBlueBubblesWebhookUrl);
 el.copyStripeWebhookUrl.addEventListener("click", () => copyStripeWebhookUrl().catch((error) => (el.systemStatus.textContent = error.message)));

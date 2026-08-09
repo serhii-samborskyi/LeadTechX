@@ -1638,6 +1638,122 @@ function planInputData(body, existing = null) {
   };
 }
 
+function defaultRingPortPlans(settings = {}) {
+  const aiMinuteCredits =
+    Math.max(0, Math.round(Number(settings.voiceMinuteCredits || 0))) +
+      Math.max(0, Math.round(Number(settings.geminiMinuteCredits || 0))) || 20;
+  const creditsForMinutes = (minutes) => Math.max(0, Math.round(Number(minutes || 0) * aiMinuteCredits));
+  return [
+    {
+      name: "Starter",
+      slug: "starter",
+      description:
+        "For solo owners and small businesses that need reliable call answering. Includes about 250 AI call minutes at the current credit rate.",
+      monthlyPriceCents: 4900,
+      monthlyCredits: creditsForMinutes(250),
+      maxPhoneNumbers: 1,
+      maxTransferTargets: 0,
+      maxUsers: 1,
+      outboundQualificationEnabled: false,
+      smartReviewsEnabled: false,
+      callTransfersEnabled: false,
+      leadWebhookEnabled: false,
+      messageInboxEnabled: true,
+      appointmentRemindersEnabled: false,
+      prioritySupport: false,
+      allowCreditTopups: true,
+      supportLevel: "standard",
+      active: true,
+      sortOrder: 10,
+    },
+    {
+      name: "Professional",
+      slug: "professional",
+      description:
+        "Popular for booking. For busy businesses that want RingPort to answer, book, and follow up automatically. Includes about 1,000 AI call minutes at the current credit rate.",
+      monthlyPriceCents: 14900,
+      monthlyCredits: creditsForMinutes(1000),
+      maxPhoneNumbers: 1,
+      maxTransferTargets: 3,
+      maxUsers: 2,
+      outboundQualificationEnabled: false,
+      smartReviewsEnabled: true,
+      callTransfersEnabled: true,
+      leadWebhookEnabled: true,
+      messageInboxEnabled: true,
+      appointmentRemindersEnabled: false,
+      prioritySupport: false,
+      allowCreditTopups: true,
+      supportLevel: "standard",
+      active: true,
+      sortOrder: 20,
+    },
+    {
+      name: "Growth",
+      slug: "growth",
+      description:
+        "For high-volume businesses that need advanced automation and more control. Includes about 2,000 AI call minutes at the current credit rate.",
+      monthlyPriceCents: 29900,
+      monthlyCredits: creditsForMinutes(2000),
+      maxPhoneNumbers: 5,
+      maxTransferTargets: 10,
+      maxUsers: 5,
+      outboundQualificationEnabled: true,
+      smartReviewsEnabled: true,
+      callTransfersEnabled: true,
+      leadWebhookEnabled: true,
+      messageInboxEnabled: true,
+      appointmentRemindersEnabled: true,
+      prioritySupport: true,
+      allowCreditTopups: true,
+      supportLevel: "priority",
+      active: true,
+      sortOrder: 30,
+    },
+    {
+      name: "Pay as you go",
+      slug: "pay-as-you-go",
+      description:
+        "Basic RingPort number subscription for businesses that want to keep a number active and buy extra usage credits as needed. Includes 100 monthly credits.",
+      monthlyPriceCents: 900,
+      monthlyCredits: 100,
+      maxPhoneNumbers: 1,
+      maxTransferTargets: 0,
+      maxUsers: 1,
+      outboundQualificationEnabled: false,
+      smartReviewsEnabled: false,
+      callTransfersEnabled: false,
+      leadWebhookEnabled: false,
+      messageInboxEnabled: true,
+      appointmentRemindersEnabled: false,
+      prioritySupport: false,
+      allowCreditTopups: true,
+      supportLevel: "standard",
+      active: true,
+      sortOrder: 40,
+    },
+  ];
+}
+
+async function installDefaultRingPortPlans() {
+  const settings = await getSettings();
+  const plans = [];
+  for (const planData of defaultRingPortPlans(settings)) {
+    const existing = await prisma.subscriptionPlan.findUnique({ where: { slug: planData.slug } });
+    const plan = await prisma.subscriptionPlan.upsert({
+      where: { slug: planData.slug },
+      create: planData,
+      update: {
+        ...planData,
+        stripePriceId: existing?.stripePriceId || undefined,
+      },
+      include: { _count: { select: { businessProfiles: true } } },
+    });
+    plans.push(plan);
+  }
+  return plans;
+}
+
 function publicSubscriptionPlan(plan) {
   if (!plan) return null;
   return {
@@ -7711,6 +7827,24 @@ app.get("/api/admin/subscription-plans", requireAuth, requireAdmin, async (_req,
       orderBy: [{ sortOrder: "asc" }, { monthlyPriceCents: "asc" }, { name: "asc" }],
     });
     res.json({ plans: plans.map(adminSubscriptionPlan) });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/subscription-plans/defaults", requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const installed = await installDefaultRingPortPlans();
+    const plans = await prisma.subscriptionPlan.findMany({
+      include: { _count: { select: { businessProfiles: true } } },
+      orderBy: [{ sortOrder: "asc" }, { monthlyPriceCents: "asc" }, { name: "asc" }],
+    });
+    res.json({
+      ok: true,
+      installed: installed.map(adminSubscriptionPlan),
+      plans: plans.map(adminSubscriptionPlan),
+      note: "Pay as you go, Starter, Professional, and Growth plans were installed or updated. Existing Stripe price IDs were preserved.",
+    });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
