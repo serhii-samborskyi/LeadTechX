@@ -5,12 +5,21 @@ function normalizeWebsiteInput(value) {
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
+function normalizeBillingPeriodInput(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-");
+  return ["12", "12-month", "12-months", "annual", "annually", "year", "yearly"].includes(normalized) ? 12 : 1;
+}
+
 const businessName = (params.get("business_name") || "").trim();
 const website = normalizeWebsiteInput(params.get("website"));
 const placeId = (params.get("place_id") || "").trim();
 const accessTokenFromUrl = (params.get("token") || params.get("access_token") || "").trim();
 const claimToken = (params.get("claim_token") || "").trim();
 const requestedPlan = (params.get("plan") || params.get("plan_slug") || params.get("subscription_plan") || "").trim();
+const requestedPeriod = normalizeBillingPeriodInput(params.get("period") || params.get("billing_period") || params.get("billingPeriod"));
 const storageKey = placeId
   ? `fastagent:place:${placeId}`
   : businessName || website
@@ -42,6 +51,8 @@ const state = {
   subscriptionPlans: [],
   selectedPlanId: null,
   requestedPlan,
+  billingPeriodMonths: requestedPeriod,
+  annualDiscountPercent: 25,
   billingReady: false,
 };
 
@@ -55,6 +66,7 @@ const el = Object.fromEntries(
     "websiteInput",
     "placeIdInput",
     "planInput",
+    "periodInput",
     "placesSuggestions",
     "placesAutocompleteStatus",
     "agentScreen",
@@ -91,6 +103,8 @@ const el = Object.fromEntries(
     "claimForm",
     "claimEmail",
     "paidPlanSection",
+    "billingPeriodToggle",
+    "annualDiscountLabel",
     "paidPlanList",
     "paidCheckoutButton",
     "claimMessage",
@@ -99,6 +113,7 @@ const el = Object.fromEntries(
 );
 
 if (el.planInput) el.planInput.value = requestedPlan;
+if (el.periodInput) el.periodInput.value = String(state.billingPeriodMonths);
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -336,6 +351,37 @@ function moneyFromCents(cents) {
   }).format(Number(cents || 0) / 100);
 }
 
+function annualDiscountPercent() {
+  const parsed = Number(state.annualDiscountPercent ?? 25);
+  return Math.min(95, Math.max(0, Number.isFinite(parsed) ? parsed : 25));
+}
+
+function planBillingForCurrentPeriod(plan) {
+  const months = state.billingPeriodMonths === 12 ? 12 : 1;
+  const monthlyPriceCents = Math.max(0, Math.round(Number(plan?.monthlyPriceCents || 0)));
+  const monthlyCredits = Math.max(0, Math.round(Number(plan?.monthlyCredits || 0)));
+  const discount = months === 12 ? annualDiscountPercent() : 0;
+  return {
+    months,
+    discount,
+    priceCents: Math.max(0, Math.round(monthlyPriceCents * months * (1 - discount / 100))),
+    credits: monthlyCredits * months,
+  };
+}
+
+function updateBillingPeriodUi() {
+  if (el.periodInput) el.periodInput.value = String(state.billingPeriodMonths);
+  if (el.annualDiscountLabel) el.annualDiscountLabel.textContent = `${annualDiscountPercent()}% off`;
+  const checkoutLabel = el.paidCheckoutButton?.querySelector("span");
+  if (checkoutLabel) checkoutLabel.textContent = state.billingPeriodMonths === 12 ? "Start annual plan" : "Start selected plan";
+  if (!el.billingPeriodToggle) return;
+  for (const button of el.billingPeriodToggle.querySelectorAll("button[data-period]")) {
+    const active = normalizeBillingPeriodInput(button.dataset.period) === state.billingPeriodMonths;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+}
+
 function appendTranscript(speaker, text) {
   if (!text) return;
   const last = el.transcript.lastElementChild;
@@ -504,8 +550,9 @@ function profilePayload() {
 }
 
 function fastPlanFeatures(plan) {
+  const billing = planBillingForCurrentPeriod(plan);
   return [
-    `${plan.monthlyCredits || 0} monthly credits`,
+    billing.months === 12 ? `${billing.credits} credits for 12 months` : `${plan.monthlyCredits || 0} monthly credits`,
     `${plan.maxPhoneNumbers || 1} phone number${Number(plan.maxPhoneNumbers || 1) === 1 ? "" : "s"}`,
     plan.outboundQualificationEnabled ? "Outbound lead calling" : null,
     plan.smartReviewsEnabled ? "Review links and recovery" : null,
@@ -516,11 +563,12 @@ function fastPlanFeatures(plan) {
 }
 
 function selectPaidPlan(planId) {
-  state.selectedPlanId = Number(planId || 0) || null;
+  const nextPlan = (state.subscriptionPlans || []).find((plan) => Number(plan.id) === Number(planId));
+  state.selectedPlanId = nextPlan && !planWaitlistedForCurrent(nextPlan) ? Number(nextPlan.id) : null;
   for (const card of el.paidPlanList.querySelectorAll(".fast-plan-option")) {
     card.classList.toggle("active", Number(card.dataset.planId) === state.selectedPlanId);
   }
-  el.paidCheckoutButton.disabled = !state.selectedPlanId;
+  el.paidCheckoutButton.disabled = !canCheckoutSelectedPlan();
 }
 
 function normalizePlanLookup(value) {
@@ -539,30 +587,59 @@ function planMatchesParam(plan, value) {
   return [plan.id, plan.slug, plan.name].some((candidate) => normalizePlanLookup(candidate) === lookup);
 }
 
+function planHasReservedSlot(plan) {
+  return Number(state.profile?.subscriptionPlanId || 0) === Number(plan?.id || 0);
+}
+
+function planWaitlistedForCurrent(plan) {
+  return Boolean(plan?.signupWaitlist && !planHasReservedSlot(plan));
+}
+
+function selectedPaidPlan() {
+  return (state.subscriptionPlans || []).find((plan) => Number(plan.id) === Number(state.selectedPlanId)) || null;
+}
+
+function canCheckoutSelectedPlan() {
+  const plan = selectedPaidPlan();
+  return Boolean(plan && !planWaitlistedForCurrent(plan));
+}
+
 function renderPaidPlans() {
   if (!el.paidPlanSection || !el.paidPlanList) return;
   const plans = state.subscriptionPlans || [];
   el.paidPlanList.innerHTML = "";
   el.paidPlanSection.hidden = !state.billingReady || !plans.length;
   if (el.paidPlanSection.hidden) return;
+  updateBillingPeriodUi();
 
   if (!state.selectedPlanId && state.requestedPlan) {
-    const requested = plans.find((plan) => planMatchesParam(plan, state.requestedPlan));
+    const requested = plans.find((plan) => planMatchesParam(plan, state.requestedPlan) && !planWaitlistedForCurrent(plan));
     if (requested) state.selectedPlanId = requested.id;
   }
 
-  if (!state.selectedPlanId || !plans.some((plan) => plan.id === state.selectedPlanId)) {
-    state.selectedPlanId = plans[0]?.id || null;
+  if (!state.selectedPlanId || !plans.some((plan) => plan.id === state.selectedPlanId && !planWaitlistedForCurrent(plan))) {
+    state.selectedPlanId = plans.find((plan) => !planWaitlistedForCurrent(plan))?.id || null;
   }
 
   for (const plan of plans) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "fast-plan-option";
+    if (planWaitlistedForCurrent(plan)) card.classList.add("waitlisted");
+    card.disabled = planWaitlistedForCurrent(plan);
     card.dataset.planId = String(plan.id);
-    card.innerHTML = '<span class="fast-plan-top"><strong></strong><b></b></span><small></small>';
+    card.innerHTML = '<span class="fast-plan-top"><strong></strong><b></b></span><span class="fast-plan-slot"></span><small></small>';
+    const billing = planBillingForCurrentPeriod(plan);
     card.querySelector("strong").textContent = plan.name || "Plan";
-    card.querySelector("b").textContent = `${moneyFromCents(plan.monthlyPriceCents)}/mo`;
+    card.querySelector("b").textContent = `${moneyFromCents(billing.priceCents)}${billing.months === 12 ? "/yr" : "/mo"}`;
+    const slot = card.querySelector(".fast-plan-slot");
+    if (plan.signupLimit) {
+      slot.textContent = planWaitlistedForCurrent(plan)
+        ? "Waitlist open"
+        : `${Math.max(0, Number(plan.signupSlotsRemaining ?? 0))} signup slots left`;
+    } else {
+      slot.remove();
+    }
     card.querySelector("small").textContent = fastPlanFeatures(plan).join(" · ");
     card.addEventListener("click", () => selectPaidPlan(plan.id));
     el.paidPlanList.appendChild(card);
@@ -575,6 +652,7 @@ async function loadSubscriptionPlans() {
   try {
     const data = await api("/api/onboarding/subscription-plans");
     state.subscriptionPlans = data.plans || [];
+    state.annualDiscountPercent = Number(data.billing?.annualPrepayDiscountPercent ?? 25);
     state.billingReady = Boolean(data.stripe?.ready);
   } catch {
     state.subscriptionPlans = [];
@@ -658,6 +736,9 @@ function renderAgent(data) {
     el.claimForm.hidden = false;
     el.finishSetupLink.hidden = true;
     el.claimMessage.textContent = "";
+  }
+  if (data.planUnavailable) {
+    el.claimMessage.textContent = `${data.planUnavailable} Starter and Professional are available now.`;
   }
   window.lucide?.createIcons();
 }
@@ -878,7 +959,11 @@ function drawVisualizer() {
 
 async function initialize() {
   await loadAdTracking();
-  trackAdEvent("fastagent_page_visit", { page_type: "fastagent", plan: state.requestedPlan || undefined });
+  trackAdEvent("fastagent_page_visit", {
+    page_type: "fastagent",
+    plan: state.requestedPlan || undefined,
+    billing_period_months: state.billingPeriodMonths,
+  });
   if (!businessName && !state.accessToken) {
     el.loadingScreen.hidden = true;
     el.entryScreen.hidden = false;
@@ -923,6 +1008,7 @@ async function initialize() {
         website: data.profile?.website || website || undefined,
         plan: state.requestedPlan || undefined,
         plan_id: data.profile?.subscriptionPlanId || data.selectedPlan?.id || undefined,
+        billing_period_months: state.billingPeriodMonths,
         trial_credits: data.profile?.creditBalance,
       };
       const userData = data.profile?.id ? { externalId: `business:${data.profile.id}` } : {};
@@ -1012,13 +1098,21 @@ el.paidCheckoutButton.addEventListener("click", async () => {
         claimToken: state.claimToken,
         email,
         subscriptionPlanId: state.selectedPlanId,
+        period: state.billingPeriodMonths,
       }),
     });
     location.assign(data.url);
   } catch (error) {
     el.claimMessage.textContent = error.message;
-    el.paidCheckoutButton.disabled = !state.selectedPlanId;
+    el.paidCheckoutButton.disabled = !canCheckoutSelectedPlan();
   }
+});
+
+el.billingPeriodToggle?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-period]");
+  if (!button) return;
+  state.billingPeriodMonths = normalizeBillingPeriodInput(button.dataset.period);
+  renderPaidPlans();
 });
 
 el.finishSetupLink.addEventListener("click", async (event) => {

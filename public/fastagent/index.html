@@ -29,6 +29,7 @@
         <p>Enter the business details to prepare a live agent.</p>
         <form action="/fastagent/" method="get" class="fast-entry-form">
           <input id="planInput" name="plan" type="hidden" />
+          <input id="periodInput" name="period" type="hidden" />
           <label class="places-autocomplete-field">
             Business name
             <input id="businessNameInput" name="business_name" autocomplete="off" placeholder="Your business name as it appears on Google Maps" required />
@@ -98,6 +99,10 @@
           </form>
           <div class="fast-paid-start" id="paidPlanSection" hidden>
             <div class="fast-paid-divider"><span>Or start a paid plan now</span></div>
+            <div class="fast-period-toggle" id="billingPeriodToggle" role="group" aria-label="Billing period">
+              <button type="button" data-period="1">Monthly</button>
+              <button type="button" data-period="12">Annual <span id="annualDiscountLabel">25% off</span></button>
+            </div>
             <div class="fast-plan-list" id="paidPlanList"></div>
             <button class="fast-paid-button" id="paidCheckoutButton" type="button"><i data-lucide="credit-card"></i><span>Start selected plan</span></button>
           </div>

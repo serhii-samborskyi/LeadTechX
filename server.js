@@ -1592,6 +1592,40 @@ function planPriceCentsFromInput(value, fallback = 0) {
   return Math.max(0, Math.round(Number.isFinite(parsed) ? parsed : fallback || 0));
 }
 
+function annualPrepayDiscountPercent(settings = {}) {
+  const parsed = Number(settings.annualPrepayDiscountPercent ?? 25);
+  return Math.min(95, Math.max(0, Number.isFinite(parsed) ? parsed : 25));
+}
+
+function billingPeriodMonths(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-");
+  if (["12", "12-month", "12-months", "annual", "annually", "year", "yearly"].includes(normalized)) return 12;
+  return 1;
+}
+
+function subscriptionPlanBilling(plan, settings = {}, requestedPeriod = 1) {
+  const periodMonths = billingPeriodMonths(requestedPeriod);
+  const monthlyPriceCents = Math.max(0, Math.round(Number(plan?.monthlyPriceCents || 0)));
+  const monthlyCredits = Math.max(0, Math.round(Number(plan?.monthlyCredits || 0)));
+  const discountPercent = periodMonths === 12 ? annualPrepayDiscountPercent(settings) : 0;
+  const grossPriceCents = monthlyPriceCents * periodMonths;
+  const priceCents = Math.max(0, Math.round(grossPriceCents * (1 - discountPercent / 100)));
+  return {
+    periodMonths,
+    label: periodMonths === 12 ? "annual" : "monthly",
+    interval: "month",
+    intervalCount: periodMonths,
+    monthlyPriceCents,
+    grossPriceCents,
+    priceCents,
+    discountPercent,
+    creditAmount: monthlyCredits * periodMonths,
+  };
+}
+
 function normalizePlanSlug(value, fallbackName = "") {
   const base = String(value || fallbackName || "plan")
     .trim()
@@ -1634,6 +1668,7 @@ function planInputData(body, existing = null) {
     allowCreditTopups: entitlementFlag("allowCreditTopups", true),
     supportLevel: String(body.supportLevel ?? existing?.supportLevel ?? "standard").trim() || "standard",
     stripePriceId: String(body.stripePriceId ?? existing?.stripePriceId ?? "").trim() || null,
+    signupLimit: entitlementNumber("signupLimit", 0, 0),
     active: typeof body.active === "boolean" ? body.active : existing?.active ?? true,
     sortOrder: Math.round(Number(body.sortOrder ?? existing?.sortOrder ?? 0)),
   };
@@ -1664,6 +1699,7 @@ function defaultRingPortPlans(settings = {}) {
       prioritySupport: false,
       allowCreditTopups: true,
       supportLevel: "standard",
+      signupLimit: 0,
       active: true,
       sortOrder: 10,
     },
@@ -1686,6 +1722,7 @@ function defaultRingPortPlans(settings = {}) {
       prioritySupport: false,
       allowCreditTopups: true,
       supportLevel: "standard",
+      signupLimit: 0,
       active: true,
       sortOrder: 20,
     },
@@ -1708,6 +1745,7 @@ function defaultRingPortPlans(settings = {}) {
       prioritySupport: true,
       allowCreditTopups: true,
       supportLevel: "priority",
+      signupLimit: 0,
       active: true,
       sortOrder: 30,
     },
@@ -1730,6 +1768,7 @@ function defaultRingPortPlans(settings = {}) {
       prioritySupport: false,
       allowCreditTopups: true,
       supportLevel: "standard",
+      signupLimit: 0,
       active: true,
       sortOrder: 40,
     },
@@ -1757,6 +1796,13 @@ async function installDefaultRingPortPlans() {
 
 function publicSubscriptionPlan(plan) {
   if (!plan) return null;
+  const signupLimit = Math.max(0, Math.round(Number(plan.signupLimit || 0)));
+  const signupSlotsUsed =
+    plan.signupSlotsUsed === undefined || plan.signupSlotsUsed === null
+      ? null
+      : Math.max(0, Math.round(Number(plan.signupSlotsUsed || 0)));
+  const signupSlotsRemaining =
+    signupLimit > 0 && signupSlotsUsed !== null ? Math.max(0, signupLimit - signupSlotsUsed) : null;
   return {
     id: plan.id,
     name: plan.name,
@@ -1777,6 +1823,10 @@ function publicSubscriptionPlan(plan) {
     allowCreditTopups: Boolean(plan.allowCreditTopups),
     supportLevel: plan.supportLevel || "standard",
     stripePriceConfigured: Boolean(plan.stripePriceId),
+    signupLimit,
+    signupSlotsUsed,
+    signupSlotsRemaining,
+    signupWaitlist: signupLimit > 0 && signupSlotsUsed !== null && signupSlotsRemaining <= 0,
     active: plan.active,
     sortOrder: plan.sortOrder,
     createdAt: plan.createdAt,
@@ -1813,6 +1863,70 @@ async function activeSubscriptionPlanFromParam(value) {
         normalizePlanLookup(plan.id) === lookup,
     ) || null
   );
+}
+
+function planSignupWhere(planId, excludeBusinessProfileId = null) {
+  return {
+    subscriptionPlanId: Number(planId),
+    archivedAt: null,
+    accountStatus: { in: ["trial", "paid"] },
+    ...(excludeBusinessProfileId ? { id: { not: Number(excludeBusinessProfileId) } } : {}),
+  };
+}
+
+async function subscriptionPlanSignupUsage(planId, options = {}) {
+  if (!planId) return 0;
+  return prisma.businessProfile.count({
+    where: planSignupWhere(planId, options.excludeBusinessProfileId),
+  });
+}
+
+async function planWithSignupUsage(plan, options = {}) {
+  if (!plan) return null;
+  const used = await subscriptionPlanSignupUsage(plan.id, options);
+  return { ...plan, signupSlotsUsed: used };
+}
+
+async function plansWithSignupUsage(plans, options = {}) {
+  return Promise.all((plans || []).map((plan) => planWithSignupUsage(plan, options)));
+}
+
+async function ensurePlanSignupSlot(plan, options = {}) {
+  const limit = Math.max(0, Math.round(Number(plan?.signupLimit || 0)));
+  if (!plan || limit <= 0) return { available: true, used: 0, remaining: null };
+  const used = await subscriptionPlanSignupUsage(plan.id, options);
+  const remaining = Math.max(0, limit - used);
+  if (remaining <= 0) {
+    const error = new Error(`${plan.name} is currently waitlisted. Choose another plan to start now, or check back when slots reopen.`);
+    error.code = "PLAN_WAITLISTED";
+    error.statusCode = 409;
+    throw error;
+  }
+  return { available: true, used, remaining };
+}
+
+async function assignRequestedPlanIfAvailable(profile, requestedPlan) {
+  if (!profile || !requestedPlan) {
+    return { profile, selectedPlan: requestedPlan || null, planUnavailable: null };
+  }
+  if (profile.subscriptionPlanId === requestedPlan.id) {
+    return { profile, selectedPlan: await planWithSignupUsage(requestedPlan), planUnavailable: null };
+  }
+  try {
+    await ensurePlanSignupSlot(requestedPlan, { excludeBusinessProfileId: profile.id });
+  } catch (error) {
+    if (error.code !== "PLAN_WAITLISTED") throw error;
+    return {
+      profile,
+      selectedPlan: await planWithSignupUsage(requestedPlan),
+      planUnavailable: error.message,
+    };
+  }
+  const updated = await prisma.businessProfile.update({
+    where: { id: profile.id },
+    data: { subscriptionPlanId: requestedPlan.id },
+  });
+  return { profile: updated, selectedPlan: await planWithSignupUsage(requestedPlan), planUnavailable: null };
 }
 
 const BASIC_TRIAL_ENTITLEMENTS = Object.freeze({
@@ -3164,7 +3278,7 @@ async function creditBucketBreakdown(businessProfileId, now = new Date()) {
     for (const bucket of buckets) {
       const active = !bucket.expiresAt || new Date(bucket.expiresAt) > now;
       if (!active) continue;
-      if (bucket.sourceType === "subscription_monthly") {
+      if (["subscription_monthly", "subscription_annual"].includes(bucket.sourceType)) {
         summary.monthlyIncluded.remaining += bucket.remainingCredits;
         summary.monthlyIncluded.total += bucket.totalCredits;
         if (
@@ -4048,6 +4162,7 @@ async function getSettings() {
       adEventConfig: defaultAdEventConfig(),
       postbackEvents: DEFAULT_POSTBACK_EVENTS,
       postbackParamKeys: DEFAULT_POSTBACK_PARAM_KEYS.join(","),
+      annualPrepayDiscountPercent: 25,
     },
     update: {},
   });
@@ -6506,7 +6621,6 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
           trialStartedAt,
           trialEndsAt,
           creditBalance: settings.trialCredits,
-          ...(requestedPlan ? { subscriptionPlanId: requestedPlan.id } : {}),
         },
       });
       await recordCreditGrant({
@@ -6517,12 +6631,9 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
         expiresAt: profile.trialEndsAt,
         metadata: { source: "browser_demo", trialStartedAt: trialStartedAt.toISOString(), trialDays: settings.trialDays },
       }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
-    } else if (requestedPlan && profile.subscriptionPlanId !== requestedPlan.id) {
-      profile = await prisma.businessProfile.update({
-        where: { id: profile.id },
-        data: { subscriptionPlanId: requestedPlan.id },
-      });
     }
+    const planAssignment = await assignRequestedPlanIfAvailable(profile, requestedPlan);
+    profile = planAssignment.profile;
     const config = await ensureBusinessConfig(profile);
     await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
     const access = issueToken();
@@ -6548,7 +6659,8 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
       },
       demoPhoneNumber: demoAssignment?.voiceNumber.phoneNumber || null,
       demoCallerLimit: settings.demoCallerLimit,
-      selectedPlan: publicSubscriptionPlan(requestedPlan),
+      selectedPlan: publicSubscriptionPlan(planAssignment.selectedPlan),
+      planUnavailable: planAssignment.planUnavailable,
     });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -6561,13 +6673,15 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
   const settings = await getSettings();
   const requestedPlan = await activeSubscriptionPlanFromParam(req.query.plan || req.query.planSlug || req.query.subscriptionPlan);
   let sessionProfile = session.businessProfile;
+  let selectedPlan = requestedPlan ? await planWithSignupUsage(requestedPlan) : null;
+  let planUnavailable = null;
   if (requestedPlan && sessionProfile.accountStatus === "trial" && sessionProfile.subscriptionPlanId !== requestedPlan.id) {
     const alreadyClaimed = await prisma.user.findFirst({ where: { businessProfileId: session.businessProfileId }, select: { id: true } });
     if (!alreadyClaimed) {
-      sessionProfile = await prisma.businessProfile.update({
-        where: { id: session.businessProfileId },
-        data: { subscriptionPlanId: requestedPlan.id },
-      });
+      const planAssignment = await assignRequestedPlanIfAvailable(sessionProfile, requestedPlan);
+      sessionProfile = planAssignment.profile;
+      selectedPlan = planAssignment.selectedPlan;
+      planUnavailable = planAssignment.planUnavailable;
     }
   }
   let assignment = await prisma.demoNumberAssignment.findUnique({
@@ -6587,25 +6701,31 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
     demoPhoneNumber: assignment?.voiceNumber.phoneNumber || null,
     callerPhones: assignment?.callerBindings.map((binding) => binding.callerPhone) || [],
     demoCallerLimit: settings.demoCallerLimit,
-    selectedPlan: publicSubscriptionPlan(requestedPlan),
+    selectedPlan: publicSubscriptionPlan(selectedPlan),
+    planUnavailable,
   });
 });
 
 app.get("/api/onboarding/subscription-plans", async (_req, res) => {
   try {
-    const [plans, secretKeyStatus, webhookSecretStatus] = await Promise.all([
+    const [settings, plans, secretKeyStatus, webhookSecretStatus] = await Promise.all([
+      getSettings(),
       activeSubscriptionPlans(),
       systemSecretConfigured("stripe_secret_key", "STRIPE_SECRET_KEY"),
       systemSecretConfigured("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
     ]);
     const checkoutConfigured = Boolean(secretKeyStatus.configured && secretKeyStatus.ok);
     const webhookConfigured = Boolean(webhookSecretStatus.configured && webhookSecretStatus.ok);
+    const plansWithSlots = await plansWithSignupUsage(plans);
     res.json({
-      plans: plans.map(publicSubscriptionPlan),
+      plans: plansWithSlots.map(publicSubscriptionPlan),
       stripe: {
         ready: Boolean(checkoutConfigured && webhookConfigured),
         checkoutConfigured,
         webhookConfigured,
+      },
+      billing: {
+        annualPrepayDiscountPercent: annualPrepayDiscountPercent(settings),
       },
     });
   } catch (error) {
@@ -6698,6 +6818,8 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
       ? await prisma.subscriptionPlan.findFirst({ where: { id: selectedPlanId, active: true } })
       : null;
     if (!selectedPlan) throw new Error("Choose an active subscription plan before starting checkout");
+    await ensurePlanSignupSlot(selectedPlan, { excludeBusinessProfileId: session.businessProfileId });
+    const billing = subscriptionPlanBilling(selectedPlan, settings, req.body.period || req.body.billingPeriod || req.body.billingPeriodMonths);
 
     const email = String(req.body.email || "").trim().toLowerCase();
     const typedClaimToken = String(req.body.claimToken || "").trim();
@@ -6742,6 +6864,7 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
     cancelUrl.searchParams.set("token", String(req.body.accessToken || ""));
     cancelUrl.searchParams.set("claim_token", claimToken);
     cancelUrl.searchParams.set("billing", "cancelled");
+    cancelUrl.searchParams.set("period", String(billing.periodMonths));
 
     const profile = await prisma.businessProfile.findUnique({
       where: { id: session.businessProfileId },
@@ -6752,7 +6875,11 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
       checkoutType: "subscription",
       subscriptionPlanId: String(selectedPlan.id),
       subscriptionPlanName: selectedPlan.name,
-      creditAmount: String(Math.max(0, Math.round(Number(selectedPlan.monthlyCredits || 0)))),
+      billingPeriodMonths: String(billing.periodMonths),
+      billingPeriodLabel: billing.label,
+      annualPrepayDiscountPercent: String(billing.discountPercent),
+      monthlyCreditAmount: String(Math.max(0, Math.round(Number(selectedPlan.monthlyCredits || 0)))),
+      creditAmount: String(billing.creditAmount),
       onboardingSource: "fastagent",
       accountClaimTokenId: claimRecord?.id ? String(claimRecord.id) : "",
     };
@@ -6769,19 +6896,21 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
     } else if (email || claimRecord?.email) {
       sessionParams.customer_email = email || claimRecord.email;
     }
-    if (selectedPlan.stripePriceId) {
+    if (selectedPlan.stripePriceId && billing.periodMonths === 1) {
       sessionParams.line_items = [{ price: selectedPlan.stripePriceId, quantity: 1 }];
     } else {
-      if (selectedPlan.monthlyPriceCents < 50) throw new Error("Plan price must be at least $0.50 or use a Stripe price ID");
+      if (billing.priceCents < 50) throw new Error("Plan price must be at least $0.50 or use a Stripe price ID");
       sessionParams.line_items = [
         {
           price_data: {
             currency: "usd",
-            unit_amount: selectedPlan.monthlyPriceCents,
-            recurring: { interval: "month" },
+            unit_amount: billing.priceCents,
+            recurring: { interval: billing.interval, interval_count: billing.intervalCount },
             product_data: {
-              name: selectedPlan.name,
-              description: selectedPlan.description || `${selectedPlan.monthlyCredits} RingPort credits per month`,
+              name: `${selectedPlan.name}${billing.periodMonths === 12 ? " annual" : ""}`,
+              description:
+                selectedPlan.description ||
+                `${billing.creditAmount} RingPort credits per ${billing.periodMonths === 12 ? "12 months" : "month"}`,
             },
           },
           quantity: 1,
@@ -6797,7 +6926,7 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
         stripeSessionId: stripeSession.id,
         mode: stripeSession.mode || "subscription",
         status: stripeSession.status || "created",
-        creditAmount: Math.max(0, Math.round(Number(selectedPlan.monthlyCredits || 0))),
+        creditAmount: billing.creditAmount,
         amountTotal: stripeSession.amount_total ?? null,
         currency: stripeSession.currency || null,
         stripeCustomerId: stripeCheckoutCustomer(stripeSession),
@@ -6810,10 +6939,12 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
     const trackingEventId = `stripe_checkout_started_${stripeSession.id}`;
     const trackingCustomData = {
       checkout_type: "subscription",
-      value: stripeSession.amount_total ? Number(stripeSession.amount_total) / 100 : Number(selectedPlan.monthlyPriceCents || 0) / 100,
+      value: stripeSession.amount_total ? Number(stripeSession.amount_total) / 100 : Number(billing.priceCents || 0) / 100,
       currency: String(stripeSession.currency || "USD").toUpperCase(),
       content_name: selectedPlan.name,
-      credit_amount: selectedPlan.monthlyCredits,
+      billing_period_months: billing.periodMonths,
+      annual_discount_percent: billing.discountPercent || undefined,
+      credit_amount: billing.creditAmount,
       business_profile_id: session.businessProfileId,
     };
     trackAdEvent({
@@ -7737,6 +7868,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         outboundCallCredits: Math.max(0, Number(req.body.outboundCallCredits || 20)),
         messageCredits: Math.max(0, Number(req.body.messageCredits || 5)),
         stripeCreditPackCredits: Math.max(1, Number(req.body.stripeCreditPackCredits || 1000)),
+        annualPrepayDiscountPercent: annualPrepayDiscountPercent(req.body),
         recordingRetentionDays: Math.max(1, Number(req.body.recordingRetentionDays || 30)),
         demoNumberCapacity: Math.max(1, Number(req.body.demoNumberCapacity || 10)),
         demoCallerLimit: Math.max(1, Number(req.body.demoCallerLimit || 3)),
@@ -7795,6 +7927,8 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         messageCredits: req.body.messageCredits === undefined ? undefined : Math.max(0, Number(req.body.messageCredits)),
         stripeCreditPackCredits:
           req.body.stripeCreditPackCredits === undefined ? undefined : Math.max(1, Number(req.body.stripeCreditPackCredits)),
+        annualPrepayDiscountPercent:
+          req.body.annualPrepayDiscountPercent === undefined ? undefined : annualPrepayDiscountPercent(req.body),
         recordingRetentionDays:
           req.body.recordingRetentionDays === undefined ? undefined : Math.max(1, Number(req.body.recordingRetentionDays)),
         demoNumberCapacity:
@@ -7880,7 +8014,8 @@ app.get("/api/admin/subscription-plans", requireAuth, requireAdmin, async (_req,
       include: { _count: { select: { businessProfiles: true } } },
       orderBy: [{ sortOrder: "asc" }, { monthlyPriceCents: "asc" }, { name: "asc" }],
     });
-    res.json({ plans: plans.map(adminSubscriptionPlan) });
+    const plansWithSlots = await plansWithSignupUsage(plans);
+    res.json({ plans: plansWithSlots.map(adminSubscriptionPlan) });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -7893,10 +8028,12 @@ app.post("/api/admin/subscription-plans/defaults", requireAuth, requireAdmin, as
       include: { _count: { select: { businessProfiles: true } } },
       orderBy: [{ sortOrder: "asc" }, { monthlyPriceCents: "asc" }, { name: "asc" }],
     });
+    const installedWithSlots = await plansWithSignupUsage(installed);
+    const plansWithSlots = await plansWithSignupUsage(plans);
     res.json({
       ok: true,
-      installed: installed.map(adminSubscriptionPlan),
-      plans: plans.map(adminSubscriptionPlan),
+      installed: installedWithSlots.map(adminSubscriptionPlan),
+      plans: plansWithSlots.map(adminSubscriptionPlan),
       note: "Pay as you go, Starter, Professional, and Growth plans were installed or updated. Existing Stripe price IDs were preserved.",
     });
   } catch (error) {
@@ -7911,7 +8048,7 @@ app.post("/api/admin/subscription-plans", requireAuth, requireAdmin, async (req,
       data,
       include: { _count: { select: { businessProfiles: true } } },
     });
-    res.status(201).json({ plan: adminSubscriptionPlan(plan) });
+    res.status(201).json({ plan: adminSubscriptionPlan(await planWithSignupUsage(plan)) });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -7927,7 +8064,7 @@ app.put("/api/admin/subscription-plans/:id", requireAuth, requireAdmin, async (r
       data,
       include: { _count: { select: { businessProfiles: true } } },
     });
-    res.json({ plan: adminSubscriptionPlan(plan) });
+    res.json({ plan: adminSubscriptionPlan(await planWithSignupUsage(plan)) });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -7946,7 +8083,7 @@ app.delete("/api/admin/subscription-plans/:id", requireAuth, requireAdmin, async
         data: { active: false },
         include: { _count: { select: { businessProfiles: true } } },
       });
-      return res.json({ plan: adminSubscriptionPlan(plan), deactivated: true });
+      return res.json({ plan: adminSubscriptionPlan(await planWithSignupUsage(plan)), deactivated: true });
     }
     await prisma.subscriptionPlan.delete({ where: { id: existing.id } });
     res.json({ ok: true, deleted: true });
@@ -9390,6 +9527,8 @@ async function processStripeCheckoutSession(session, req = null) {
       currency: String(session.currency || "USD").toUpperCase(),
       content_name: session.metadata?.subscriptionPlanName || (eventKey === "paid_plan" ? "Paid plan" : "Credit top-up"),
       credit_amount: completed?.creditAmount || Number(session.metadata?.creditAmount || 0) || undefined,
+      billing_period_months: Number(session.metadata?.billingPeriodMonths || 0) || undefined,
+      annual_discount_percent: Number(session.metadata?.annualPrepayDiscountPercent || 0) || undefined,
       business_profile_id: profileId || undefined,
     },
     userData: adCustomData({
@@ -9422,15 +9561,21 @@ async function processStripeInvoicePaid(invoice) {
   const subscriptionId = stripeId(invoice.subscription);
   const customerId = stripeId(invoice.customer);
   if (!subscriptionId && !customerId) return null;
+  const invoiceMetadata = {
+    ...(invoice.subscription_details?.metadata || {}),
+    ...(invoice.metadata || {}),
+  };
   const profile =
     (subscriptionId
       ? await prisma.businessProfile.findFirst({ where: { stripeSubscriptionId: subscriptionId }, include: { subscriptionPlan: true } })
       : null) ||
     (customerId ? await prisma.businessProfile.findFirst({ where: { stripeCustomerId: customerId }, include: { subscriptionPlan: true } }) : null);
   if (!profile) return null;
+  const periodMonths = billingPeriodMonths(invoiceMetadata.billingPeriodMonths || invoiceMetadata.billingPeriodLabel);
+  const fallbackCredits = Math.max(0, Math.round(Number(profile.subscriptionPlan?.monthlyCredits || 0))) * periodMonths;
   const creditAmount = Math.max(
     0,
-    Math.round(Number(invoice.metadata?.creditAmount || profile.subscriptionPlan?.monthlyCredits || 0)),
+    Math.round(Number(invoiceMetadata.creditAmount || fallbackCredits || 0)),
   );
   if (!creditAmount) return profile;
   const note = `Stripe subscription credits (${invoice.id})`;
@@ -9445,7 +9590,7 @@ async function processStripeInvoicePaid(invoice) {
     amount: creditAmount,
     type: "stripe_subscription",
     note,
-    sourceType: "subscription_monthly",
+    sourceType: periodMonths === 12 ? "subscription_annual" : "subscription_monthly",
     periodStart: period.periodStart,
     expiresAt: period.periodEnd,
     subscriptionPlanId: profile.subscriptionPlanId || null,
@@ -9455,6 +9600,10 @@ async function processStripeInvoicePaid(invoice) {
       stripeSubscriptionId: subscriptionId,
       subscriptionPlanId: profile.subscriptionPlanId || null,
       subscriptionPlanName: profile.subscriptionPlan?.name || null,
+      billingPeriodMonths: periodMonths,
+      billingPeriodLabel: periodMonths === 12 ? "annual" : "monthly",
+      annualPrepayDiscountPercent: Number(invoiceMetadata.annualPrepayDiscountPercent || 0) || 0,
+      monthlyCreditAmount: Number(invoiceMetadata.monthlyCreditAmount || profile.subscriptionPlan?.monthlyCredits || 0) || 0,
       amountPaid: invoice.amount_paid ?? null,
       currency: invoice.currency || null,
     },
@@ -11064,6 +11213,7 @@ app.get("/api/business-admin/billing", async (req, res) => {
       }),
       activeSubscriptionPlans(),
     ]);
+    const plansWithSlots = await plansWithSignupUsage(plans);
     const checkoutConfigured = Boolean(secretKeyStatus.configured && secretKeyStatus.ok);
     const webhookConfigured = Boolean(webhookSecretStatus.configured && webhookSecretStatus.ok);
     const configurationErrors = [
@@ -11075,7 +11225,7 @@ app.get("/api/business-admin/billing", async (req, res) => {
       creditBalance: creditBuckets.creditBalance ?? current?.creditBalance ?? profile.creditBalance,
       creditBuckets,
       currentPlan: publicSubscriptionPlan(current?.subscriptionPlan),
-      availablePlans: plans.map(publicSubscriptionPlan),
+      availablePlans: plansWithSlots.map(publicSubscriptionPlan),
       stripe: {
         checkoutConfigured,
         webhookConfigured,
@@ -11092,6 +11242,7 @@ app.get("/api/business-admin/billing", async (req, res) => {
       settings: {
         tokenUsd: settings.tokenUsd,
         stripeCreditPackCredits: settings.stripeCreditPackCredits,
+        annualPrepayDiscountPercent: annualPrepayDiscountPercent(settings),
       },
       checkoutSessions: sessions,
     });
@@ -11133,6 +11284,13 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
     if (checkoutType === "subscription" && selectedPlanId && !selectedPlan) {
       throw new Error("Selected subscription plan is not active");
     }
+    if (checkoutType === "subscription") {
+      await ensurePlanSignupSlot(selectedPlan, { excludeBusinessProfileId: profile.id });
+    }
+    const billing =
+      checkoutType === "subscription"
+        ? subscriptionPlanBilling(selectedPlan, settings, req.body.period || req.body.billingPeriod || req.body.billingPeriodMonths)
+        : null;
     const metadata = {
       businessProfileId: String(profile.id),
       checkoutType,
@@ -11170,26 +11328,32 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
         },
       ];
     } else {
-      creditAmount = Math.max(0, Math.round(Number(selectedPlan.monthlyCredits || 0)));
+      creditAmount = billing.creditAmount;
       metadata.creditAmount = String(creditAmount);
       metadata.subscriptionPlanId = String(selectedPlan.id);
       metadata.subscriptionPlanName = selectedPlan.name;
+      metadata.billingPeriodMonths = String(billing.periodMonths);
+      metadata.billingPeriodLabel = billing.label;
+      metadata.annualPrepayDiscountPercent = String(billing.discountPercent);
+      metadata.monthlyCreditAmount = String(Math.max(0, Math.round(Number(selectedPlan.monthlyCredits || 0))));
       sessionParams.mode = "subscription";
-      if (selectedPlan.stripePriceId) {
+      if (selectedPlan.stripePriceId && billing.periodMonths === 1) {
         sessionParams.line_items = [{ price: selectedPlan.stripePriceId, quantity: 1 }];
       } else {
-        if (selectedPlan.monthlyPriceCents < 50) {
+        if (billing.priceCents < 50) {
           throw new Error("Plan price must be at least $0.50 or use a Stripe price ID");
         }
         sessionParams.line_items = [
           {
             price_data: {
               currency: "usd",
-              unit_amount: selectedPlan.monthlyPriceCents,
-              recurring: { interval: "month" },
+              unit_amount: billing.priceCents,
+              recurring: { interval: billing.interval, interval_count: billing.intervalCount },
               product_data: {
-                name: selectedPlan.name,
-                description: selectedPlan.description || `${selectedPlan.monthlyCredits} RingPort credits per month`,
+                name: `${selectedPlan.name}${billing.periodMonths === 12 ? " annual" : ""}`,
+                description:
+                  selectedPlan.description ||
+                  `${billing.creditAmount} RingPort credits per ${billing.periodMonths === 12 ? "12 months" : "month"}`,
               },
             },
             quantity: 1,
@@ -11222,6 +11386,8 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
       value: session.amount_total ? Number(session.amount_total) / 100 : undefined,
       currency: String(session.currency || "USD").toUpperCase(),
       content_name: selectedPlan?.name || "Credit top-up",
+      billing_period_months: billing?.periodMonths || undefined,
+      annual_discount_percent: billing?.discountPercent || undefined,
       credit_amount: creditAmount,
       business_profile_id: profile.id,
     };

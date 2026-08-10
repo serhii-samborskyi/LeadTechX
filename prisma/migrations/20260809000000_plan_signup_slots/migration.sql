@@ -1,0 +1,1 @@
+ALTER TABLE "SubscriptionPlan" ADD COLUMN "signupLimit" INTEGER NOT NULL DEFAULT 0;

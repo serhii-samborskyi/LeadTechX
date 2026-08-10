@@ -681,6 +681,43 @@ body {
   background: rgba(255, 255, 255, 0.18);
 }
 
+.fast-period-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.fast-period-toggle button {
+  min-height: 42px;
+  border: 0;
+  background: transparent;
+  color: #d9e8e2;
+  box-shadow: none;
+  font-size: 0.9rem;
+  font-weight: 850;
+}
+
+.fast-period-toggle button.active {
+  background: #fff;
+  color: #20352e;
+}
+
+.fast-period-toggle span {
+  display: inline-block;
+  margin-left: 4px;
+  color: #72c79d;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.fast-period-toggle button.active span {
+  color: var(--accent-dark);
+}
+
 .fast-plan-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -706,6 +743,16 @@ body {
   background: rgba(114, 199, 157, 0.16);
 }
 
+.fast-plan-option.waitlisted {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.fast-plan-option.waitlisted:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .fast-plan-top {
   display: flex;
   align-items: flex-start;
@@ -721,6 +768,21 @@ body {
   color: #d8f4e7;
   font-size: 0.9rem;
   white-space: nowrap;
+}
+
+.fast-plan-slot {
+  justify-self: start;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: rgba(216, 244, 231, 0.13);
+  color: #d8f4e7;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.fast-plan-option.waitlisted .fast-plan-slot {
+  background: rgba(244, 124, 89, 0.14);
+  color: #ffd9cf;
 }
 
 .fast-plan-option small {
@@ -2987,6 +3049,11 @@ dd {
 .billing-plan-card.active {
   border-color: var(--accent-dark);
   background: var(--accent-soft);
+}
+
+.billing-plan-card.inactive {
+  background: #f8fbf9;
+  opacity: 0.72;
 }
 
 .billing-plan-card strong {

@@ -462,6 +462,10 @@
               </div>
               <div class="inline-editor crm-editor billing-actions">
                 <input id="creditPackCredits" type="number" min="1" step="100" placeholder="Credits" />
+                <select id="billingPeriodSelect" aria-label="Billing period">
+                  <option value="1">Monthly</option>
+                  <option value="12">Annual</option>
+                </select>
                 <select id="billingPlanSelect" aria-label="Subscription plan"></select>
                 <button id="buyCreditsButton" type="button">Buy credits</button>
                 <button id="startSubscriptionButton" type="button">Start subscription</button>

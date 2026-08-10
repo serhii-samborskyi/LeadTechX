@@ -1,0 +1,1 @@
+ALTER TABLE "AppSettings" ADD COLUMN "annualPrepayDiscountPercent" DOUBLE PRECISION NOT NULL DEFAULT 25;

@@ -194,6 +194,7 @@ const el = {
   usageSummary: document.querySelector("#usageSummary"),
   billingStatus: document.querySelector("#billingStatus"),
   creditPackCredits: document.querySelector("#creditPackCredits"),
+  billingPeriodSelect: document.querySelector("#billingPeriodSelect"),
   billingPlanSelect: document.querySelector("#billingPlanSelect"),
   billingPlanList: document.querySelector("#billingPlanList"),
   buyCreditsButton: document.querySelector("#buyCreditsButton"),
@@ -2529,6 +2530,31 @@ function moneyFromCents(amount, currency = "usd") {
   );
 }
 
+function normalizeBillingPeriod(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-");
+  return ["12", "12-month", "12-months", "annual", "annually", "year", "yearly"].includes(normalized) ? 12 : 1;
+}
+
+function annualDiscountPercentFromSettings(settings = {}) {
+  const parsed = Number(settings.annualPrepayDiscountPercent ?? 25);
+  return Math.min(95, Math.max(0, Number.isFinite(parsed) ? parsed : 25));
+}
+
+function planBillingForPeriod(plan, settings, period) {
+  const months = normalizeBillingPeriod(period);
+  const monthlyPriceCents = Math.max(0, Math.round(Number(plan?.monthlyPriceCents || 0)));
+  const monthlyCredits = Math.max(0, Math.round(Number(plan?.monthlyCredits || 0)));
+  const discount = months === 12 ? annualDiscountPercentFromSettings(settings) : 0;
+  return {
+    months,
+    priceCents: Math.max(0, Math.round(monthlyPriceCents * months * (1 - discount / 100))),
+    credits: monthlyCredits * months,
+  };
+}
+
 function planFeatureLabels(plan) {
   return [
     `${plan.monthlyCredits || 0} monthly credits`,
@@ -2546,13 +2572,24 @@ function planFeatureLabels(plan) {
   ].filter(Boolean);
 }
 
+function planWaitlistedForBusiness(plan, currentPlan = null) {
+  return Boolean(plan?.signupWaitlist && Number(currentPlan?.id || 0) !== Number(plan.id || 0));
+}
+
 function renderBilling(data) {
   const stripe = data.stripe || {};
   const settings = data.settings || {};
   const plans = data.availablePlans || [];
   const currentPlan = data.currentPlan || null;
+  const selectedPeriod = normalizeBillingPeriod(el.billingPeriodSelect?.value || 1);
+  if (el.billingPeriodSelect) {
+    el.billingPeriodSelect.value = String(selectedPeriod);
+    const annualOption = el.billingPeriodSelect.querySelector('option[value="12"]');
+    if (annualOption) annualOption.textContent = `Annual - save ${annualDiscountPercentFromSettings(settings)}%`;
+  }
   const ready = Boolean(stripe.ready);
-  const subscriptionReady = ready && Boolean(plans.length);
+  const selectablePlans = plans.filter((plan) => !planWaitlistedForBusiness(plan, currentPlan));
+  const subscriptionReady = ready && Boolean(selectablePlans.length);
   const statusParts = [
     stripe.configurationError || null,
     stripe.configurationDetail || null,
@@ -2566,13 +2603,21 @@ function renderBilling(data) {
   el.billingStatus.textContent = statusParts.join(" · ");
   el.creditPackCredits.value = settings.stripeCreditPackCredits || 1000;
   el.buyCreditsButton.disabled = !ready || currentPlan?.allowCreditTopups === false;
+  el.startSubscriptionButton.textContent = selectedPeriod === 12 ? "Start annual subscription" : "Start subscription";
   const previousPlanId = el.billingPlanSelect.value;
   el.billingPlanSelect.innerHTML = "";
+  const selectedPlanId = previousPlanId || String(currentPlan?.id || selectablePlans[0]?.id || "");
   for (const plan of plans) {
+    const billing = planBillingForPeriod(plan, settings, selectedPeriod);
     const option = document.createElement("option");
     option.value = String(plan.id);
-    option.textContent = `${plan.name} · ${moneyFromCents(plan.monthlyPriceCents)} / month · ${plan.monthlyCredits} credits`;
-    option.selected = String(plan.id) === (previousPlanId || String(currentPlan?.id || plans[0]?.id || ""));
+    option.disabled = planWaitlistedForBusiness(plan, currentPlan);
+    option.textContent = `${plan.name} · ${moneyFromCents(billing.priceCents)} / ${
+      billing.months === 12 ? "year" : "month"
+    } · ${billing.credits} credits${
+      option.disabled ? " · waitlist" : plan.signupLimit ? ` · ${plan.signupSlotsRemaining ?? 0} slots left` : ""
+    }`;
+    option.selected = String(plan.id) === selectedPlanId;
     el.billingPlanSelect.appendChild(option);
   }
   if (!plans.length) {
@@ -2584,12 +2629,20 @@ function renderBilling(data) {
   el.billingPlanList.innerHTML = "";
   renderCreditBucketSummary(el.billingPlanList, data.creditBuckets);
   for (const plan of plans) {
+    const billing = planBillingForPeriod(plan, settings, selectedPeriod);
     const card = document.createElement("div");
-    card.className = `billing-plan-card ${currentPlan?.id === plan.id ? "active" : ""}`;
+    card.className = `billing-plan-card ${currentPlan?.id === plan.id ? "active" : ""} ${planWaitlistedForBusiness(plan, currentPlan) ? "inactive" : ""}`;
     const title = document.createElement("strong");
-    title.textContent = `${plan.name} · ${moneyFromCents(plan.monthlyPriceCents)}/mo`;
+    title.textContent = `${plan.name} · ${moneyFromCents(billing.priceCents)}${billing.months === 12 ? "/yr" : "/mo"}`;
     const detail = document.createElement("span");
-    detail.textContent = planFeatureLabels(plan).join(" · ");
+    const slotLabel = planWaitlistedForBusiness(plan, currentPlan)
+      ? "waitlist"
+      : plan.signupLimit
+        ? `${plan.signupSlotsRemaining ?? 0} signup slots left`
+        : null;
+    const creditLabel = billing.months === 12 ? `${billing.credits} credits for 12 months` : null;
+    const featureLabels = planFeatureLabels(plan).filter((_, index) => billing.months !== 12 || index !== 0);
+    detail.textContent = [slotLabel, creditLabel, ...featureLabels].filter(Boolean).join(" · ");
     card.append(title, detail);
     el.billingPlanList.appendChild(card);
   }
@@ -2648,6 +2701,7 @@ async function startBillingCheckout(checkoutType) {
       checkoutType,
       credits: Number(el.creditPackCredits.value || 0),
       subscriptionPlanId: checkoutType === "subscription" ? Number(el.billingPlanSelect.value || 0) : undefined,
+      period: checkoutType === "subscription" ? normalizeBillingPeriod(el.billingPeriodSelect?.value || 1) : undefined,
     }),
   });
   if (!data.url) throw new Error("Stripe did not return a checkout URL");
@@ -2655,6 +2709,7 @@ async function startBillingCheckout(checkoutType) {
     checkout_type: checkoutType,
     credit_amount: Number(el.creditPackCredits.value || 0) || undefined,
     subscription_plan_id: checkoutType === "subscription" ? Number(el.billingPlanSelect.value || 0) || undefined : undefined,
+    billing_period_months: checkoutType === "subscription" ? normalizeBillingPeriod(el.billingPeriodSelect?.value || 1) : undefined,
   });
   await new Promise((resolve) => setTimeout(resolve, 150));
   window.location.href = data.url;
@@ -3178,6 +3233,7 @@ el.messageList.addEventListener("submit", (event) => {
 });
 el.sendTestMessageButton.addEventListener("click", () => runAdmin(sendManualMessageFromBar));
 el.refreshUsageButton.addEventListener("click", () => runAdmin(loadUsage));
+el.billingPeriodSelect?.addEventListener("change", () => runAdmin(refreshBillingTab));
 el.buyCreditsButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("credits")));
 el.startSubscriptionButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("subscription")));
 

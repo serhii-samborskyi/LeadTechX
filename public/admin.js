@@ -42,6 +42,7 @@ const el = {
   stripeSecretKey: document.querySelector("#stripeSecretKey"),
   stripeWebhookSecret: document.querySelector("#stripeWebhookSecret"),
   stripeCreditPackCredits: document.querySelector("#stripeCreditPackCredits"),
+  annualPrepayDiscountPercent: document.querySelector("#annualPrepayDiscountPercent"),
   stripeWebhookUrl: document.querySelector("#stripeWebhookUrl"),
   copyStripeWebhookUrl: document.querySelector("#copyStripeWebhookUrl"),
   metaPixelId: document.querySelector("#metaPixelId"),
@@ -76,6 +77,7 @@ const el = {
   planMaxPhoneNumbers: document.querySelector("#planMaxPhoneNumbers"),
   planMaxTransferTargets: document.querySelector("#planMaxTransferTargets"),
   planMaxUsers: document.querySelector("#planMaxUsers"),
+  planSignupLimit: document.querySelector("#planSignupLimit"),
   planSupportLevel: document.querySelector("#planSupportLevel"),
   planStripePriceId: document.querySelector("#planStripePriceId"),
   planSortOrder: document.querySelector("#planSortOrder"),
@@ -462,6 +464,7 @@ async function loadSystem() {
     "outboundCallCredits",
     "messageCredits",
     "stripeCreditPackCredits",
+    "annualPrepayDiscountPercent",
     "recordingRetentionDays",
     "demoNumberCapacity",
     "demoCallerLimit",
@@ -688,6 +691,7 @@ function resetPlanForm() {
   el.planMaxPhoneNumbers.value = "1";
   el.planMaxTransferTargets.value = "1";
   el.planMaxUsers.value = "1";
+  el.planSignupLimit.value = "0";
   el.planSupportLevel.value = "standard";
   el.planStripePriceId.value = "";
   el.planSortOrder.value = "0";
@@ -713,6 +717,7 @@ function fillPlanForm(plan) {
   el.planMaxPhoneNumbers.value = plan.maxPhoneNumbers || 1;
   el.planMaxTransferTargets.value = plan.maxTransferTargets ?? 1;
   el.planMaxUsers.value = plan.maxUsers || 1;
+  el.planSignupLimit.value = plan.signupLimit || 0;
   el.planSupportLevel.value = plan.supportLevel || "standard";
   el.planStripePriceId.value = plan.stripePriceId || "";
   el.planSortOrder.value = plan.sortOrder || 0;
@@ -739,6 +744,7 @@ function planPayload() {
     maxPhoneNumbers: Number(el.planMaxPhoneNumbers.value || 1),
     maxTransferTargets: Number(el.planMaxTransferTargets.value || 0),
     maxUsers: Number(el.planMaxUsers.value || 1),
+    signupLimit: Number(el.planSignupLimit.value || 0),
     supportLevel: el.planSupportLevel.value,
     outboundQualificationEnabled: el.planOutboundQualificationEnabled.checked,
     smartReviewsEnabled: el.planSmartReviewsEnabled.checked,
@@ -796,8 +802,8 @@ function renderPlans(plans = []) {
     slug.textContent = plan.slug || "no slug";
     title.append(name, slug);
     const status = document.createElement("span");
-    status.className = `status-pill ${plan.active ? "active" : "warning"}`;
-    status.textContent = plan.active ? "Active" : "Inactive";
+    status.className = `status-pill ${plan.active && !plan.signupWaitlist ? "active" : "warning"}`;
+    status.textContent = plan.active ? (plan.signupWaitlist ? "Waitlist" : "Active") : "Inactive";
     heading.append(title, status);
     const price = document.createElement("div");
     price.className = "plan-price";
@@ -813,6 +819,10 @@ function renderPlans(plans = []) {
       planMetric("Phone numbers", `${plan.maxPhoneNumbers || 1}`),
       planMetric("Transfers", `${plan.maxTransferTargets ?? 0}`),
       planMetric("Users", `${plan.maxUsers || 1}`),
+      planMetric(
+        "Signup slots",
+        plan.signupLimit ? `${plan.signupSlotsUsed ?? 0}/${plan.signupLimit}` : "Unlimited",
+      ),
       planMetric("Support", plan.supportLevel || "standard"),
       planMetric("Businesses", `${plan.businessCount ?? 0}`),
       planMetric("Sort order", `${plan.sortOrder ?? 0}`),
@@ -1789,6 +1799,7 @@ el.systemForm.addEventListener("submit", async (event) => {
         stripeSecretKey: el.stripeSecretKey.value,
         stripeWebhookSecret: el.stripeWebhookSecret.value,
         stripeCreditPackCredits: Number(el.stripeCreditPackCredits.value),
+        annualPrepayDiscountPercent: Number(el.annualPrepayDiscountPercent.value),
         metaPixelId: el.metaPixelId.value,
         metaAccessToken: el.metaAccessToken.value,
         metaTestEventCode: el.metaTestEventCode.value,

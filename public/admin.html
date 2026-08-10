@@ -264,6 +264,7 @@
               <label>Stripe secret key<input id="stripeSecretKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="stripeSecretKeyState"></small></label>
               <label>Stripe webhook secret<input id="stripeWebhookSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="stripeWebhookSecretState"></small></label>
               <label>Default top-up credits<input id="stripeCreditPackCredits" type="number" min="1" required /></label>
+              <label>Annual prepay discount %<input id="annualPrepayDiscountPercent" type="number" min="0" max="95" step="1" required /></label>
               <div class="system-webhook-card">
                 <div>
                   <h4>Stripe webhook endpoint</h4>
@@ -316,6 +317,7 @@
               <label>Phone numbers included<input id="planMaxPhoneNumbers" type="number" min="1" step="1" value="1" /></label>
               <label>Call transfer contacts<input id="planMaxTransferTargets" type="number" min="0" step="1" value="1" /></label>
               <label>Business users<input id="planMaxUsers" type="number" min="1" step="1" value="1" /></label>
+              <label>Signup slots<input id="planSignupLimit" type="number" min="0" step="1" value="0" /><small>0 means unlimited. Use this for limited pay-as-you-go availability.</small></label>
               <label>Support level<select id="planSupportLevel"><option value="standard">Standard</option><option value="priority">Priority</option><option value="managed">Managed</option></select></label>
               <label>Stripe price ID <span>optional</span><input id="planStripePriceId" placeholder="price_..." /></label>
               <label>Sort order<input id="planSortOrder" type="number" step="1" value="0" /></label>
