@@ -1881,6 +1881,31 @@ body {
   margin: 10px 0 24px;
 }
 
+.profile-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto minmax(0, auto);
+  gap: 10px;
+  align-items: end;
+  margin: 14px 0 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fcfa;
+}
+
+.profile-search {
+  margin: 0;
+}
+
+.profile-search input {
+  width: 100%;
+}
+
+.profile-range-buttons,
+.profile-custom-range {
+  align-items: center;
+}
+
 .business-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
@@ -3804,6 +3829,7 @@ a.appointment-field-value {
   }
 
   .account-subtabs,
+  .profile-toolbar,
   .traffic-toolbar,
   .traffic-summary,
   .traffic-breakdowns,
@@ -3814,6 +3840,11 @@ a.appointment-field-value {
 
   .traffic-custom-range {
     justify-content: stretch;
+  }
+
+  .profile-range-buttons,
+  .profile-custom-range {
+    width: 100%;
   }
 
   .traffic-custom-range input,

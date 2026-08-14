@@ -7537,6 +7537,12 @@ function adminTrafficRange(query = {}) {
   return { range: "today", from: today, to: addDays(today, 1) };
 }
 
+function adminBusinessProfileRange(query = {}) {
+  const range = String(query.range || "all");
+  if (!range || range === "all") return { range: "all", from: null, to: null };
+  return adminTrafficRange({ ...query, range });
+}
+
 function trafficDateKey(date) {
   return new Date(date).toISOString().slice(0, 10);
 }
@@ -8296,27 +8302,56 @@ app.get("/api/admin/traffic", requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-app.get("/api/admin/businesses", requireAuth, requireAdmin, async (_req, res) => {
-  const businesses = await prisma.businessProfile.findMany({
-    include: {
-      users: { select: { id: true, email: true, name: true, active: true } },
-      voiceNumbers: { select: { id: true, phoneNumber: true, status: true } },
-      subscriptionPlan: true,
-      config: {
-        select: {
-          id: true,
-          agentName: true,
-          language: true,
-          voiceName: true,
-          timezone: true,
-          appointmentMode: true,
-          _count: { select: { intakeFields: true, knowledgeEntries: true, priceEntries: true } },
+app.get("/api/admin/businesses", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const search = String(req.query.q || req.query.search || "").trim();
+    const { range, from, to } = adminBusinessProfileRange(req.query);
+    const filters = [];
+    if (search) {
+      filters.push({
+        OR: [
+          { businessName: { contains: search, mode: "insensitive" } },
+          { website: { contains: search, mode: "insensitive" } },
+          { users: { some: { email: { contains: search, mode: "insensitive" } } } },
+        ],
+      });
+    }
+    if (from && to) filters.push({ createdAt: { gte: from, lt: to } });
+    const where = filters.length ? { AND: filters } : undefined;
+    const businesses = await prisma.businessProfile.findMany({
+      where,
+      include: {
+        users: { select: { id: true, email: true, name: true, active: true } },
+        voiceNumbers: { select: { id: true, phoneNumber: true, status: true } },
+        subscriptionPlan: true,
+        config: {
+          select: {
+            id: true,
+            agentName: true,
+            language: true,
+            voiceName: true,
+            timezone: true,
+            appointmentMode: true,
+            _count: { select: { intakeFields: true, knowledgeEntries: true, priceEntries: true } },
+          },
         },
       },
-    },
-    orderBy: [{ archivedAt: "asc" }, { businessName: "asc" }],
-  });
-  res.json({ businesses });
+      orderBy: { createdAt: "desc" },
+      take: 500,
+    });
+    res.json({
+      businesses,
+      total: businesses.length,
+      filters: {
+        search,
+        range,
+        from: from?.toISOString?.() || null,
+        to: to?.toISOString?.() || null,
+      },
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.patch("/api/admin/businesses/:id/archive", requireAuth, requireAdmin, async (req, res) => {
@@ -8361,6 +8396,44 @@ app.patch("/api/admin/businesses/:id/plan", requireAuth, requireAdmin, async (re
         accountStatus: subscriptionPlanId ? "paid" : undefined,
       },
       include: { subscriptionPlan: true },
+    });
+    res.json({ ok: true, business: updated });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.post("/api/admin/businesses/:id/trial-credits", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const amount = Math.round(Number(req.body?.amount || 0));
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Business id is invalid" });
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("Enter a positive credit amount");
+    if (amount > 1000000) throw new Error("Credit grant is too large");
+    const profile = await prisma.businessProfile.findUnique({
+      where: { id },
+      select: { id: true, businessName: true, accountStatus: true, trialEndsAt: true },
+    });
+    if (!profile) return res.status(404).json({ error: "Business was not found" });
+    const now = new Date();
+    const expiresAt = profile.accountStatus === "trial" && profile.trialEndsAt && profile.trialEndsAt > now ? profile.trialEndsAt : null;
+    const note = String(req.body?.note || "Manual trial credit grant").trim().slice(0, 240) || "Manual trial credit grant";
+    await recordCreditGrant({
+      businessProfileId: profile.id,
+      amount,
+      note,
+      sourceType: "trial_manual",
+      expiresAt,
+      metadata: {
+        source: "admin_business_profiles",
+        adminUserId: req.user?.id || null,
+        adminEmail: req.user?.email || null,
+        businessName: profile.businessName,
+      },
+    });
+    const updated = await prisma.businessProfile.findUnique({
+      where: { id },
+      select: { id: true, businessName: true, creditBalance: true },
     });
     res.json({ ok: true, business: updated });
   } catch (error) {

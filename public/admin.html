@@ -375,6 +375,22 @@
           <div class="section-heading compact-heading">
             <div><h3>Business profiles</h3><p>Archive accounts to hide access without deleting history. Delete only when you want to permanently remove the business.</p></div>
           </div>
+          <div class="profile-toolbar">
+            <label class="profile-search">Search by business name<input id="businessProfileSearch" type="search" placeholder="Business name" autocomplete="off" /></label>
+            <div class="traffic-range-buttons profile-range-buttons">
+              <button class="active" data-business-range="all" type="button">All</button>
+              <button data-business-range="today" type="button">Today</button>
+              <button data-business-range="yesterday" type="button">Yesterday</button>
+              <button data-business-range="last7" type="button">Last week</button>
+            </div>
+            <div class="traffic-custom-range profile-custom-range">
+              <input id="businessProfileFrom" type="date" aria-label="Business sign-up from date" />
+              <input id="businessProfileTo" type="date" aria-label="Business sign-up to date" />
+              <button id="applyBusinessProfileRange" type="button">Apply dates</button>
+              <button id="refreshBusinessProfiles" type="button"><i data-lucide="refresh-cw"></i> Refresh</button>
+            </div>
+          </div>
+          <p class="form-message" id="businessProfilesMessage"></p>
           <div class="business-list" id="businessList"></div>
         </div>
         <div class="account-panel" data-account-panel="traffic">

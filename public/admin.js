@@ -114,6 +114,12 @@ const el = {
   accountSubscriptionPlan: document.querySelector("#accountSubscriptionPlan"),
   accountMessage: document.querySelector("#accountMessage"),
   accountList: document.querySelector("#accountList"),
+  businessProfileSearch: document.querySelector("#businessProfileSearch"),
+  businessProfileFrom: document.querySelector("#businessProfileFrom"),
+  businessProfileTo: document.querySelector("#businessProfileTo"),
+  applyBusinessProfileRange: document.querySelector("#applyBusinessProfileRange"),
+  refreshBusinessProfiles: document.querySelector("#refreshBusinessProfiles"),
+  businessProfilesMessage: document.querySelector("#businessProfilesMessage"),
   businessList: document.querySelector("#businessList"),
   trafficFrom: document.querySelector("#trafficFrom"),
   trafficTo: document.querySelector("#trafficTo"),
@@ -169,6 +175,8 @@ let savedBlueBubblesWebhookPassword = "";
 let modelRateLimits = [];
 let adEventDefinitions = [];
 let adEventConfig = {};
+let businessProfileRange = "all";
+let businessProfileSearchTimer = null;
 let trafficRange = "today";
 const DEFAULT_POSTBACK_EVENTS = ["trial_started", "paid_plan", "credit_topup"];
 const DEFAULT_POSTBACK_PARAM_KEYS =
@@ -1198,8 +1206,49 @@ async function loadTraffic() {
   renderTraffic(data);
 }
 
+function businessProfileQueryString() {
+  const query = new URLSearchParams();
+  const search = String(el.businessProfileSearch?.value || "").trim();
+  if (search) query.set("q", search);
+  if (businessProfileRange && businessProfileRange !== "all") {
+    query.set("range", businessProfileRange);
+    if (businessProfileRange === "custom") {
+      if (el.businessProfileFrom.value) query.set("from", el.businessProfileFrom.value);
+      if (el.businessProfileTo.value) query.set("to", el.businessProfileTo.value);
+    }
+  }
+  const queryString = query.toString();
+  return queryString ? `?${queryString}` : "";
+}
+
+function setBusinessProfilesMessage(message = "", className = "form-message") {
+  if (!el.businessProfilesMessage) return;
+  el.businessProfilesMessage.className = className;
+  el.businessProfilesMessage.textContent = message;
+}
+
+async function addTrialCredits(business) {
+  const rawAmount = window.prompt(`How many trial credits should be added to ${business.businessName}?`, "100");
+  if (rawAmount === null) return;
+  const amount = Math.round(Number(rawAmount));
+  if (!Number.isFinite(amount) || amount <= 0) {
+    window.alert("Enter a positive whole number of credits.");
+    return;
+  }
+  const note = window.prompt("Optional admin note", "Manual trial credit grant");
+  if (!window.confirm(`Add ${amount} trial credits to ${business.businessName}?`)) return;
+  setBusinessProfilesMessage(`Adding ${amount} credits to ${business.businessName}`);
+  await api(`/api/admin/businesses/${business.id}/trial-credits`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ amount, note: note || "Manual trial credit grant" }),
+  });
+  await loadAccounts();
+  setBusinessProfilesMessage(`Added ${amount} credits to ${business.businessName}`, "form-message success");
+}
+
 async function loadAccounts() {
-  const [{ users }, businessData] = await Promise.all([api("/api/admin/users"), api("/api/admin/businesses")]);
+  const [{ users }, businessData] = await Promise.all([api("/api/admin/users"), api(`/api/admin/businesses${businessProfileQueryString()}`)]);
   businesses = businessData.businesses;
   el.accountList.innerHTML = "";
   for (const user of users) {
@@ -1232,6 +1281,12 @@ async function loadAccounts() {
     el.accountList.appendChild(row);
   }
   el.businessList.innerHTML = "";
+  const profileSummary = `${businessData.total ?? businesses.length} business profile${(businessData.total ?? businesses.length) === 1 ? "" : "s"} shown`;
+  setBusinessProfilesMessage(profileSummary);
+  if (!businesses.length) {
+    el.businessList.textContent = "No business profiles match these filters.";
+    return;
+  }
   for (const business of businesses) {
     const row = document.createElement("div");
     row.className = "business-row";
@@ -1242,6 +1297,9 @@ async function loadAccounts() {
     const website = document.createElement("span");
     website.textContent = `${business.website || "No website"}${business.archivedAt ? " · archived" : ""}`;
     heading.append(name, website);
+    const signup = document.createElement("div");
+    signup.innerHTML = `<b>Signup</b><span></span>`;
+    signup.querySelector("span").textContent = business.createdAt ? new Date(business.createdAt).toLocaleString() : "Unknown";
     const access = document.createElement("div");
     access.innerHTML = `<b>Login</b><span></span>`;
     access.querySelector("span").textContent = business.users.length
@@ -1309,6 +1367,10 @@ async function loadAccounts() {
       : "No configuration";
     const actions = document.createElement("div");
     actions.className = "business-actions";
+    const credits = document.createElement("button");
+    credits.type = "button";
+    credits.textContent = "Add trial credits";
+    credits.addEventListener("click", () => addTrialCredits(business).catch((error) => setBusinessProfilesMessage(error.message, "form-message error")));
     const archive = document.createElement("button");
     archive.type = "button";
     archive.textContent = business.archivedAt ? "Restore" : "Archive";
@@ -1337,8 +1399,8 @@ async function loadAccounts() {
       });
       await loadAccounts();
     });
-    actions.append(archive, remove);
-    row.append(heading, access, lifecycle, plan, phone, agent, content, actions);
+    actions.append(credits, archive, remove);
+    row.append(heading, signup, access, lifecycle, plan, phone, agent, content, actions);
     el.businessList.appendChild(row);
   }
 }
@@ -1992,6 +2054,31 @@ for (const tab of el.systemTabs) {
 for (const tab of el.accountTabs) {
   tab.addEventListener("click", () => setAccountTab(tab.dataset.accountTab));
 }
+
+for (const button of document.querySelectorAll("[data-business-range]")) {
+  button.addEventListener("click", () => {
+    businessProfileRange = button.dataset.businessRange;
+    for (const item of document.querySelectorAll("[data-business-range]")) item.classList.toggle("active", item === button);
+    loadAccounts().catch((error) => setBusinessProfilesMessage(error.message, "form-message error"));
+  });
+}
+
+el.businessProfileSearch.addEventListener("input", () => {
+  clearTimeout(businessProfileSearchTimer);
+  businessProfileSearchTimer = setTimeout(() => {
+    loadAccounts().catch((error) => setBusinessProfilesMessage(error.message, "form-message error"));
+  }, 250);
+});
+
+el.applyBusinessProfileRange.addEventListener("click", () => {
+  businessProfileRange = "custom";
+  for (const item of document.querySelectorAll("[data-business-range]")) item.classList.remove("active");
+  loadAccounts().catch((error) => setBusinessProfilesMessage(error.message, "form-message error"));
+});
+
+el.refreshBusinessProfiles.addEventListener("click", () =>
+  loadAccounts().catch((error) => setBusinessProfilesMessage(error.message, "form-message error")),
+);
 
 for (const button of document.querySelectorAll("[data-traffic-range]")) {
   button.addEventListener("click", () => {
