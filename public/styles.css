@@ -2787,6 +2787,28 @@ dd {
   grid-template-columns: 1fr 0.9fr 1.5fr 0.45fr auto auto;
 }
 
+.booking-provider-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.booking-provider-grid .wide-field {
+  grid-column: span 2;
+}
+
+.booking-provider-actions {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+}
+
+.booking-link-editor {
+  grid-template-columns: 1fr 1.4fr 1fr 1fr 0.45fr auto;
+}
+
+.booking-directory-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
 .appointment-editor {
   grid-template-columns: 1fr 0.9fr 1fr 1fr 1fr 0.8fr auto auto auto;
 }
@@ -3366,6 +3388,32 @@ dd {
   grid-template-columns: 1fr 0.9fr minmax(0, 1.5fr) 0.45fr auto auto auto;
 }
 
+.data-row.booking-directory-row {
+  display: block;
+}
+
+.data-row.booking-directory-row strong,
+.data-row.booking-directory-row small,
+.data-row.webhook-event-row strong,
+.data-row.webhook-event-row small {
+  display: block;
+}
+
+.data-row.booking-directory-row small,
+.data-row.webhook-event-row small,
+.external-calendar-note {
+  color: var(--muted);
+}
+
+.data-row.booking-link-row {
+  grid-template-columns: minmax(170px, 0.8fr) minmax(0, 1.2fr) auto auto;
+}
+
+.booking-tracking-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
 .data-row.appointment-row {
   display: block;
   padding: 14px 0;
@@ -3486,6 +3534,24 @@ a.appointment-field-value {
 .appointment-editor-card,
 .review-directory-card {
   margin-bottom: 18px;
+}
+
+.appointment-editor-card.is-read-only {
+  background: #f8fcfa;
+}
+
+.button-link {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  padding: 0.7rem 0.95rem;
+  border: 1px solid #dce8e1;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 700;
+  text-decoration: none;
 }
 
 .schedule-heading {
@@ -3997,6 +4063,10 @@ a.appointment-field-value {
   .form-grid,
   .model-settings-grid,
   .calendar-board,
+  .booking-provider-grid,
+  .booking-provider-actions,
+  .booking-link-editor,
+  .booking-directory-grid,
   .inline-editor,
   .review-link-editor,
   .transfer-target-editor,
@@ -4013,8 +4083,13 @@ a.appointment-field-value {
   .data-row.price-row,
   .data-row.review-link-row,
   .data-row.transfer-target-row,
+  .data-row.booking-link-row,
   .data-row.appointment-row {
     grid-template-columns: 1fr;
+  }
+
+  .booking-provider-grid .wide-field {
+    grid-column: auto;
   }
 
   .public-flow-actions {

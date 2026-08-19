@@ -24,6 +24,7 @@ const state = {
   crmSearchTimer: null,
   selectedMessageThreadKey: "",
   messageData: { messages: [], inboundMessages: [] },
+  booking: null,
   entitlements: null,
   planUsage: null,
   adTracking: null,
@@ -144,10 +145,37 @@ const el = {
   transferActive: document.querySelector("#transferActive"),
   addTransferTargetButton: document.querySelector("#addTransferTargetButton"),
   transferTargetList: document.querySelector("#transferTargetList"),
+  calendarProvider: document.querySelector("#calendarProvider"),
+  vagaroRegion: document.querySelector("#vagaroRegion"),
+  vagaroBusinessId: document.querySelector("#vagaroBusinessId"),
+  vagaroGroupId: document.querySelector("#vagaroGroupId"),
+  vagaroBookingUrl: document.querySelector("#vagaroBookingUrl"),
+  vagaroManageUrl: document.querySelector("#vagaroManageUrl"),
+  vagaroClientId: document.querySelector("#vagaroClientId"),
+  vagaroClientSecret: document.querySelector("#vagaroClientSecret"),
+  vagaroAccessToken: document.querySelector("#vagaroAccessToken"),
+  vagaroWebhookSecret: document.querySelector("#vagaroWebhookSecret"),
+  vagaroWebhookUrl: document.querySelector("#vagaroWebhookUrl"),
+  copyVagaroWebhookButton: document.querySelector("#copyVagaroWebhookButton"),
+  saveVagaroSettingsButton: document.querySelector("#saveVagaroSettingsButton"),
+  syncVagaroButton: document.querySelector("#syncVagaroButton"),
+  vagaroStatus: document.querySelector("#vagaroStatus"),
+  bookingLinkLabel: document.querySelector("#bookingLinkLabel"),
+  bookingLinkUrl: document.querySelector("#bookingLinkUrl"),
+  bookingLinkService: document.querySelector("#bookingLinkService"),
+  bookingLinkProfessional: document.querySelector("#bookingLinkProfessional"),
+  bookingLinkSort: document.querySelector("#bookingLinkSort"),
+  addBookingLinkButton: document.querySelector("#addBookingLinkButton"),
+  bookingServiceList: document.querySelector("#bookingServiceList"),
+  bookingProfessionalList: document.querySelector("#bookingProfessionalList"),
+  bookingLinkList: document.querySelector("#bookingLinkList"),
+  vagaroWebhookEvents: document.querySelector("#vagaroWebhookEvents"),
   appointmentMode: document.querySelector("#appointmentMode"),
   slotDuration: document.querySelector("#slotDuration"),
   bufferMinutes: document.querySelector("#bufferMinutes"),
   calendarTimezone: document.querySelector("#calendarTimezone"),
+  calendarServiceFilter: document.querySelector("#calendarServiceFilter"),
+  calendarProfessionalFilter: document.querySelector("#calendarProfessionalFilter"),
   availabilityRules: document.querySelector("#availabilityRules"),
   saveCalendarButton: document.querySelector("#saveCalendarButton"),
   refreshCalendarButton: document.querySelector("#refreshCalendarButton"),
@@ -900,6 +928,7 @@ function renderSchedule(data) {
       type: "available",
       start: slot.start,
       label: calendarTimeLabel(slot.start, data.timezone),
+      slot,
     });
   }
   for (const appointment of data.appointments) {
@@ -922,7 +951,8 @@ function renderSchedule(data) {
     grid.className = "slot-day-grid";
 
     for (const item of items.sort((left, right) => new Date(left.start) - new Date(right.start))) {
-      const square = document.createElement(item.type === "available" ? "button" : "div");
+      const selectable = item.type === "available" && data.provider !== "vagaro";
+      const square = document.createElement(selectable ? "button" : "div");
       square.className = `slot ${item.type}`;
       if (square instanceof HTMLButtonElement) {
         square.type = "button";
@@ -934,12 +964,12 @@ function renderSchedule(data) {
       const detail = document.createElement("span");
       detail.textContent = item.appointment
         ? `${item.type === "booked" ? "Booked" : "Requested"} · ${item.appointment.customerName}`
-        : "Available";
+        : [item.slot?.serviceName, item.slot?.professionalName].filter(Boolean).join(" · ") || "Available";
       square.append(time, detail);
       if (item.appointment) {
         square.title = `${appointmentCode(item.appointment.id)} - ${item.appointment.customerName}`;
       } else {
-        square.title = item.start;
+        square.title = [item.start, item.slot?.serviceName, item.slot?.professionalName].filter(Boolean).join(" · ");
       }
       grid.appendChild(square);
     }
@@ -1084,6 +1114,187 @@ function renderTransferTargets(entries = []) {
   if (!entries.length) {
     el.transferTargetList.textContent = "No transfer destinations yet. Add a manager, dispatch line, sales team, or other human contact.";
   }
+}
+
+function bookingServiceLabel(service) {
+  if (!service) return "Any service";
+  const details = [];
+  if (service.durationMinutes) details.push(`${service.durationMinutes} min`);
+  if (service.price !== null && service.price !== undefined) {
+    details.push(`${service.currency || "USD"} ${service.price}`);
+  }
+  return [service.name || `Service #${service.id}`, details.length ? `(${details.join(", ")})` : ""].filter(Boolean).join(" ");
+}
+
+function bookingProfessionalLabel(professional) {
+  if (!professional) return "Any professional";
+  return [professional.displayName || professional.name || `Professional #${professional.id}`, professional.role].filter(Boolean).join(" · ");
+}
+
+function setSelectOptions(node, options, selectedValue = "") {
+  if (!node) return;
+  const wanted = String(selectedValue ?? node.value ?? "");
+  node.innerHTML = "";
+  for (const [value, label] of options) {
+    const option = document.createElement("option");
+    option.value = String(value);
+    option.textContent = label;
+    node.appendChild(option);
+  }
+  const values = Array.from(node.options).map((option) => option.value);
+  node.value = values.includes(wanted) ? wanted : node.options[0]?.value || "";
+}
+
+function bookingDateLabel(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+}
+
+function updateCalendarProviderUi() {
+  const provider = el.calendarProvider?.value || state.admin?.calendarProvider || "internal";
+  const external = provider === "vagaro";
+  const appointmentEditor = document.querySelector(".appointment-editor-card");
+  if (appointmentEditor) {
+    appointmentEditor.classList.toggle("is-read-only", external);
+    const copy = appointmentEditor.querySelector("p");
+    if (copy) {
+      copy.textContent = external
+        ? "Vagaro appointments are read-only here. Use Vagaro links for booking, cancel, and reschedule."
+        : "Choose an open time from the schedule or enter a time manually.";
+    }
+  }
+  for (const node of [
+    el.appointmentMode,
+    el.slotDuration,
+    el.bufferMinutes,
+    el.appointmentCustomerName,
+    el.appointmentPhone,
+    el.appointmentEmail,
+    el.appointmentStart,
+    el.appointmentReason,
+    el.appointmentStatus,
+    el.appointmentSendSummary,
+    el.saveAppointmentButton,
+  ]) {
+    if (node) node.disabled = external;
+  }
+  if (el.availabilityRules) el.availabilityRules.hidden = external;
+  if (el.saveCalendarButton) el.saveCalendarButton.disabled = external;
+}
+
+function renderBooking(data = {}) {
+  state.booking = data;
+  const connection = data.activeConnection || {};
+  const provider = connection.status === "active" ? "vagaro" : state.admin?.calendarProvider || "internal";
+  if (el.calendarProvider) el.calendarProvider.value = provider === "vagaro" ? "vagaro" : "internal";
+  if (el.vagaroRegion) el.vagaroRegion.value = connection.region || el.vagaroRegion.value || "us02";
+  if (el.vagaroBusinessId) el.vagaroBusinessId.value = connection.externalBusinessId || "";
+  if (el.vagaroGroupId) el.vagaroGroupId.value = connection.externalGroupId || "";
+  if (el.vagaroBookingUrl) el.vagaroBookingUrl.value = connection.bookingUrl || "";
+  if (el.vagaroManageUrl) el.vagaroManageUrl.value = connection.cancelRescheduleUrl || "";
+  if (el.vagaroClientId) el.vagaroClientId.value = connection.apiClientId || "";
+  if (el.vagaroWebhookUrl) el.vagaroWebhookUrl.value = data.webhookUrl || "";
+  for (const secretField of [el.vagaroClientSecret, el.vagaroAccessToken, el.vagaroWebhookSecret]) {
+    if (secretField) secretField.value = "";
+  }
+
+  const services = Array.isArray(data.services) ? data.services : [];
+  const professionals = Array.isArray(data.professionals) ? data.professionals : [];
+  const links = Array.isArray(data.links) ? data.links : [];
+  setSelectOptions(el.bookingLinkService, [["", "Any service"], ...services.map((service) => [service.id, bookingServiceLabel(service)])], el.bookingLinkService?.value);
+  setSelectOptions(
+    el.bookingLinkProfessional,
+    [["", "Any professional"], ...professionals.map((professional) => [professional.id, bookingProfessionalLabel(professional)])],
+    el.bookingLinkProfessional?.value,
+  );
+  setSelectOptions(el.calendarServiceFilter, [["", "First available service"], ...services.map((service) => [service.id, bookingServiceLabel(service)])], el.calendarServiceFilter?.value);
+  setSelectOptions(
+    el.calendarProfessionalFilter,
+    [["", "Any professional"], ...professionals.map((professional) => [professional.id, bookingProfessionalLabel(professional)])],
+    el.calendarProfessionalFilter?.value,
+  );
+
+  if (el.vagaroStatus) {
+    const lastSync = connection.lastSyncAt ? ` · Last sync ${bookingDateLabel(connection.lastSyncAt)}` : "";
+    const credentials = connection.apiClientSecretConfigured
+      ? ` · API secret saved${connection.apiClientSecretHint ? ` ending in ${connection.apiClientSecretHint}` : ""}`
+      : "";
+    el.vagaroStatus.textContent = connection.status === "active"
+      ? `Vagaro connected · ${services.length} services · ${professionals.length} professionals · ${links.length} links${lastSync}${credentials}`
+      : "Vagaro is not connected. Use RingPort calendar or save Vagaro settings.";
+  }
+
+  el.bookingServiceList.innerHTML = "";
+  for (const service of services) {
+    const row = document.createElement("div");
+    row.className = "data-row booking-directory-row";
+    const name = document.createElement("strong");
+    name.textContent = service.name || `Service #${service.id}`;
+    const detail = document.createElement("small");
+    detail.textContent = [
+      service.category,
+      service.durationMinutes ? `${service.durationMinutes} min` : "",
+      service.price !== null && service.price !== undefined ? `${service.currency || "USD"} ${service.price}` : "",
+      service.active === false ? "Inactive" : "Active",
+    ].filter(Boolean).join(" · ");
+    row.append(name, detail);
+    el.bookingServiceList.appendChild(row);
+  }
+  if (!services.length) el.bookingServiceList.textContent = "No services synced yet.";
+
+  el.bookingProfessionalList.innerHTML = "";
+  for (const professional of professionals) {
+    const row = document.createElement("div");
+    row.className = "data-row booking-directory-row";
+    const name = document.createElement("strong");
+    name.textContent = professional.displayName || `Professional #${professional.id}`;
+    const detail = document.createElement("small");
+    detail.textContent = [professional.role, professional.active === false ? "Inactive" : "Active"].filter(Boolean).join(" · ");
+    row.append(name, detail);
+    el.bookingProfessionalList.appendChild(row);
+  }
+  if (!professionals.length) el.bookingProfessionalList.textContent = "No professionals synced yet.";
+
+  el.bookingLinkList.innerHTML = "";
+  for (const link of links) {
+    const row = document.createElement("div");
+    row.className = "data-row booking-link-row";
+    row.dataset.id = link.id;
+    const main = document.createElement("div");
+    const label = document.createElement("strong");
+    label.textContent = link.label || "Booking link";
+    const detail = document.createElement("small");
+    detail.textContent = [
+      link.service?.name || "Any service",
+      link.professional?.displayName || "Any professional",
+      `${link.clickCount || 0} clicks`,
+      link.active === false ? "Inactive" : "Active",
+    ].filter(Boolean).join(" · ");
+    main.append(label, detail);
+    const trackedUrl = input("booking-tracking-url", link.trackingUrl || link.url || "https://", "url");
+    trackedUrl.readOnly = true;
+    const copy = rowButton("copy-booking-link", "Copy");
+    copy.dataset.url = link.trackingUrl || link.url || "";
+    row.append(main, trackedUrl, copy, rowButton("delete-booking-link", "Delete", true));
+    el.bookingLinkList.appendChild(row);
+  }
+  if (!links.length) el.bookingLinkList.textContent = "No booking links yet. Add a general link or service-specific links.";
+
+  el.vagaroWebhookEvents.innerHTML = "";
+  const events = Array.isArray(data.webhookEvents) ? data.webhookEvents : [];
+  for (const event of events) {
+    const row = document.createElement("div");
+    row.className = "data-row webhook-event-row";
+    const title = document.createElement("strong");
+    title.textContent = `${event.eventType || "event"} · ${event.status || "received"}`;
+    const detail = document.createElement("small");
+    detail.textContent = [event.eventId, bookingDateLabel(event.receivedAt), event.error].filter(Boolean).join(" · ");
+    row.append(title, detail);
+    el.vagaroWebhookEvents.appendChild(row);
+  }
+  if (!events.length) el.vagaroWebhookEvents.textContent = "No Vagaro webhook events received yet.";
+  updateCalendarProviderUi();
 }
 
 const PLAN_FEATURE_LABELS = {
@@ -1257,6 +1468,7 @@ function applyAdminData(data) {
   el.slotDuration.value = data.config.slotDurationMinutes;
   el.bufferMinutes.value = data.config.bufferMinutes;
   el.calendarTimezone.value = data.config.timezone;
+  if (el.calendarProvider) el.calendarProvider.value = data.config.calendarProvider || "internal";
   renderIntakeFields(data.config.intakeFields);
   renderKnowledge(data.config.knowledgeEntries);
   renderPrices(data.config.priceEntries);
@@ -1264,6 +1476,7 @@ function applyAdminData(data) {
   renderTransferTargets(data.config.transferTargets || []);
   renderAvailability(data.config.availabilityRules);
   applyPlanLocks();
+  updateCalendarProviderUi();
   setAdminStatus(`Loaded for ${data.profile.businessName}`);
 }
 
@@ -1308,6 +1521,7 @@ async function loadBusinessAdmin() {
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
   const data = await apiJson(`/api/business-admin?${query}`);
   applyAdminData(data);
+  await loadBooking();
   await loadCalendar();
 }
 
@@ -1384,15 +1598,120 @@ async function importAdmin(type, file) {
   setAdminStatus(`Imported ${data.imported} rows`);
 }
 
+async function loadBooking() {
+  if (!state.admin) return;
+  const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
+  if (el.website.value.trim()) query.set("website", el.website.value.trim());
+  const data = await apiJson(`/api/business-admin/booking?${query}`);
+  renderBooking(data);
+}
+
+async function saveVagaroSettings() {
+  const enabled = el.calendarProvider.value === "vagaro";
+  setAdminStatus(enabled ? "Saving Vagaro booking system" : "Switching to RingPort calendar");
+  const data = await apiJson("/api/business-admin/booking/vagaro", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      enabled,
+      region: el.vagaroRegion.value.trim() || "us02",
+      externalBusinessId: el.vagaroBusinessId.value.trim(),
+      externalGroupId: el.vagaroGroupId.value.trim(),
+      bookingUrl: el.vagaroBookingUrl.value.trim(),
+      cancelRescheduleUrl: el.vagaroManageUrl.value.trim(),
+      apiClientId: el.vagaroClientId.value.trim(),
+      apiClientSecret: el.vagaroClientSecret.value.trim(),
+      accessToken: el.vagaroAccessToken.value.trim(),
+      webhookSecret: el.vagaroWebhookSecret.value.trim(),
+    }),
+  });
+  state.admin = { ...state.admin, calendarProvider: enabled ? "vagaro" : "internal" };
+  renderBooking(data);
+  await loadCalendar();
+  setAdminStatus(enabled ? "Vagaro settings saved" : "RingPort calendar enabled");
+}
+
+async function syncVagaro() {
+  setAdminStatus("Syncing Vagaro services");
+  const data = await apiJson("/api/business-admin/booking/vagaro/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  renderBooking(data);
+  await loadCalendar();
+  const sync = data.sync || {};
+  setAdminStatus(`Synced ${sync.servicesImported || 0} services and ${sync.professionalsImported || 0} professionals`);
+}
+
+async function addBookingLink() {
+  const payload = {
+    ...adminIdentity(),
+    provider: "vagaro",
+    label: el.bookingLinkLabel.value.trim(),
+    url: el.bookingLinkUrl.value.trim(),
+    serviceId: el.bookingLinkService.value || null,
+    professionalId: el.bookingLinkProfessional.value || null,
+    sortOrder: Number(el.bookingLinkSort.value || 0),
+  };
+  setAdminStatus("Saving booking link");
+  const data = await apiJson("/api/business-admin/booking-links", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  renderBooking(data);
+  el.bookingLinkLabel.value = "";
+  el.bookingLinkUrl.value = "";
+  el.bookingLinkService.value = "";
+  el.bookingLinkProfessional.value = "";
+  el.bookingLinkSort.value = "";
+  setAdminStatus("Booking link added");
+}
+
+async function deleteBookingLink(button) {
+  const row = button.closest(".booking-link-row");
+  if (!row?.dataset.id) throw new Error("Booking link was not found");
+  const data = await apiJson(`/api/business-admin/booking-links/${row.dataset.id}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  renderBooking(data);
+  setAdminStatus("Booking link removed");
+}
+
+async function copyText(value, statusText = "Copied") {
+  if (!value) throw new Error("Nothing to copy");
+  await navigator.clipboard.writeText(value);
+  setAdminStatus(statusText);
+}
+
+async function copyVagaroWebhook() {
+  const baseUrl = el.vagaroWebhookUrl.value.trim();
+  const token = el.vagaroWebhookSecret.value.trim();
+  const url = token ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : baseUrl;
+  await copyText(url, "Vagaro webhook URL copied");
+}
+
 async function loadCalendar() {
   if (!state.admin) return;
   const query = new URLSearchParams({ business_name: el.businessName.value.trim(), days: "14" });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
+  if (el.calendarServiceFilter?.value) query.set("service_id", el.calendarServiceFilter.value);
+  if (el.calendarProfessionalFilter?.value) query.set("professional_id", el.calendarProfessionalFilter.value);
+  if (el.slotDuration?.value) query.set("duration", el.slotDuration.value);
   const data = await apiJson(`/api/business-admin/calendar?${query}`);
   renderSchedule(data);
+  if (data.warning) setAdminStatus(data.warning, true);
 
   el.bookedAppointments.innerHTML = "";
   for (const appointment of data.appointments) {
+    const external = appointment.calendarProvider && appointment.calendarProvider !== "internal";
+    const manageUrl = external
+      ? appointment.manageUrl || appointment.bookingUrl || state.booking?.activeConnection?.cancelRescheduleUrl || state.booking?.activeConnection?.bookingUrl || ""
+      : "";
     const row = document.createElement("div");
     row.className = "data-row appointment-row";
     const start = appointment.scheduledStart ? new Date(appointment.scheduledStart).toLocaleString() : appointment.requestedAt;
@@ -1414,6 +1733,11 @@ async function loadCalendar() {
       appointmentField("Phone", appointment.phone, appointment.phone ? `tel:${appointment.phone}` : null),
       appointmentField("Email", appointment.email, appointment.email ? `mailto:${appointment.email}` : null),
       appointmentField("Reason", appointment.reason),
+      appointmentField("Service", appointment.serviceTitle || appointment.intakeData?.service),
+      appointmentField("Professional", appointment.professionalName || appointment.intakeData?.professional),
+      appointmentField("Booking system", external ? appointment.calendarProvider : ""),
+      appointmentField("External status", appointment.bookingStatus),
+      appointmentField("Cancel/reschedule", manageUrl, manageUrl || null),
     ];
 
     const builtInKeys = new Set(["name", "customer_name", "phone", "email", "reason"]);
@@ -1447,7 +1771,23 @@ async function loadCalendar() {
     cancelButton.className = "danger-button";
     cancelButton.disabled = appointment.status === "cancelled";
     cancelButton.textContent = "Cancel";
-    actions.append(reminder, summaryButton, editButton, cancelButton);
+    if (external) {
+      const note = document.createElement("small");
+      note.className = "external-calendar-note";
+      note.textContent = "Synced from Vagaro. Changes happen in Vagaro.";
+      actions.appendChild(note);
+      if (manageUrl) {
+        const open = document.createElement("a");
+        open.className = "button-link";
+        open.href = manageUrl;
+        open.target = "_blank";
+        open.rel = "noreferrer";
+        open.textContent = "Open Vagaro";
+        actions.appendChild(open);
+      }
+    } else {
+      actions.append(reminder, summaryButton, editButton, cancelButton);
+    }
     row.append(summary, details, actions);
     el.bookedAppointments.appendChild(row);
   }
@@ -2962,7 +3302,12 @@ for (const tab of el.adminTabs) {
       item.setAttribute("aria-selected", String(selected));
     }
     for (const view of el.adminViews) view.classList.toggle("active", view.dataset.view === tab.dataset.tab);
-    if (tab.dataset.tab === "calendar") runAdmin(loadCalendar);
+    if (tab.dataset.tab === "calendar") {
+      runAdmin(async () => {
+        await loadBooking();
+        await loadCalendar();
+      });
+    }
     if (tab.dataset.tab === "leads") runAdmin(loadCrm);
     if (tab.dataset.tab === "messages") runAdmin(loadMessages);
     if (tab.dataset.tab === "billing") runAdmin(refreshBillingTab);
@@ -3141,11 +3486,28 @@ el.transferTargetList.addEventListener("click", (event) => {
 el.saveBusinessProfileButton.addEventListener("click", () => runAdmin(saveBusinessProfile));
 el.saveCalendarButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.refreshCalendarButton.addEventListener("click", () => runAdmin(loadCalendar));
+el.calendarProvider.addEventListener("change", updateCalendarProviderUi);
+el.saveVagaroSettingsButton.addEventListener("click", () => runAdmin(saveVagaroSettings));
+el.syncVagaroButton.addEventListener("click", () => runAdmin(syncVagaro));
+el.copyVagaroWebhookButton.addEventListener("click", () => runAdmin(copyVagaroWebhook));
+el.addBookingLinkButton.addEventListener("click", () => runAdmin(addBookingLink));
+el.calendarServiceFilter.addEventListener("change", () => runAdmin(loadCalendar));
+el.calendarProfessionalFilter.addEventListener("change", () => runAdmin(loadCalendar));
+el.bookingLinkList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  if (button.dataset.action === "copy-booking-link") runAdmin(() => copyText(button.dataset.url, "Booking link copied"));
+  if (button.dataset.action === "delete-booking-link") runAdmin(() => deleteBookingLink(button));
+});
 el.saveAppointmentButton.addEventListener("click", () => runAdmin(saveManualAppointment));
 el.resetAppointmentButton.addEventListener("click", resetAppointmentForm);
 el.availableSlots.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action='select-slot']");
   if (!button) return;
+  if (state.admin?.calendarProvider === "vagaro") {
+    setAdminStatus("Vagaro bookings must be confirmed through a Vagaro booking link.");
+    return;
+  }
   el.appointmentStart.value = calendarDateTimeLocal(button.dataset.start, el.calendarTimezone.value);
   el.appointmentCustomerName.focus();
 });

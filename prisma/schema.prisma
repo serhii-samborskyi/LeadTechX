@@ -57,6 +57,12 @@ model BusinessProfile {
   inboundMessages              MessageInbound[]
   reviewLinks                  BusinessReviewLink[]
   trafficEvents                TrafficEvent[]
+  bookingConnections           BookingConnection[]
+  bookingServices              BookingService[]
+  bookingProfessionals         BookingProfessional[]
+  bookingAppointments          BookingAppointment[]
+  bookingLinks                 BookingLink[]
+  bookingWebhookEvents         BookingWebhookEvent[]
 }
 
 model SubscriptionPlan {
@@ -236,6 +242,204 @@ model Appointment {
   feedback          CustomerFeedback[]
   messageDeliveries MessageDelivery[]
   inboundMessages   MessageInbound[]
+}
+
+model BookingConnection {
+  id                       Int                   @id @default(autoincrement())
+  businessProfileId        Int
+  businessProfile          BusinessProfile       @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  provider                 String
+  status                   String                @default("active")
+  workflowMode             String                @default("booking_link")
+  displayName              String?
+  externalBusinessId       String?
+  externalGroupId          String?
+  externalLocationId       String?
+  region                   String                @default("us02")
+  bookingUrl               String?
+  cancelRescheduleUrl      String?
+  settings                 Json?
+  apiClientId              String?
+  apiClientSecretEncrypted String?
+  apiClientSecretHint      String?
+  accessTokenEncrypted     String?
+  accessTokenExpiresAt     DateTime?
+  webhookSecretEncrypted   String?
+  webhookSecretHint        String?
+  lastSyncAt               DateTime?
+  services                 BookingService[]
+  professionals            BookingProfessional[]
+  appointments             BookingAppointment[]
+  links                    BookingLink[]
+  webhookEvents            BookingWebhookEvent[]
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+
+  @@unique([businessProfileId, provider])
+  @@index([provider, status])
+}
+
+model BookingService {
+  id                Int                          @id @default(autoincrement())
+  businessProfileId Int
+  businessProfile   BusinessProfile              @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  connectionId      Int
+  connection        BookingConnection            @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  provider          String
+  externalId        String
+  name              String
+  category          String?
+  description       String?
+  durationMinutes   Int?
+  price             Float?
+  currency          String?
+  type              String                       @default("service")
+  bookingUrl        String?
+  active            Boolean                      @default(true)
+  sortOrder         Int                          @default(0)
+  raw               Json?
+  professionals     BookingProfessionalService[]
+  appointments      BookingAppointment[]
+  links             BookingLink[]
+  createdAt         DateTime                     @default(now())
+  updatedAt         DateTime                     @updatedAt
+
+  @@unique([connectionId, externalId])
+  @@index([businessProfileId, active, sortOrder])
+  @@index([provider, externalId])
+}
+
+model BookingProfessional {
+  id                  Int                          @id @default(autoincrement())
+  businessProfileId   Int
+  businessProfile     BusinessProfile              @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  connectionId        Int
+  connection          BookingConnection            @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  provider            String
+  externalId          String
+  displayName         String
+  firstName           String?
+  lastName            String?
+  active              Boolean                      @default(true)
+  onlineBookingActive Boolean                      @default(true)
+  raw                 Json?
+  services            BookingProfessionalService[]
+  appointments        BookingAppointment[]
+  links               BookingLink[]
+  createdAt           DateTime                     @default(now())
+  updatedAt           DateTime                     @updatedAt
+
+  @@unique([connectionId, externalId])
+  @@index([businessProfileId, active, displayName])
+  @@index([provider, externalId])
+}
+
+model BookingProfessionalService {
+  id              Int                 @id @default(autoincrement())
+  professionalId  Int
+  professional    BookingProfessional @relation(fields: [professionalId], references: [id], onDelete: Cascade)
+  serviceId       Int
+  service         BookingService      @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  durationMinutes Int?
+  price           Float?
+  currency        String?
+  raw             Json?
+  createdAt       DateTime            @default(now())
+
+  @@unique([professionalId, serviceId])
+  @@index([serviceId])
+}
+
+model BookingAppointment {
+  id                     Int                  @id @default(autoincrement())
+  businessProfileId      Int
+  businessProfile        BusinessProfile      @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  connectionId           Int
+  connection             BookingConnection    @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  provider               String
+  externalId             String?
+  calendarEventId        String?
+  customerExternalId     String?
+  customerName           String?
+  phone                  String?
+  email                  String?
+  serviceId              Int?
+  service                BookingService?      @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  serviceExternalId      String?
+  serviceTitle           String?
+  serviceCategory        String?
+  professionalId         Int?
+  professional           BookingProfessional? @relation(fields: [professionalId], references: [id], onDelete: SetNull)
+  professionalExternalId String?
+  professionalName       String?
+  bookingStatus          String?
+  status                 String               @default("external")
+  source                 String?
+  amount                 Float?
+  currency               String?
+  scheduledStart         DateTime?
+  scheduledEnd           DateTime?
+  timezone               String?
+  bookingUrl             String?
+  manageUrl              String?
+  notes                  String?
+  raw                    Json?
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  @@unique([connectionId, externalId])
+  @@index([businessProfileId, scheduledStart])
+  @@index([businessProfileId, status, scheduledStart])
+  @@index([provider, externalId])
+}
+
+model BookingLink {
+  id                     Int                  @id @default(autoincrement())
+  businessProfileId      Int
+  businessProfile        BusinessProfile      @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  connectionId           Int
+  connection             BookingConnection    @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  provider               String
+  label                  String
+  url                    String
+  serviceId              Int?
+  service                BookingService?      @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  serviceExternalId      String?
+  professionalId         Int?
+  professional           BookingProfessional? @relation(fields: [professionalId], references: [id], onDelete: SetNull)
+  professionalExternalId String?
+  active                 Boolean              @default(true)
+  sortOrder              Int                  @default(0)
+  clickToken             String               @unique
+  clickCount             Int                  @default(0)
+  lastClickedAt          DateTime?
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  @@index([businessProfileId, active, sortOrder])
+  @@index([connectionId, active])
+}
+
+model BookingWebhookEvent {
+  id                 Int                @id @default(autoincrement())
+  businessProfileId  Int?
+  businessProfile    BusinessProfile?   @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  connectionId       Int?
+  connection         BookingConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  provider           String
+  eventId            String
+  eventType          String?
+  action             String?
+  externalBusinessId String?
+  status             String             @default("received")
+  payload            Json?
+  error              String?
+  receivedAt         DateTime           @default(now())
+  processedAt        DateTime?
+
+  @@unique([provider, eventId])
+  @@index([businessProfileId, receivedAt])
+  @@index([provider, status, receivedAt])
 }
 
 model Lead {

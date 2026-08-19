@@ -1,6 +1,7 @@
 import * as internal from "./providers/internal.js";
+import * as vagaro from "./providers/vagaro.js";
 
-const providers = { internal };
+const providers = { internal, vagaro };
 
 export function getCalendarProvider(name = "internal") {
   const provider = providers[name];

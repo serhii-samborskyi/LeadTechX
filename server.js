@@ -4552,6 +4552,434 @@ function requestBaseUrl(req, settings) {
   return `${req.protocol}://${req.get("host")}`;
 }
 
+function normalizedBookingProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  return provider === "vagaro" ? "vagaro" : "internal";
+}
+
+function safeBookingConnection(connection) {
+  if (!connection) return null;
+  return {
+    id: connection.id,
+    provider: connection.provider,
+    status: connection.status,
+    workflowMode: connection.workflowMode,
+    displayName: connection.displayName,
+    externalBusinessId: connection.externalBusinessId,
+    externalGroupId: connection.externalGroupId,
+    externalLocationId: connection.externalLocationId,
+    region: connection.region,
+    bookingUrl: connection.bookingUrl,
+    cancelRescheduleUrl: connection.cancelRescheduleUrl,
+    settings: connection.settings || {},
+    apiClientId: connection.apiClientId || "",
+    apiClientSecretConfigured: Boolean(connection.apiClientSecretEncrypted),
+    apiClientSecretHint: connection.apiClientSecretHint || "",
+    accessTokenConfigured: Boolean(connection.accessTokenEncrypted),
+    accessTokenExpiresAt: connection.accessTokenExpiresAt,
+    webhookSecretConfigured: Boolean(connection.webhookSecretEncrypted),
+    webhookSecretHint: connection.webhookSecretHint || "",
+    lastSyncAt: connection.lastSyncAt,
+    createdAt: connection.createdAt,
+    updatedAt: connection.updatedAt,
+  };
+}
+
+function encryptedField(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return { encrypted: undefined, hint: undefined };
+  return { encrypted: encryptSecret(normalized), hint: normalized.slice(-4) };
+}
+
+function decryptOptional(value) {
+  if (!value) return "";
+  return decryptSecret(value);
+}
+
+function bookingProviderRegion(connection) {
+  return String(connection?.region || "us02").trim().replace(/^\/+|\/+$/g, "") || "us02";
+}
+
+async function requestBookingProvider(connection, { method = "POST", path: apiPath, accessToken = "", body = {}, query = {}, timeoutMs = 8000 } = {}) {
+  const region = bookingProviderRegion(connection);
+  const cleanPath = String(apiPath || "").startsWith("/") ? String(apiPath) : `/${apiPath || ""}`;
+  const url = new URL(`https://api.vagaro.com/${region}${cleanPath}`);
+  for (const [key, value] of Object.entries(query || {})) {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs || 8000)));
+  let response;
+  let payload;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(accessToken ? { accessToken } : {}),
+      },
+      body: method === "GET" ? undefined : JSON.stringify(body || {}),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = { raw: text };
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response.ok || (payload?.status && Number(payload.status) >= 400)) {
+    const detail = payload?.message || payload?.error || payload?.raw || response.statusText;
+    throw new Error(`Vagaro API ${response.status}: ${detail}`);
+  }
+  return payload;
+}
+
+async function resolveBookingAccessToken(connection) {
+  if (!connection || connection.provider !== "vagaro") return "";
+  if (connection.accessTokenEncrypted && connection.accessTokenExpiresAt && connection.accessTokenExpiresAt > new Date(Date.now() + 120000)) {
+    return decryptOptional(connection.accessTokenEncrypted);
+  }
+  const clientId = String(connection.apiClientId || "").trim();
+  const clientSecret = decryptOptional(connection.apiClientSecretEncrypted);
+  if (!clientId || !clientSecret) {
+    return decryptOptional(connection.accessTokenEncrypted);
+  }
+  const payload = await requestBookingProvider(connection, {
+    method: "POST",
+    path: "/api/v2/merchants/generate-access-token",
+    body: { clientId, clientSecretKey: clientSecret, scope: "read access" },
+    timeoutMs: 10000,
+  });
+  const token = payload?.data?.access_token || payload?.access_token;
+  if (!token) throw new Error("Vagaro did not return an access token");
+  const expiresIn = Math.max(300, Number(payload?.data?.expires_in || payload?.expires_in || 3600));
+  const encrypted = encryptedField(token);
+  await prisma.bookingConnection.update({
+    where: { id: connection.id },
+    data: {
+      accessTokenEncrypted: encrypted.encrypted,
+      accessTokenExpiresAt: new Date(Date.now() + (expiresIn - 90) * 1000),
+    },
+  });
+  return token;
+}
+
+function bookingProviderHelpers() {
+  return { resolveBookingAccessToken, requestBookingProvider };
+}
+
+function bookingBaseUrl(settings, req = null) {
+  const configured = String(settings?.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+  if (/^https?:\/\//i.test(configured)) return configured;
+  if (req) return `${req.protocol}://${req.get("host")}`;
+  return "http://localhost:3000";
+}
+
+function bookingLinkTrackingUrl({ settings, req = null, link }) {
+  const url = new URL(`/book/${encodeURIComponent(link.clickToken)}`, bookingBaseUrl(settings, req));
+  return url.toString();
+}
+
+async function bookingDataForProfile(profile, settings = null, req = null) {
+  const activeSettings = settings || (await getSettings());
+  const connections = await prisma.bookingConnection.findMany({
+    where: { businessProfileId: profile.id },
+    orderBy: [{ provider: "asc" }],
+  });
+  const activeConnection = connections.find((connection) => connection.provider === "vagaro") || null;
+  const [services, professionals, links, webhookEvents] = activeConnection
+    ? await Promise.all([
+        prisma.bookingService.findMany({
+          where: { connectionId: activeConnection.id },
+          orderBy: [{ active: "desc" }, { sortOrder: "asc" }, { name: "asc" }],
+          include: { professionals: { include: { professional: true } } },
+        }),
+        prisma.bookingProfessional.findMany({
+          where: { connectionId: activeConnection.id },
+          orderBy: [{ active: "desc" }, { displayName: "asc" }],
+          include: { services: { include: { service: true } } },
+        }),
+        prisma.bookingLink.findMany({
+          where: { connectionId: activeConnection.id },
+          orderBy: [{ active: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
+          include: { service: true, professional: true },
+        }),
+        prisma.bookingWebhookEvent.findMany({
+          where: { connectionId: activeConnection.id },
+          orderBy: { receivedAt: "desc" },
+          take: 20,
+        }),
+      ])
+    : [[], [], [], []];
+  const webhookUrl = `${bookingBaseUrl(activeSettings, req)}/webhooks/vagaro`;
+  return {
+    connections: connections.map(safeBookingConnection),
+    activeConnection: safeBookingConnection(activeConnection),
+    services,
+    professionals,
+    links: links.map((link) => ({ ...link, trackingUrl: bookingLinkTrackingUrl({ settings: activeSettings, req, link }) })),
+    webhookEvents,
+    webhookUrl,
+  };
+}
+
+async function ensureBookingLinkForConnection(connection, { label = "", url = "", serviceId = null, professionalId = null, sortOrder = 0 } = {}) {
+  const safeUrl = String(url || "").trim();
+  if (!/^https?:\/\//i.test(safeUrl)) throw new Error("Booking link URL must start with http:// or https://");
+  const clickToken = issueToken().token;
+  return prisma.bookingLink.create({
+    data: {
+      businessProfileId: connection.businessProfileId,
+      connectionId: connection.id,
+      provider: connection.provider,
+      label: String(label || "Booking link").trim(),
+      url: safeUrl,
+      serviceId: serviceId ? Number(serviceId) : null,
+      serviceExternalId: serviceId ? (await prisma.bookingService.findUnique({ where: { id: Number(serviceId) } }))?.externalId || null : null,
+      professionalId: professionalId ? Number(professionalId) : null,
+      professionalExternalId: professionalId
+        ? (await prisma.bookingProfessional.findUnique({ where: { id: Number(professionalId) } }))?.externalId || null
+        : null,
+      sortOrder: Number(sortOrder || 0),
+      clickToken,
+    },
+  });
+}
+
+function vagaroAppointmentStatus(action, bookingStatus) {
+  const normalizedAction = String(action || "").toLowerCase();
+  const normalizedStatus = String(bookingStatus || "").toLowerCase();
+  if (normalizedAction === "deleted" || ["cancel", "cancelled", "canceled", "deleted", "denied", "no show"].includes(normalizedStatus)) return "cancelled";
+  if (["confirmed", "accepted", "service completed", "service in progress", "ready to start", "show"].includes(normalizedStatus)) return "confirmed";
+  if (["awaiting confirmation", "need acceptance"].includes(normalizedStatus)) return "requested";
+  return normalizedStatus || "external";
+}
+
+async function upsertVagaroService(connection, payload) {
+  const externalId = String(payload?.serviceId || "").trim();
+  if (!externalId) return null;
+  const performers = Array.isArray(payload.servicePerformedBy) ? payload.servicePerformedBy : [];
+  const firstPerformer = performers[0] || {};
+  return prisma.bookingService.upsert({
+    where: { connectionId_externalId: { connectionId: connection.id, externalId } },
+    create: {
+      businessProfileId: connection.businessProfileId,
+      connectionId: connection.id,
+      provider: "vagaro",
+      externalId,
+      name: String(payload.serviceTitle || payload.name || "Vagaro service"),
+      category: payload.parentServiceTitle || payload.serviceCategory || null,
+      durationMinutes: Number(firstPerformer.durationMinutes || payload.durationMinutes || 0) || null,
+      price: Number(payload.businessCost ?? firstPerformer.price ?? NaN) || null,
+      currency: payload.currency || firstPerformer.currency || null,
+      type: String(payload.type || "service").toLowerCase(),
+      raw: payload,
+    },
+    update: {
+      name: String(payload.serviceTitle || payload.name || "Vagaro service"),
+      category: payload.parentServiceTitle || payload.serviceCategory || null,
+      durationMinutes: Number(firstPerformer.durationMinutes || payload.durationMinutes || 0) || null,
+      price: Number(payload.businessCost ?? firstPerformer.price ?? NaN) || null,
+      currency: payload.currency || firstPerformer.currency || null,
+      type: String(payload.type || "service").toLowerCase(),
+      active: true,
+      raw: payload,
+    },
+  });
+}
+
+async function upsertVagaroProfessional(connection, payload) {
+  const externalId = String(payload?.serviceProviderId || "").trim();
+  if (!externalId) return null;
+  const firstName = String(payload.employeeFirstName || payload.firstName || "").trim();
+  const lastName = String(payload.employeeLastName || payload.lastName || "").trim();
+  const displayName = [firstName, lastName].filter(Boolean).join(" ").trim() || String(payload.serviceProvider || payload.displayName || externalId);
+  return prisma.bookingProfessional.upsert({
+    where: { connectionId_externalId: { connectionId: connection.id, externalId } },
+    create: {
+      businessProfileId: connection.businessProfileId,
+      connectionId: connection.id,
+      provider: "vagaro",
+      externalId,
+      displayName,
+      firstName: firstName || null,
+      lastName: lastName || null,
+      active: payload.isActive === undefined ? true : Boolean(payload.isActive),
+      onlineBookingActive: payload.isOnlineBookingActive === undefined ? true : Boolean(payload.isOnlineBookingActive),
+      raw: payload,
+    },
+    update: {
+      displayName,
+      firstName: firstName || null,
+      lastName: lastName || null,
+      active: payload.isActive === undefined ? true : Boolean(payload.isActive),
+      onlineBookingActive: payload.isOnlineBookingActive === undefined ? true : Boolean(payload.isOnlineBookingActive),
+      raw: payload,
+    },
+  });
+}
+
+async function syncVagaroServices(connection) {
+  const accessToken = await resolveBookingAccessToken(connection);
+  const payload = await requestBookingProvider(connection, {
+    method: "POST",
+    path: "/api/v2/services",
+    accessToken,
+    query: { pageNumber: 1, pageSize: 100 },
+    body: { businessId: connection.externalBusinessId },
+    timeoutMs: 15000,
+  });
+  const services = Array.isArray(payload?.data?.services) ? payload.data.services : [];
+  const providerIds = new Set();
+  for (const servicePayload of services) {
+    const service = await upsertVagaroService(connection, servicePayload);
+    for (const performer of servicePayload.servicePerformedBy || []) {
+      const providerId = String(performer.serviceProviderId || "").trim();
+      if (!providerId || !service) continue;
+      providerIds.add(providerId);
+      const professional = await upsertVagaroProfessional(connection, { serviceProviderId: providerId, serviceProvider: providerId });
+      if (professional) {
+        await prisma.bookingProfessionalService.upsert({
+          where: { professionalId_serviceId: { professionalId: professional.id, serviceId: service.id } },
+          create: {
+            professionalId: professional.id,
+            serviceId: service.id,
+            durationMinutes: Number(performer.durationMinutes || 0) || null,
+            price: Number(performer.price ?? NaN) || null,
+            currency: performer.currency || service.currency || null,
+            raw: performer,
+          },
+          update: {
+            durationMinutes: Number(performer.durationMinutes || 0) || null,
+            price: Number(performer.price ?? NaN) || null,
+            currency: performer.currency || service.currency || null,
+            raw: performer,
+          },
+        });
+      }
+    }
+  }
+  for (const providerId of [...providerIds].slice(0, 100)) {
+    try {
+      const employee = await requestBookingProvider(connection, {
+        method: "POST",
+        path: "/api/v2/employees",
+        accessToken,
+        body: { businessId: connection.externalBusinessId, serviceProviderId: providerId },
+        timeoutMs: 8000,
+      });
+      if (employee?.data) await upsertVagaroProfessional(connection, employee.data);
+    } catch (error) {
+      console.warn(`[vagaro] employee sync failed for ${providerId}: ${error.message}`);
+    }
+  }
+  await prisma.bookingConnection.update({ where: { id: connection.id }, data: { lastSyncAt: new Date() } });
+  return { servicesImported: services.length, professionalsImported: providerIds.size };
+}
+
+async function processVagaroAppointmentEvent({ connection, event }) {
+  const payload = event.payload || {};
+  const externalId = String(payload.appointmentId || "").trim();
+  if (!externalId) return { skipped: true, reason: "missing_appointment_id" };
+  const service = payload.serviceId
+    ? await upsertVagaroService(connection, {
+        serviceId: payload.serviceId,
+        serviceTitle: payload.serviceTitle || "Vagaro service",
+        serviceCategory: payload.serviceCategory,
+        businessCost: payload.amount,
+      })
+    : null;
+  const professional = payload.serviceProviderId
+    ? await upsertVagaroProfessional(connection, { serviceProviderId: payload.serviceProviderId, serviceProvider: payload.serviceProviderId })
+    : null;
+  const status = vagaroAppointmentStatus(event.action, payload.bookingStatus);
+  const scheduledStart = payload.startTime ? new Date(payload.startTime) : null;
+  const scheduledEnd = payload.endTime ? new Date(payload.endTime) : null;
+  const customerName = String(
+    payload.customerName ||
+      [payload.customerFirstName, payload.customerLastName].filter(Boolean).join(" ") ||
+      payload.clientName ||
+      "",
+  ).trim();
+  const customerPhone = normalizeE164Phone(payload.customerPhone || payload.phone || payload.mobilePhone || payload.phoneNumber);
+  const customerEmail = String(payload.customerEmail || payload.email || "").trim().toLowerCase();
+  const data = {
+    businessProfileId: connection.businessProfileId,
+    connectionId: connection.id,
+    provider: "vagaro",
+    calendarEventId: payload.calendarEventId || null,
+    customerExternalId: payload.customerId || null,
+    customerName: customerName || null,
+    phone: customerPhone || null,
+    email: customerEmail || null,
+    serviceId: service?.id || null,
+    serviceExternalId: payload.serviceId || null,
+    serviceTitle: payload.serviceTitle || service?.name || null,
+    serviceCategory: payload.serviceCategory || null,
+    professionalId: professional?.id || null,
+    professionalExternalId: payload.serviceProviderId || null,
+    professionalName: professional?.displayName || null,
+    bookingStatus: payload.bookingStatus || null,
+    status,
+    source: payload.bookingSource || payload.onlineVsInhouse || null,
+    amount: Number(payload.amount ?? NaN) || null,
+    scheduledStart,
+    scheduledEnd,
+    timezone: connection.settings?.timezone || null,
+    bookingUrl: payload.bookingUrl || connection.bookingUrl || null,
+    manageUrl: payload.cancelRescheduleUrl || payload.manageUrl || connection.cancelRescheduleUrl || null,
+    raw: payload,
+  };
+  const appointment = await prisma.bookingAppointment.upsert({
+    where: { connectionId_externalId: { connectionId: connection.id, externalId } },
+    create: { ...data, externalId },
+    update: data,
+  });
+  return { appointmentId: appointment.id, status };
+}
+
+async function processVagaroEmployeeEvent({ connection, event }) {
+  const professional = await upsertVagaroProfessional(connection, event.payload || {});
+  return { professionalId: professional?.id || null };
+}
+
+async function processVagaroBusinessLocationEvent({ connection, event }) {
+  const payload = event.payload || {};
+  await prisma.bookingConnection.update({
+    where: { id: connection.id },
+    data: {
+      displayName: payload.businessName || connection.displayName,
+      externalGroupId: payload.businessGroupId || connection.externalGroupId,
+      bookingUrl: payload.vagaroListingUrl || connection.bookingUrl,
+      settings: {
+        ...(connection.settings && typeof connection.settings === "object" ? connection.settings : {}),
+        businessLocation: payload,
+      },
+    },
+  });
+  return { businessUpdated: true };
+}
+
+async function processVagaroWebhookEvent(webhookEvent, connection) {
+  const event = webhookEvent.payload || {};
+  let result = {};
+  if (event.type === "appointment") result = await processVagaroAppointmentEvent({ connection, event });
+  else if (event.type === "employee") result = await processVagaroEmployeeEvent({ connection, event });
+  else if (event.type === "business_location") result = await processVagaroBusinessLocationEvent({ connection, event });
+  await prisma.bookingWebhookEvent.update({
+    where: { id: webhookEvent.id },
+    data: {
+      status: "processed",
+      processedAt: new Date(),
+      payload: { ...event, processingResult: result },
+    },
+  });
+  return result;
+}
+
 async function smtpDiagnosticConfig(body = {}) {
   const settings = await getSettings();
   const host = String(body.smtpHost ?? settings.smtpHost ?? "").trim();
@@ -4736,6 +5164,160 @@ async function sendAppointmentSummary({ settings, profile, config, appointment, 
   return result;
 }
 
+function textMatches(left, right) {
+  const a = String(left || "").trim().toLowerCase();
+  const b = String(right || "").trim().toLowerCase();
+  return Boolean(a && b && (a.includes(b) || b.includes(a)));
+}
+
+function pickBookingLink({ links = [], service = null, professional = null }) {
+  const active = links.filter((link) => link.active !== false);
+  if (!active.length) return null;
+  const serviceId = service?.id || null;
+  const professionalId = professional?.id || null;
+  return (
+    active.find((link) => link.serviceId === serviceId && link.professionalId === professionalId) ||
+    active.find((link) => serviceId && link.serviceId === serviceId && !link.professionalId) ||
+    active.find((link) => professionalId && link.professionalId === professionalId && !link.serviceId) ||
+    active.find((link) => !link.serviceId && !link.professionalId) ||
+    active[0]
+  );
+}
+
+async function externalBookingLinkContext({ profile, args = {} }) {
+  const connection = await prisma.bookingConnection.findUnique({
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
+    include: {
+      services: { where: { active: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] },
+      professionals: { where: { active: true }, orderBy: [{ displayName: "asc" }] },
+      links: { where: { active: true }, orderBy: [{ sortOrder: "asc" }, { id: "asc" }] },
+    },
+  });
+  if (!connection || connection.status !== "active") throw new Error("External booking is not enabled for this business");
+  const serviceNeedle = String(args.serviceId || args.serviceName || args.service || args.reason || "").trim();
+  const professionalNeedle = String(args.professionalId || args.professionalName || args.professional || args.serviceProviderId || "").trim();
+  const service =
+    connection.services.find((item) => String(item.id) === serviceNeedle || item.externalId === serviceNeedle) ||
+    connection.services.find((item) => textMatches(item.name, serviceNeedle)) ||
+    null;
+  const professional =
+    connection.professionals.find((item) => String(item.id) === professionalNeedle || item.externalId === professionalNeedle) ||
+    connection.professionals.find((item) => textMatches(item.displayName, professionalNeedle)) ||
+    null;
+  let link = pickBookingLink({ links: connection.links, service, professional });
+  if (!link && connection.bookingUrl) {
+    link = await ensureBookingLinkForConnection(connection, {
+      label: "Book online",
+      url: connection.bookingUrl,
+      serviceId: service?.id || null,
+      professionalId: professional?.id || null,
+      sortOrder: 0,
+    });
+  }
+  if (!link) throw new Error("No booking link is configured for this external calendar");
+  return { connection, service, professional, link };
+}
+
+async function sendExternalBookingLink({ settings, profile, config, args = {}, lead = null, voiceCallId = null, source = "agent_tool" }) {
+  await ensureConfigEntitlements(profile, config);
+  const { connection, service, professional, link } = await externalBookingLinkContext({ profile, args });
+  const toPhone = normalizeE164Phone(args.phone) || lead?.phone || null;
+  if (!toPhone) throw new Error("A caller phone number is required before sending a booking link");
+  const customerName = String(args.name || args.customerName || lead?.name || "Customer").trim() || "Customer";
+  const trackedUrl = bookingLinkTrackingUrl({ settings, link });
+  const serviceText = service?.name || args.serviceName || "";
+  const professionalText = professional?.displayName || args.professionalName || "";
+  const requestedTime = String(args.requestedTime || args.start || "").trim();
+  const message = [
+    `${profile.businessName} booking link: ${trackedUrl}`,
+    serviceText ? `Service: ${serviceText}` : "",
+    professionalText ? `Professional: ${professionalText}` : "",
+    requestedTime ? `Requested time: ${requestedTime}` : "",
+    "Use the link to choose and confirm your appointment.",
+  ].filter(Boolean).join("\n");
+  const appointment = await prisma.bookingAppointment.create({
+    data: {
+      businessProfileId: profile.id,
+      connectionId: connection.id,
+      provider: connection.provider,
+      customerName,
+      phone: toPhone,
+      email: args.email ? String(args.email).trim().toLowerCase() : lead?.email || null,
+      serviceId: service?.id || null,
+      serviceExternalId: service?.externalId || null,
+      serviceTitle: serviceText || null,
+      professionalId: professional?.id || null,
+      professionalExternalId: professional?.externalId || null,
+      professionalName: professionalText || null,
+      status: "booking_link_sent",
+      source,
+      bookingUrl: trackedUrl,
+      manageUrl: connection.cancelRescheduleUrl || connection.bookingUrl || link.url,
+      notes: requestedTime ? `Requested time: ${requestedTime}` : null,
+      raw: {
+        requestedTime,
+        linkId: link.id,
+        directUrl: link.url,
+        trackedUrl,
+      },
+    },
+  });
+  const delivery = await deliverBusinessMessage({
+    settings,
+    profile,
+    toPhone,
+    message,
+    purpose: "booking_link",
+    leadId: lead?.id || null,
+    voiceCallId,
+    metadata: {
+      provider: connection.provider,
+      bookingAppointmentId: appointment.id,
+      bookingLinkId: link.id,
+      trackedUrl,
+      service: serviceText,
+      professional: professionalText,
+      requestedTime,
+    },
+  });
+  if (lead?.id) {
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: {
+        status: "appointment",
+        phone: lead.phone || toPhone,
+        email: lead.email || appointment.email || null,
+        extractedFields: {
+          ...(lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {}),
+          latestBookingLink: {
+            provider: connection.provider,
+            bookingAppointmentId: appointment.id,
+            bookingLinkId: link.id,
+            service: serviceText,
+            professional: professionalText,
+            requestedTime,
+            sentAt: new Date().toISOString(),
+          },
+        },
+      },
+    });
+  }
+  return {
+    ok: true,
+    sent: true,
+    booked: false,
+    status: "booking_link_sent",
+    provider: connection.provider,
+    bookingAppointmentId: appointment.id,
+    bookingLinkId: link.id,
+    trackedUrl,
+    service: serviceText,
+    professional: professionalText,
+    deliveryProvider: delivery.provider,
+    message: "Booking link sent. Customer must confirm the appointment through the external booking system.",
+  };
+}
+
 async function reviewRequestUrl({ settings, profile, config }) {
   const activeLinks = await prisma.businessReviewLink.count({
     where: { businessProfileId: profile.id, active: true },
@@ -4769,6 +5351,7 @@ async function rescheduleExistingAppointment({ appointment, profile, config, sta
     fromDate: requestedStart.toISODate(),
     days: 1,
     durationMinutes: duration,
+    ...bookingProviderHelpers(),
   });
   const matched = availability.slots.find(
     (slot) => Math.abs(DateTime.fromISO(slot.start).toMillis() - requestedStart.toMillis()) < 60_000,
@@ -5661,9 +6244,16 @@ function runtimeBusinessInstructions(config) {
   }));
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
+  const externalBooking = config.calendarProvider === "vagaro";
   return `
 Business-managed receptionist configuration:
-- Appointment mode: ${config.appointmentMode === "instant" ? "Book available slots immediately" : "Create pending appointment requests"}.
+- Appointment mode: ${
+    externalBooking
+      ? "External Vagaro booking. Check live availability, then text the booking link. Do not say the appointment is booked until the external system confirms it."
+      : config.appointmentMode === "instant"
+        ? "Book available slots immediately"
+        : "Create pending appointment requests"
+  }.
 - Calendar timezone: ${config.timezone}.
 - Default appointment duration: ${config.slotDurationMinutes} minutes.
 - Information to collect before an appointment: ${JSON.stringify(intake)}
@@ -5682,11 +6272,11 @@ Phone-speed rules:
 - Keep every spoken phone reply short: one sentence by default, two only when necessary, and under about 8 seconds of speech.
 - If the caller asks for availability and gives a day or time, call get_available_slots immediately. Do not ask for name, phone, email, or appointment reason before checking availability.
 - After get_available_slots returns, offer only the best matching slot or at most two options. Do not read a long list.
-- If the caller asks to book and has given a time, collect only missing required intake fields, then call schedule_appointment.
+- If the caller asks to book and has given a time, collect only missing required intake fields, then ${externalBooking ? "call send_booking_link and tell them the link lets them confirm in Vagaro." : "call schedule_appointment."}
 - Do not repeat the same confirmation question after the caller already answered it.
 - If the caller asks for a person, department, manager, or topic you cannot answer from the configured knowledge, ${transferTargets.length ? "offer the best matching call transfer target. Only call transfer_call after the caller agrees to be transferred. After calling transfer_call, do not call end_call." : "record a transfer_message for human follow-up."} If no transfer target fits, record a transfer_message instead.
 
-Use get_available_slots before offering or scheduling a time. Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status="confirmed". For status="requested", say it is pending confirmation. ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
+Use get_available_slots before offering or scheduling a time. ${externalBooking ? "For Vagaro, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to confirm through the link." : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
 
 function cellText(value) {
@@ -5737,6 +6327,7 @@ function toolDeclarations(config) {
   const appointmentRequired = ["start"];
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
+  const externalBooking = config.calendarProvider === "vagaro";
   for (const field of config.intakeFields) {
     appointmentProperties[field.fieldKey] = {
       type: "STRING",
@@ -5756,13 +6347,41 @@ function toolDeclarations(config) {
           fromDate: { type: "STRING", description: "Start date in YYYY-MM-DD format." },
           days: { type: "INTEGER", description: "Number of days to search, up to 30." },
           durationMinutes: { type: "INTEGER" },
+          serviceName: { type: "STRING", description: "Service the caller wants, for example haircut, facial, lash fill." },
+          serviceId: { type: "STRING", description: "External or local service id if known." },
+          professionalName: { type: "STRING", description: "Preferred professional/staff member name if caller asked for one." },
+          professionalId: { type: "STRING", description: "External or local professional id if known." },
         },
       },
     },
+    ...(externalBooking
+      ? [
+          {
+            name: "send_booking_link",
+            description:
+              "Send the external booking link by text after checking availability. Use this for Vagaro instead of directly booking the appointment.",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                name: { type: "STRING", description: "Customer name if known." },
+                phone: { type: "STRING", description: "Customer phone. If omitted, the inbound caller number is used." },
+                email: { type: "STRING" },
+                serviceName: { type: "STRING" },
+                serviceId: { type: "STRING" },
+                professionalName: { type: "STRING" },
+                professionalId: { type: "STRING" },
+                requestedTime: { type: "STRING", description: "Requested appointment date/time the customer asked about." },
+              },
+            },
+          },
+        ]
+      : []),
     {
       name: "schedule_appointment",
       description:
-        config.appointmentMode === "instant"
+        externalBooking
+          ? "For Vagaro, do not directly book. This records a booking-link request and sends the external booking link."
+          : config.appointmentMode === "instant"
           ? "Book a confirmed appointment in an available calendar slot."
           : "Create a pending appointment request in an available calendar slot.",
       parameters: {
@@ -6003,16 +6622,64 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       fromDate: args.fromDate,
       days: Math.min(30, Number(args.days || 14)),
       durationMinutes: args.durationMinutes,
+      serviceId: args.serviceId,
+      serviceName: args.serviceName || args.service,
+      professionalId: args.professionalId || args.serviceProviderId,
+      professionalName: args.professionalName || args.professional,
+      ...bookingProviderHelpers(),
     });
     return {
       ok: true,
       timezone: availability.timezone,
       durationMinutes: availability.durationMinutes,
       slots: availability.slots.slice(0, context.channel === "phone" ? 6 : 20),
+      provider: availability.provider || config.calendarProvider,
+      workflowMode: availability.workflowMode || null,
+      selectedService: availability.selectedService || null,
+      selectedProfessional: availability.selectedProfessional || null,
+      warning: availability.warning || "",
     };
   }
 
+  if (functionCall.name === "send_booking_link") {
+    const settings = await getSettings();
+    const linkArgs = {
+      ...args,
+      phone: normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null,
+      email: args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null,
+      name: args.name || args.customer_name || args.customerName || contextLead?.name || "Customer",
+    };
+    return sendExternalBookingLink({
+      settings,
+      profile,
+      config,
+      args: linkArgs,
+      lead: contextLead,
+      voiceCallId: context.voiceCallId || null,
+      source: context.channel === "phone" ? "phone_agent_booking_link" : "browser_agent_booking_link",
+    });
+  }
+
   if (functionCall.name === "schedule_appointment") {
+    if (config.calendarProvider === "vagaro") {
+      const settings = await getSettings();
+      const linkArgs = {
+        ...args,
+        phone: normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null,
+        email: args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null,
+        name: args.name || args.customer_name || args.customerName || contextLead?.name || "Customer",
+        requestedTime: args.start || args.requestedTime || "",
+      };
+      return sendExternalBookingLink({
+        settings,
+        profile,
+        config,
+        args: linkArgs,
+        lead: contextLead,
+        voiceCallId: context.voiceCallId || null,
+        source: context.channel === "phone" ? "phone_agent_schedule_link_guard" : "browser_agent_schedule_link_guard",
+      });
+    }
     const intakeData = Object.fromEntries(
       config.intakeFields.map((field) => [field.fieldKey, args[field.fieldKey] ?? null]),
     );
@@ -7610,6 +8277,7 @@ app.get("/api/public/appointments/:token", async (req, res) => {
       fromDate: req.query.from,
       days: Math.min(30, Number(req.query.days || 14)),
       durationMinutes: appointment.durationMinutes || config.slotDurationMinutes,
+      ...bookingProviderHelpers(),
     });
     res.json(publicAppointmentPayload({ appointment, profile, config, settings, availability }));
   } catch (error) {
@@ -8747,6 +9415,216 @@ app.get("/api/business-admin", async (req, res) => {
   }
 });
 
+app.get("/api/business-admin/booking", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const settings = await getSettings();
+    res.json(await bookingDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.put("/api/business-admin/booking/vagaro", async (req, res) => {
+  try {
+    const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const enabled = Boolean(req.body.enabled);
+    const externalBusinessId = String(req.body.externalBusinessId || "").trim();
+    const bookingUrl = String(req.body.bookingUrl || "").trim();
+    const cancelRescheduleUrl = String(req.body.cancelRescheduleUrl || "").trim();
+    if (enabled && !externalBusinessId) throw new Error("Vagaro business ID is required when the integration is enabled");
+    if (bookingUrl && !/^https?:\/\//i.test(bookingUrl)) throw new Error("Vagaro booking URL must start with http:// or https://");
+    if (cancelRescheduleUrl && !/^https?:\/\//i.test(cancelRescheduleUrl)) throw new Error("Cancel/reschedule URL must start with http:// or https://");
+    const secret = encryptedField(req.body.apiClientSecret);
+    const token = encryptedField(req.body.accessToken);
+    const webhookSecret = encryptedField(req.body.webhookSecret);
+    const connection = await prisma.bookingConnection.upsert({
+      where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
+      create: {
+        businessProfileId: profile.id,
+        provider: "vagaro",
+        status: enabled ? "active" : "disabled",
+        workflowMode: "booking_link",
+        displayName: "Vagaro",
+        externalBusinessId: externalBusinessId || null,
+        externalGroupId: String(req.body.externalGroupId || "").trim() || null,
+        externalLocationId: String(req.body.externalLocationId || "").trim() || null,
+        region: String(req.body.region || "us02").trim() || "us02",
+        bookingUrl: bookingUrl || null,
+        cancelRescheduleUrl: cancelRescheduleUrl || null,
+        apiClientId: String(req.body.apiClientId || "").trim() || null,
+        apiClientSecretEncrypted: secret.encrypted,
+        apiClientSecretHint: secret.hint,
+        accessTokenEncrypted: token.encrypted,
+        accessTokenExpiresAt: token.encrypted ? new Date(Date.now() + 50 * 60 * 1000) : null,
+        webhookSecretEncrypted: webhookSecret.encrypted,
+        webhookSecretHint: webhookSecret.hint,
+        settings: { realtimeAvailability: true, directBooking: false },
+      },
+      update: {
+        status: enabled ? "active" : "disabled",
+        externalBusinessId: externalBusinessId || null,
+        externalGroupId: String(req.body.externalGroupId || "").trim() || null,
+        externalLocationId: String(req.body.externalLocationId || "").trim() || null,
+        region: String(req.body.region || "us02").trim() || "us02",
+        bookingUrl: bookingUrl || null,
+        cancelRescheduleUrl: cancelRescheduleUrl || null,
+        apiClientId: String(req.body.apiClientId || "").trim() || null,
+        apiClientSecretEncrypted: secret.encrypted === undefined ? undefined : secret.encrypted,
+        apiClientSecretHint: secret.hint === undefined ? undefined : secret.hint,
+        accessTokenEncrypted: token.encrypted === undefined ? undefined : token.encrypted,
+        accessTokenExpiresAt: token.encrypted === undefined ? undefined : new Date(Date.now() + 50 * 60 * 1000),
+        webhookSecretEncrypted: webhookSecret.encrypted === undefined ? undefined : webhookSecret.encrypted,
+        webhookSecretHint: webhookSecret.hint === undefined ? undefined : webhookSecret.hint,
+        settings: { realtimeAvailability: true, directBooking: false },
+      },
+    });
+    await prisma.businessConfig.update({
+      where: { id: config.id },
+      data: {
+        calendarProvider: enabled ? "vagaro" : "internal",
+        providerConfig: enabled ? { provider: "vagaro", connectionId: connection.id, workflowMode: "booking_link" } : null,
+      },
+    });
+    if (enabled && bookingUrl) {
+      const existingGeneralLink = await prisma.bookingLink.findFirst({
+        where: { connectionId: connection.id, serviceId: null, professionalId: null, active: true },
+      });
+      if (!existingGeneralLink) {
+        await ensureBookingLinkForConnection(connection, { label: "Book online", url: bookingUrl, sortOrder: 0 });
+      }
+    }
+    const settings = await getSettings();
+    res.json(await bookingDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.post("/api/business-admin/booking/vagaro/sync", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const connection = await prisma.bookingConnection.findUnique({
+      where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
+    });
+    if (!connection || connection.status !== "active") throw new Error("Vagaro is not enabled for this business");
+    if (!connection.externalBusinessId) throw new Error("Vagaro business ID is required before syncing");
+    const result = await syncVagaroServices(connection);
+    const settings = await getSettings();
+    res.json({ ...(await bookingDataForProfile(profile, settings, req)), sync: result });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.post("/api/business-admin/booking-links", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const provider = normalizedBookingProvider(req.body.provider || "vagaro");
+    if (provider === "internal") throw new Error("Booking links are only used for external booking providers");
+    const connection = await prisma.bookingConnection.findUnique({
+      where: { businessProfileId_provider: { businessProfileId: profile.id, provider } },
+    });
+    if (!connection) throw new Error("Connect the booking provider before adding links");
+    await ensureBookingLinkForConnection(connection, {
+      label: req.body.label,
+      url: req.body.url,
+      serviceId: req.body.serviceId || null,
+      professionalId: req.body.professionalId || null,
+      sortOrder: req.body.sortOrder || 0,
+    });
+    const settings = await getSettings();
+    res.status(201).json(await bookingDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.delete("/api/business-admin/booking-links/:id", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    await prisma.bookingLink.updateMany({
+      where: { id: Number(req.params.id), businessProfileId: profile.id },
+      data: { active: false },
+    });
+    const settings = await getSettings();
+    res.json(await bookingDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.get("/book/:token", async (req, res) => {
+  try {
+    const link = await prisma.bookingLink.findUnique({
+      where: { clickToken: req.params.token },
+      include: { businessProfile: true },
+    });
+    if (!link || !link.active) return res.status(404).send("Booking link is unavailable");
+    await prisma.bookingLink.update({
+      where: { id: link.id },
+      data: { clickCount: { increment: 1 }, lastClickedAt: new Date() },
+    });
+    res.redirect(link.url);
+  } catch (error) {
+    res.status(400).send(error.message);
+  }
+});
+
+app.post("/webhooks/vagaro", async (req, res) => {
+  const event = req.body || {};
+  const payload = event.payload || {};
+  const eventId = String(event.id || req.body?.eventId || crypto.randomUUID()).trim();
+  const externalBusinessId = String(payload.businessId || event.businessId || "").trim();
+  let webhookEvent = null;
+  try {
+    const connection = await prisma.bookingConnection.findFirst({
+      where: {
+        provider: "vagaro",
+        status: "active",
+        ...(externalBusinessId ? { externalBusinessId } : {}),
+      },
+    });
+    if (!connection) throw new Error("No active Vagaro connection matched this webhook");
+    const expectedSecret = decryptOptional(connection.webhookSecretEncrypted);
+    const receivedSecret = String(req.get("x-vagaro-signature") || req.query.token || "").trim();
+    if (expectedSecret && receivedSecret !== expectedSecret) {
+      throw new Error("Invalid Vagaro webhook signature");
+    }
+    webhookEvent = await prisma.bookingWebhookEvent.upsert({
+      where: { provider_eventId: { provider: "vagaro", eventId } },
+      create: {
+        businessProfileId: connection.businessProfileId,
+        connectionId: connection.id,
+        provider: "vagaro",
+        eventId,
+        eventType: event.type || null,
+        action: event.action || null,
+        externalBusinessId,
+        status: "received",
+        payload: event,
+      },
+      update: {
+        status: "duplicate",
+        payload: event,
+      },
+    });
+    if (webhookEvent.status === "duplicate") return res.json({ ok: true, duplicate: true });
+    await processVagaroWebhookEvent(webhookEvent, connection);
+    res.json({ ok: true });
+  } catch (error) {
+    if (webhookEvent) {
+      await prisma.bookingWebhookEvent.update({
+        where: { id: webhookEvent.id },
+        data: { status: "failed", error: error.message, processedAt: new Date() },
+      }).catch(() => {});
+    }
+    console.warn(`[vagaro] webhook failed: ${error.message}`);
+    res.status(400).json({ ok: false, error: error.message });
+  }
+});
+
 app.put("/api/business-admin/profile", async (req, res) => {
   try {
     const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
@@ -9165,6 +10043,11 @@ app.get("/api/business-admin/calendar", async (req, res) => {
       fromDate: req.query.from,
       days: Math.min(60, Number(req.query.days || 14)),
       durationMinutes: req.query.duration,
+      serviceId: req.query.service_id,
+      serviceName: req.query.service_name,
+      professionalId: req.query.professional_id,
+      professionalName: req.query.professional_name,
+      ...bookingProviderHelpers(),
     });
     res.json(availability);
   } catch (error) {
@@ -9175,6 +10058,7 @@ app.get("/api/business-admin/calendar", async (req, res) => {
 app.post("/api/business-admin/appointments", async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    if (config.calendarProvider === "vagaro") throw new Error("Vagaro calendars are read-only in RingPort. Send the booking link instead.");
     const customerName = String(req.body.customerName || req.body.name || "").trim();
     if (!customerName) throw new Error("Customer name is required");
     const appointment = await bookCalendarAppointment({
@@ -9212,6 +10096,7 @@ app.patch("/api/business-admin/appointments/:id", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    if (config.calendarProvider === "vagaro") throw new Error("Vagaro calendars are read-only in RingPort. Use the Vagaro cancel/reschedule link.");
     const existing = await prisma.appointment.findFirst({
       where: { id: Number(req.params.id), businessName: profile.businessName, website: profile.website },
     });
@@ -9262,6 +10147,7 @@ app.post("/api/business-admin/appointments/:id/cancel", async (req, res) => {
   try {
     const identity = adminRequestIdentity(req);
     const { profile, config } = await adminContext(identity.businessName, identity.website, req.user);
+    if (config.calendarProvider === "vagaro") throw new Error("Vagaro calendars are read-only in RingPort. Use the Vagaro cancel/reschedule link.");
     const existing = await prisma.appointment.findFirst({
       where: { id: Number(req.params.id), businessName: profile.businessName, website: profile.website },
     });

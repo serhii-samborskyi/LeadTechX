@@ -319,11 +319,70 @@
               <h3>Calendar</h3>
               <p>Set appointment rules and see booked or requested times.</p>
             </div>
+            <div class="crm-webhook-card booking-provider-card">
+              <div>
+                <h4>Booking system</h4>
+                <p>Use RingPort's internal calendar or connect an external booking system.</p>
+              </div>
+              <div class="form-grid booking-provider-grid">
+                <label>Provider<select id="calendarProvider"><option value="internal">RingPort calendar</option><option value="vagaro">Vagaro</option></select></label>
+                <label>Region<input id="vagaroRegion" placeholder="us02" /></label>
+                <label>Vagaro business ID<input id="vagaroBusinessId" /></label>
+                <label>Business group ID<input id="vagaroGroupId" /></label>
+                <label class="wide-field">Main booking link<input id="vagaroBookingUrl" type="url" placeholder="https://www.vagaro.com/..." /></label>
+                <label class="wide-field">Cancel/reschedule link<input id="vagaroManageUrl" type="url" placeholder="https://www.vagaro.com/..." /></label>
+                <label>API client ID<input id="vagaroClientId" /></label>
+                <label>API client secret<input id="vagaroClientSecret" type="password" placeholder="Leave blank to keep current" /></label>
+                <label>Access token<input id="vagaroAccessToken" type="password" placeholder="Optional; leave blank to auto-generate" /></label>
+                <label>Webhook token<input id="vagaroWebhookSecret" type="password" placeholder="Leave blank to keep current" /></label>
+              </div>
+              <div class="crm-webhook-controls booking-provider-actions">
+                <input id="vagaroWebhookUrl" readonly placeholder="Save Vagaro settings to generate webhook URL" />
+                <button id="copyVagaroWebhookButton" type="button">Copy webhook</button>
+                <button id="saveVagaroSettingsButton" class="primary" type="button">Save booking system</button>
+                <button id="syncVagaroButton" type="button">Sync services</button>
+              </div>
+              <small id="vagaroStatus">Vagaro is not connected.</small>
+            </div>
+            <div class="crm-webhook-card booking-directory-card">
+              <div>
+                <h4>Services, professionals, and links</h4>
+                <p>Imported services and staff help the receptionist search availability and send the best booking link.</p>
+              </div>
+              <div class="inline-editor booking-link-editor">
+                <input id="bookingLinkLabel" placeholder="Link label" />
+                <input id="bookingLinkUrl" type="url" placeholder="https://..." />
+                <select id="bookingLinkService"><option value="">Any service</option></select>
+                <select id="bookingLinkProfessional"><option value="">Any professional</option></select>
+                <input id="bookingLinkSort" type="number" step="1" placeholder="Order" />
+                <button id="addBookingLinkButton" type="button">Add link</button>
+              </div>
+              <div class="booking-directory-grid">
+                <div>
+                  <h4>Services</h4>
+                  <div class="data-list compact-list" id="bookingServiceList"></div>
+                </div>
+                <div>
+                  <h4>Professionals</h4>
+                  <div class="data-list compact-list" id="bookingProfessionalList"></div>
+                </div>
+                <div>
+                  <h4>Booking links</h4>
+                  <div class="data-list compact-list" id="bookingLinkList"></div>
+                </div>
+              </div>
+              <div>
+                <h4>Recent Vagaro webhook events</h4>
+                <div class="data-list compact-list" id="vagaroWebhookEvents"></div>
+              </div>
+            </div>
             <div class="form-grid calendar-settings">
               <label>Booking mode<select id="appointmentMode"><option value="instant">Book immediately</option><option value="request">Pending request</option></select></label>
               <label>Slot duration (minutes)<input id="slotDuration" type="number" min="5" step="5" /></label>
               <label>Buffer (minutes)<input id="bufferMinutes" type="number" min="0" step="5" /></label>
               <label>Timezone<input id="calendarTimezone" value="America/Chicago" /></label>
+              <label>Service filter<select id="calendarServiceFilter"><option value="">First available service</option></select></label>
+              <label>Professional filter<select id="calendarProfessionalFilter"><option value="">Any professional</option></select></label>
             </div>
             <div class="availability-list" id="availabilityRules"></div>
             <div class="crm-webhook-card appointment-editor-card">
