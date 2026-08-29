@@ -18,6 +18,7 @@ const website = normalizeWebsiteInput(params.get("website"));
 const placeId = (params.get("place_id") || "").trim();
 const accessTokenFromUrl = (params.get("token") || params.get("access_token") || "").trim();
 const claimToken = (params.get("claim_token") || "").trim();
+const emailParam = (params.get("email") || params.get("owner_email") || params.get("ownerEmail") || "").trim();
 const requestedPlan = (params.get("plan") || params.get("plan_slug") || params.get("subscription_plan") || "").trim();
 const requestedPeriod = normalizeBillingPeriodInput(params.get("period") || params.get("billing_period") || params.get("billingPeriod"));
 const storageKey = placeId
@@ -114,6 +115,7 @@ const el = Object.fromEntries(
 
 if (el.planInput) el.planInput.value = requestedPlan;
 if (el.periodInput) el.periodInput.value = String(state.billingPeriodMonths);
+if (el.claimEmail && emailParam) el.claimEmail.value = emailParam;
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -700,6 +702,18 @@ async function saveProfile({ silent = false } = {}) {
   }
 }
 
+function renderTrialState(profile) {
+  const isTrial = profile?.accountStatus === "trial" && profile.trialEndsAt;
+  if (isTrial) {
+    const endsAt = new Date(profile.trialEndsAt);
+    el.trialBadge.textContent = `Trial until ${endsAt.toLocaleDateString()}`;
+    el.credits.textContent = `${profile.creditBalance || 0} credits`;
+    return;
+  }
+  el.trialBadge.textContent = "Demo ready";
+  el.credits.textContent = "Trial starts after email";
+}
+
 function renderAgent(data) {
   state.profile = data.profile;
   if (data.profile?.subscriptionPlanId) {
@@ -712,9 +726,7 @@ function renderAgent(data) {
   el.agentScreen.hidden = false;
   el.agentTitle.textContent = `RingPort for ${data.profile.businessName}`;
   renderProfileFields(data.profile);
-  el.credits.textContent = `${data.profile.creditBalance} credits`;
-  const endsAt = new Date(data.profile.trialEndsAt);
-  el.trialBadge.textContent = `Trial until ${endsAt.toLocaleDateString()}`;
+  renderTrialState(data.profile);
   el.demoPhone.textContent = data.demoPhoneNumber || "Browser call only";
   if (data.demoPhoneNumber) {
     el.demoPhone.href = `tel:${data.demoPhoneNumber}`;
@@ -732,7 +744,7 @@ function renderAgent(data) {
     el.finishSetupLink.href = `/set-password/?token=${encodeURIComponent(state.claimToken)}`;
     el.claimMessage.textContent = "Save any edits before finishing setup.";
   } else {
-    el.claimIntro.textContent = "Set your password from the secure link sent to your email.";
+    el.claimIntro.textContent = "Start your trial by sending a secure setup link to your email.";
     el.claimForm.hidden = false;
     el.finishSetupLink.hidden = true;
     el.claimMessage.textContent = "";
@@ -1009,11 +1021,9 @@ async function initialize() {
         plan: state.requestedPlan || undefined,
         plan_id: data.profile?.subscriptionPlanId || data.selectedPlan?.id || undefined,
         billing_period_months: state.billingPeriodMonths,
-        trial_credits: data.profile?.creditBalance,
       };
       const userData = data.profile?.id ? { externalId: `business:${data.profile.id}` } : {};
       trackAdEvent("fastagent_agent_built", customData, userData);
-      trackAdEvent("trial_started", customData, userData);
     }
   } catch (error) {
     showError(error.message);
@@ -1066,6 +1076,30 @@ el.claimForm.addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ accessToken: state.accessToken, email: el.claimEmail.value }),
     });
+    if (data.profile) {
+      state.profile = data.profile;
+      renderTrialState(data.profile);
+    }
+    if (data.trial?.started) {
+      trackAdEvent(
+        "trial_started",
+        data.trackingCustomData || {
+          content_name: data.profile?.businessName || state.profile?.businessName || businessName,
+          business_profile_id: data.profile?.id || state.profile?.id,
+          website: data.profile?.website || state.profile?.website || website || undefined,
+          plan: state.requestedPlan || undefined,
+          plan_id: data.profile?.subscriptionPlanId || state.profile?.subscriptionPlanId || undefined,
+          billing_period_months: state.billingPeriodMonths,
+          trial_credits: data.profile?.creditBalance || state.profile?.creditBalance,
+          value: 0,
+          currency: "USD",
+        },
+        {
+          email: el.claimEmail.value,
+          ...(data.profile?.id || state.profile?.id ? { externalId: `business:${data.profile?.id || state.profile?.id}` } : {}),
+        },
+      );
+    }
     el.claimMessage.textContent = data.message;
     if (data.setupUrl) {
       const link = document.createElement("a");

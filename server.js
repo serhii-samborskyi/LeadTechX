@@ -4451,8 +4451,70 @@ function enforceOnboardingRateLimit(req) {
   onboardingAttempts.set(key, recent);
 }
 
+function fastAgentAccessExpiresAt(profile, settings) {
+  const now = Date.now();
+  const trialEndsAt = profile?.trialEndsAt ? new Date(profile.trialEndsAt) : null;
+  if (trialEndsAt && trialEndsAt.getTime() > now) return trialEndsAt;
+  const fallbackDays = Math.max(1, Math.round(Number(settings?.claimLinkDays || settings?.trialDays || 7)));
+  return new Date(now + fallbackDays * 86400000);
+}
+
+async function startBusinessTrial({ businessProfileId, settings, source = "trial" }) {
+  const profileId = Number(businessProfileId);
+  if (!profileId) throw new Error("Business profile was not found");
+  const now = new Date();
+  const trialDays = Math.max(1, Math.round(Number(settings?.trialDays || 7)));
+  const trialEndsAt = new Date(now.getTime() + trialDays * 86400000);
+  const trialCredits = Math.max(0, Math.round(Number(settings?.trialCredits || 0)));
+  const startResult = await prisma.businessProfile.updateMany({
+    where: {
+      id: profileId,
+      archivedAt: null,
+      trialStartedAt: null,
+      OR: [
+        { accountStatus: "unclaimed" },
+        { accountStatus: "expired" },
+        { accountStatus: "trial", OR: [{ trialEndsAt: null }, { trialEndsAt: { lte: now } }] },
+      ],
+    },
+    data: {
+      accountStatus: "trial",
+      trialStartedAt: now,
+      trialEndsAt,
+      creditBalance: trialCredits,
+    },
+  });
+  let profile = await prisma.businessProfile.findUnique({ where: { id: profileId } });
+  if (!profile) throw new Error("Business profile was not found");
+  if (!startResult.count) return { profile, started: false };
+
+  await recordCreditGrant({
+    businessProfileId: profileId,
+    amount: trialCredits,
+    note: "Trial credits granted",
+    sourceType: "trial",
+    expiresAt: trialEndsAt,
+    metadata: { source, trialStartedAt: now.toISOString(), trialDays },
+  }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
+
+  await Promise.all([
+    prisma.fastAgentSession.updateMany({
+      where: { businessProfileId: profileId, expiresAt: { lt: trialEndsAt } },
+      data: { expiresAt: trialEndsAt },
+    }),
+    prisma.demoNumberAssignment.updateMany({
+      where: { businessProfileId: profileId },
+      data: { expiresAt: trialEndsAt },
+    }),
+  ]);
+
+  profile = await prisma.businessProfile.findUnique({ where: { id: profileId } });
+  return { profile, started: true, trialStartedAt: now, trialEndsAt };
+}
+
 async function allocateDemoNumber(profile, settings) {
   const now = new Date();
+  const expiresAt = fastAgentAccessExpiresAt(profile, settings);
   await prisma.demoNumberAssignment.deleteMany({ where: { expiresAt: { lte: now } } });
   const numbers = await prisma.voiceNumber.findMany({
     where: { numberType: "demo", status: "active" },
@@ -4471,12 +4533,12 @@ async function allocateDemoNumber(profile, settings) {
     create: {
       voiceNumberId: available.id,
       businessProfileId: profile.id,
-      expiresAt: profile.trialEndsAt,
+      expiresAt,
       status: "waiting",
     },
     update: {
       voiceNumberId: available.id,
-      expiresAt: profile.trialEndsAt,
+      expiresAt,
       status: "waiting",
       callerBindings: { deleteMany: {} },
     },
@@ -5434,7 +5496,6 @@ async function provisionTrialBusiness({ businessName, website, settings }) {
   if (!normalizedName) throw new Error("Business name is required before building the agent");
   const normalizedWebsite = normalizeWebsite(website);
   const existing = await findBusinessMatch(normalizedName, normalizedWebsite);
-  const activeTrial = existing?.accountStatus === "trial" && existing.trialEndsAt > new Date();
   if (existing && (existing.users.length || existing.accountStatus === "paid")) {
     return { claimed: true, profile: null, accessToken: null, demoAssignment: null, cached: true };
   }
@@ -5442,30 +5503,10 @@ async function provisionTrialBusiness({ businessName, website, settings }) {
     ? { profile: existing, cached: true }
     : await researchBusiness({ businessName: normalizedName, website: normalizedWebsite, researchModel: settings.researchModel });
   let profile = researched.profile;
-  if (!activeTrial) {
-    const trialStartedAt = new Date();
-    profile = await prisma.businessProfile.update({
-      where: { id: profile.id },
-      data: {
-        accountStatus: "trial",
-        trialStartedAt,
-        trialEndsAt: new Date(trialStartedAt.getTime() + settings.trialDays * 86400000),
-        creditBalance: settings.trialCredits,
-      },
-    });
-    await recordCreditGrant({
-      businessProfileId: profile.id,
-      amount: settings.trialCredits,
-      note: "Trial credits granted",
-      sourceType: "trial",
-      expiresAt: profile.trialEndsAt,
-      metadata: { source: "phone_onboarding", trialStartedAt: trialStartedAt.toISOString(), trialDays: settings.trialDays },
-    }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
-  }
   await ensureBusinessConfig(profile);
   const access = issueToken();
   await prisma.fastAgentSession.create({
-    data: { tokenHash: access.tokenHash, businessProfileId: profile.id, expiresAt: profile.trialEndsAt },
+    data: { tokenHash: access.tokenHash, businessProfileId: profile.id, expiresAt: fastAgentAccessExpiresAt(profile, settings) },
   });
   let demoAssignment = await prisma.demoNumberAssignment.findUnique({
     where: { businessProfileId: profile.id },
@@ -5945,24 +5986,33 @@ async function createPhoneClaimLink({ profile, email, settings }) {
       expiresAt: claimExpiresAt,
     },
   });
+  let linkedProfile = profile;
+  if (hasEmail) {
+    const trial = await startBusinessTrial({
+      businessProfileId: profile.id,
+      settings,
+      source: "phone_onboarding_email_claim",
+    });
+    linkedProfile = trial.profile;
+  }
   const baseUrl = String(settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
   if (!/^https?:\/\//i.test(baseUrl)) throw new Error("Public base URL is not configured");
   await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
   const access = issueToken();
-  const trialEndsAt = profile.trialEndsAt instanceof Date ? profile.trialEndsAt : profile.trialEndsAt ? new Date(profile.trialEndsAt) : null;
+  const trialEndsAt = linkedProfile.trialEndsAt instanceof Date ? linkedProfile.trialEndsAt : linkedProfile.trialEndsAt ? new Date(linkedProfile.trialEndsAt) : null;
   const fastAgentExpiresAt = trialEndsAt && trialEndsAt > claimExpiresAt ? trialEndsAt : claimExpiresAt;
   await prisma.fastAgentSession.create({
     data: {
       tokenHash: access.tokenHash,
-      businessProfileId: profile.id,
+      businessProfileId: linkedProfile.id,
       expiresAt: fastAgentExpiresAt,
     },
   });
   const setupUrl = new URL("/fastagent/", baseUrl);
   setupUrl.searchParams.set("token", access.token);
   setupUrl.searchParams.set("claim_token", claim.token);
-  setupUrl.searchParams.set("business_name", profile.businessName);
-  if (profile.website) setupUrl.searchParams.set("website", profile.website);
+  setupUrl.searchParams.set("business_name", linkedProfile.businessName);
+  if (linkedProfile.website) setupUrl.searchParams.set("website", linkedProfile.website);
   const passwordSetupUrl = `${baseUrl}/set-password/?token=${encodeURIComponent(claim.token)}`;
   return {
     email: hasEmail ? normalizedEmail : null,
@@ -7278,34 +7328,13 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
       });
     }
     const profileActiveTrial = profile.accountStatus === "trial" && profile.trialEndsAt > new Date();
-    if (!profileActiveTrial) {
-      const trialStartedAt = new Date();
-      const trialEndsAt = new Date(trialStartedAt.getTime() + settings.trialDays * 24 * 60 * 60 * 1000);
-      profile = await prisma.businessProfile.update({
-        where: { id: researched.profile.id },
-        data: {
-          accountStatus: "trial",
-          trialStartedAt,
-          trialEndsAt,
-          creditBalance: settings.trialCredits,
-        },
-      });
-      await recordCreditGrant({
-        businessProfileId: profile.id,
-        amount: settings.trialCredits,
-        note: "Trial credits granted",
-        sourceType: "trial",
-        expiresAt: profile.trialEndsAt,
-        metadata: { source: "browser_demo", trialStartedAt: trialStartedAt.toISOString(), trialDays: settings.trialDays },
-      }).catch((error) => console.warn(`[usage] trial credit grant skipped: ${error.message}`));
-    }
     const planAssignment = await assignRequestedPlanIfAvailable(profile, requestedPlan);
     profile = planAssignment.profile;
     const config = await ensureBusinessConfig(profile);
     await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
     const access = issueToken();
     await prisma.fastAgentSession.create({
-      data: { tokenHash: access.tokenHash, businessProfileId: profile.id, expiresAt: profile.trialEndsAt },
+      data: { tokenHash: access.tokenHash, businessProfileId: profile.id, expiresAt: fastAgentAccessExpiresAt(profile, settings) },
     });
     let demoAssignment = await prisma.demoNumberAssignment.findUnique({
       where: { businessProfileId: profile.id },
@@ -7319,6 +7348,7 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
       cached: researched.cached,
       profile: publicBusinessProfile(profile, config),
       trial: {
+        started: profileActiveTrial,
         days: settings.trialDays,
         endsAt: profile.trialEndsAt,
         credits: profile.creditBalance,
@@ -7342,7 +7372,7 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
   let sessionProfile = session.businessProfile;
   let selectedPlan = requestedPlan ? await planWithSignupUsage(requestedPlan) : null;
   let planUnavailable = null;
-  if (requestedPlan && sessionProfile.accountStatus === "trial" && sessionProfile.subscriptionPlanId !== requestedPlan.id) {
+  if (requestedPlan && ["unclaimed", "trial"].includes(sessionProfile.accountStatus) && sessionProfile.subscriptionPlanId !== requestedPlan.id) {
     const alreadyClaimed = await prisma.user.findFirst({ where: { businessProfileId: session.businessProfileId }, select: { id: true } });
     if (!alreadyClaimed) {
       const planAssignment = await assignRequestedPlanIfAvailable(sessionProfile, requestedPlan);
@@ -7355,7 +7385,7 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
     where: { businessProfileId: session.businessProfileId },
     include: { voiceNumber: true, callerBindings: { orderBy: { createdAt: "asc" } } },
   });
-  if (!assignment) {
+  if (!assignment || assignment.expiresAt <= new Date()) {
     await allocateDemoNumber(sessionProfile, settings);
     assignment = await prisma.demoNumberAssignment.findUnique({
       where: { businessProfileId: session.businessProfileId },
@@ -7404,7 +7434,9 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
   try {
     const session = await fastAgentSession(req.body.accessToken);
     if (!session) return res.status(401).json({ error: "This demo session is invalid or expired" });
-    if (session.businessProfile.accountStatus !== "trial") throw new Error("This demo profile can no longer be edited here");
+    if (!["unclaimed", "trial"].includes(session.businessProfile.accountStatus)) {
+      throw new Error("This demo profile can no longer be edited here");
+    }
     if (await prisma.user.findFirst({ where: { businessProfileId: session.businessProfileId } })) {
       throw new Error("This business has already been claimed");
     }
@@ -7655,7 +7687,7 @@ app.post("/api/onboarding/demo-callers", async (req, res) => {
       assignment.callerBindings.length >= settings.demoCallerLimit &&
       !assignment.callerBindings.some((binding) => binding.callerPhone === callerPhone)
     ) {
-      throw new Error(`This trial already has ${settings.demoCallerLimit} caller numbers`);
+      throw new Error(`This demo already has ${settings.demoCallerLimit} caller numbers`);
     }
     await prisma.demoCallerBinding.deleteMany({ where: { callerPhone } });
     await prisma.demoCallerBinding.create({ data: { demoNumberAssignmentId: assignment.id, callerPhone } });
@@ -7687,17 +7719,43 @@ app.post("/api/onboarding/claim", async (req, res) => {
     await prisma.accountClaimToken.create({
       data: { tokenHash: claim.tokenHash, email, businessProfileId: session.businessProfileId, expiresAt },
     });
+    const trial = await startBusinessTrial({
+      businessProfileId: session.businessProfileId,
+      settings,
+      source: "fastagent_email_claim",
+    });
+    const config = await ensureBusinessConfig(trial.profile);
     const setupUrl = `${requestBaseUrl(req, settings)}/set-password/?token=${encodeURIComponent(claim.token)}`;
     const delivered = await sendClaimEmail({
       settings,
       email,
       setupUrl,
-      businessName: session.businessProfile.businessName,
+      businessName: trial.profile.businessName,
     });
+    const trackingCustomData = trial.started
+      ? {
+          content_name: trial.profile.businessName,
+          business_profile_id: trial.profile.id,
+          website: trial.profile.website || undefined,
+          plan_id: trial.profile.subscriptionPlanId || "trial",
+          trial_credits: trial.profile.creditBalance,
+          value: 0,
+          currency: "USD",
+        }
+      : null;
     res.json({
       ok: true,
       delivered,
       message: delivered ? "Check your email to finish setting up your account." : "SMTP is not configured yet.",
+      profile: publicBusinessProfile(trial.profile, config),
+      trial: {
+        started: trial.started,
+        days: settings.trialDays,
+        endsAt: trial.profile.trialEndsAt,
+        credits: trial.profile.creditBalance,
+        tokenUsd: settings.tokenUsd,
+      },
+      ...(trackingCustomData ? { trackingCustomData } : {}),
       ...(process.env.NODE_ENV !== "production" && !delivered ? { setupUrl } : {}),
     });
   } catch (error) {
@@ -7753,9 +7811,15 @@ app.post("/api/onboarding/complete", async (req, res) => {
     const session = issueToken();
     const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
     await prisma.session.create({ data: { tokenHash: session.tokenHash, userId: user.id, expiresAt } });
+    const settings = await getSettings();
+    const trial = await startBusinessTrial({
+      businessProfileId: claim.businessProfileId,
+      settings,
+      source: "account_setup",
+    });
     setSessionCookie(req, res, session.token);
     res.status(201).json({
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, business: user.businessProfile },
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, business: trial.profile || user.businessProfile },
     });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -14183,8 +14247,13 @@ wss.on("connection", (clientWs, request) => {
         if (message.demoToken) {
           const demoSession = await fastAgentSession(message.demoToken);
           if (!demoSession) throw new Error("This demo session is invalid or expired");
-          if (demoSession.businessProfile.accountStatus !== "trial") throw new Error("This demo is no longer active");
-          if (demoSession.businessProfile.creditBalance <= 0) throw new Error("This trial has no credits remaining");
+          const demoStatus = String(demoSession.businessProfile.accountStatus || "").toLowerCase();
+          if (!["unclaimed", "trial"].includes(demoStatus)) throw new Error("This demo is no longer active");
+          if (demoStatus === "trial") {
+            const trialEndsAt = demoSession.businessProfile.trialEndsAt ? new Date(demoSession.businessProfile.trialEndsAt) : null;
+            if (!trialEndsAt || trialEndsAt <= new Date()) throw new Error("This trial has expired");
+            if (demoSession.businessProfile.creditBalance <= 0) throw new Error("This trial has no credits remaining");
+          }
           result = { profile: demoSession.businessProfile, cached: true };
         } else {
           const socketUser = await socketUserPromise;
