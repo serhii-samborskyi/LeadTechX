@@ -383,6 +383,15 @@ function cookieValue(req, name) {
   return null;
 }
 
+function bearerToken(req) {
+  const match = String(req.headers.authorization || "").match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || "";
+}
+
+function requestSessionToken(req) {
+  return bearerToken(req) || cookieValue(req, SESSION_COOKIE);
+}
+
 function sessionTokenHash(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
@@ -426,7 +435,7 @@ function publicBusinessProfile(profile, config = null) {
 }
 
 async function currentUser(req) {
-  const token = cookieValue(req, SESSION_COOKIE);
+  const token = requestSessionToken(req);
   if (!token) return null;
   const session = await prisma.session.findUnique({
     where: { tokenHash: sessionTokenHash(token) },
@@ -5096,6 +5105,122 @@ async function sendClaimEmail({ settings, email, setupUrl, businessName }) {
   return true;
 }
 
+const MOBILE_ANONYMOUS_VOICE_LIMIT_SECONDS = 5 * 60;
+const MOBILE_EMAIL_CODE_TTL_MINUTES = 15;
+const MOBILE_EMAIL_CODE_MAX_ATTEMPTS = 5;
+
+function cleanMobileDeviceId(value) {
+  const deviceId = String(value || "").trim();
+  if (!/^[A-Za-z0-9._:-]{16,180}$/.test(deviceId)) {
+    throw new Error("A valid mobile device id is required");
+  }
+  return deviceId;
+}
+
+function mobileDeviceHash(value) {
+  return crypto.createHash("sha256").update(`ringport-mobile-device:${cleanMobileDeviceId(value)}`).digest("hex");
+}
+
+function normalizedEmailAddress(value) {
+  const email = String(value || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Enter a valid email address");
+  return email;
+}
+
+function verificationCodeHash({ email, code, purpose, businessProfileId }) {
+  return crypto
+    .createHmac("sha256", encryptionKey())
+    .update([purpose, businessProfileId || 0, email, String(code || "").trim()].join("|"))
+    .digest("hex");
+}
+
+function issueVerificationCode() {
+  return String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+}
+
+function businessNameFromWebsite(website) {
+  const normalized = normalizeWebsite(website);
+  if (!normalized) return "";
+  try {
+    const hostname = new URL(normalized).hostname.toLowerCase().replace(/^www\./, "");
+    const label = hostname.split(".").filter(Boolean)[0] || hostname;
+    return label
+      .replace(/[-_]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  } catch {
+    return "";
+  }
+}
+
+async function sendVerificationCodeEmail({ settings, email, code, businessName }) {
+  const smtpUser = await systemSecret("smtp_username", "SMTP_USERNAME");
+  const smtpPassword = await systemSecret("smtp_password", "SMTP_PASSWORD");
+  if (!settings.smtpHost || !settings.smtpFromEmail) return false;
+  const transporter = nodemailer.createTransport({
+    host: settings.smtpHost,
+    port: settings.smtpPort,
+    secure: settings.smtpSecure,
+    auth: smtpUser ? { user: smtpUser, pass: smtpPassword } : undefined,
+  });
+  await transporter.sendMail({
+    from: { name: settings.smtpFromName || "RingPort", address: settings.smtpFromEmail },
+    to: email,
+    subject: `Your RingPort verification code`,
+    text: `Use this code to finish setting up your RingPort agent for ${businessName}:\n\n${code}\n\nThis code expires in ${MOBILE_EMAIL_CODE_TTL_MINUTES} minutes.`,
+    html: `<p>Use this code to finish setting up your RingPort agent for <strong>${htmlEscape(businessName)}</strong>:</p><p style="font-size:28px;font-weight:700;letter-spacing:4px">${code}</p><p>This code expires in ${MOBILE_EMAIL_CODE_TTL_MINUTES} minutes.</p>`,
+  });
+  return true;
+}
+
+async function mobileVoiceQuotaStatus(deviceId) {
+  const deviceHash = mobileDeviceHash(deviceId);
+  const quota = await prisma.mobileDeviceVoiceQuota.upsert({
+    where: { deviceHash },
+    create: { deviceHash },
+    update: {},
+  });
+  const usedSeconds = Math.max(0, Number(quota.anonymousVoiceSeconds || 0));
+  const remainingSeconds = Math.max(0, MOBILE_ANONYMOUS_VOICE_LIMIT_SECONDS - usedSeconds);
+  return {
+    limitSeconds: MOBILE_ANONYMOUS_VOICE_LIMIT_SECONDS,
+    usedSeconds,
+    remainingSeconds,
+  };
+}
+
+async function markMobilePreviewVoiceStarted(deviceId) {
+  const deviceHash = mobileDeviceHash(deviceId);
+  const quota = await mobileVoiceQuotaStatus(deviceId);
+  if (quota.remainingSeconds <= 0) {
+    throw new Error("Enter your email to keep testing this receptionist.");
+  }
+  await prisma.mobileDeviceVoiceQuota.update({
+    where: { deviceHash },
+    data: { lastSessionStartedAt: new Date() },
+  });
+  return quota;
+}
+
+async function recordMobilePreviewVoiceUsage(deviceId, startedAt, endedAt = new Date()) {
+  if (!deviceId || !startedAt) return null;
+  const deviceHash = mobileDeviceHash(deviceId);
+  const seconds = Math.max(0, Math.ceil((new Date(endedAt).getTime() - new Date(startedAt).getTime()) / 1000));
+  if (!seconds) return mobileVoiceQuotaStatus(deviceId);
+  const current = await prisma.mobileDeviceVoiceQuota.upsert({
+    where: { deviceHash },
+    create: { deviceHash, anonymousVoiceSeconds: Math.min(MOBILE_ANONYMOUS_VOICE_LIMIT_SECONDS, seconds) },
+    update: {},
+  });
+  const nextSeconds = Math.min(MOBILE_ANONYMOUS_VOICE_LIMIT_SECONDS, Math.max(0, Number(current.anonymousVoiceSeconds || 0)) + seconds);
+  await prisma.mobileDeviceVoiceQuota.update({
+    where: { deviceHash },
+    data: { anonymousVoiceSeconds: nextSeconds },
+  });
+  return mobileVoiceQuotaStatus(deviceId);
+}
+
 async function sendTrackedEmail({
   settings,
   profile = null,
@@ -7826,6 +7951,493 @@ app.post("/api/onboarding/complete", async (req, res) => {
   }
 });
 
+function mobileSessionUser(user) {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    business: user.businessProfile ? publicBusinessProfile(user.businessProfile, user.businessProfile.config) : null,
+  };
+}
+
+function requireBusinessMobileUser(req, res, next) {
+  if (req.user?.role !== "business") return res.status(403).json({ error: "Business account access required" });
+  next();
+}
+
+function mobileAppStoreConfig() {
+  return {
+    appName: "RingPort AI Receptionist",
+    subtitle: "AI sales rep for calls",
+    primaryCategory: "Business",
+    termsUrl: "https://ringport.app/terms.html",
+    privacyUrl: "https://ringport.app/privacy.html",
+    backendUrl: "https://ai.ringport.app",
+    billing: {
+      provider: "stripe",
+      iosExternalCheckoutMode: "region_gated",
+      iosStripeCheckoutAllowedCountries: ["US"],
+      androidStripeCheckout: true,
+    },
+    onboarding: {
+      steps: ["find_business", "build_agent", "review_profile", "test_call", "claim_account"],
+      anonymousVoiceLimitSeconds: MOBILE_ANONYMOUS_VOICE_LIMIT_SECONDS,
+      emailCodeTtlMinutes: MOBILE_EMAIL_CODE_TTL_MINUTES,
+    },
+  };
+}
+
+function mobileModuleDescriptors({ profile, config, admin }) {
+  const phoneNumbers = admin?.phoneNumbers || [];
+  const entitlements = admin?.entitlements || {};
+  const planUsage = admin?.planUsage || {};
+  const hasCalendarConnection = Boolean(config?.bookingConnections?.some((connection) => connection.status === "active"));
+  return [
+    {
+      id: "business_profile",
+      title: "Business profile",
+      summary: "Public details the receptionist uses during calls.",
+      status: profile?.summary ? "ready" : "needs_setup",
+      fields: [
+        { key: "businessName", label: "Business name", type: "text", value: profile?.businessName || "", required: true },
+        { key: "website", label: "Website", type: "url", value: profile?.website || "" },
+        { key: "summary", label: "Summary", type: "textarea", value: profile?.summary || "" },
+        { key: "hours", label: "Hours", type: "textarea", value: profile?.hours || "" },
+        { key: "services", label: "Services", type: "textarea", value: profile?.services || "" },
+        { key: "serviceArea", label: "Service area", type: "textarea", value: profile?.serviceArea || "" },
+      ],
+      actions: [{ id: "save_profile", label: "Save profile", method: "PUT" }],
+    },
+    {
+      id: "agent_settings",
+      title: "Agent settings",
+      summary: "Voice, language, name, and operating instructions.",
+      status: config?.agentName ? "ready" : "default",
+      fields: [
+        { key: "agentName", label: "Agent name", type: "text", value: config?.agentName || "Alex" },
+        { key: "language", label: "Language", type: "select", value: config?.language || "English" },
+        { key: "voiceName", label: "Voice", type: "select", value: config?.voiceName || "Puck" },
+        { key: "extraInstructions", label: "Agent instructions", type: "textarea", value: config?.extraInstructions || "" },
+      ],
+      actions: [{ id: "save_agent_settings", label: "Save settings", method: "PUT" }],
+    },
+    {
+      id: "calendar",
+      title: "Calendar",
+      summary: hasCalendarConnection ? "Booking integration is active." : "Connect booking providers and booking links.",
+      status: hasCalendarConnection ? "connected" : "not_connected",
+      actions: [
+        { id: "sync_calendar", label: "Sync calendar", method: "POST" },
+        { id: "add_booking_link", label: "Add booking link", method: "POST" },
+      ],
+    },
+    {
+      id: "messaging",
+      title: "Messages",
+      summary: "Customer replies, manual texts, reminders, and review requests.",
+      status: entitlements.features?.smartReviewsEnabled ? "automation_available" : "basic",
+      actions: [
+        { id: "send_message", label: "Send message", method: "POST" },
+        { id: "send_review_request", label: "Send review request", method: "POST" },
+      ],
+    },
+    {
+      id: "billing",
+      title: "Billing",
+      summary: "Plan, credits, and Stripe checkout.",
+      status: profile?.accountStatus || "unclaimed",
+      actions: [{ id: "open_checkout", label: "Open checkout", method: "POST", provider: "stripe" }],
+    },
+    {
+      id: "phone_numbers",
+      title: "Phone numbers",
+      summary: `${phoneNumbers.length} assigned number${phoneNumbers.length === 1 ? "" : "s"}.`,
+      status: planUsage.overLimit?.phoneNumbers ? "over_limit" : phoneNumbers.length ? "active" : "missing",
+      records: phoneNumbers,
+    },
+  ];
+}
+
+async function mobileDashboard(user) {
+  if (user.role !== "business") throw new Error("Mobile dashboard is available for business accounts");
+  const { profile, config } = await adminContext("", "", user);
+  const admin = await businessAdminResponse(profile, config);
+  const now = new Date();
+  const [leadCounts, recentLeads, upcomingAppointments, recentInboundMessages, recentOutboundMessages, recentCalls] =
+    await Promise.all([
+      prisma.lead.groupBy({
+        by: ["status"],
+        where: { businessProfileId: profile.id },
+        _count: { _all: true },
+      }).catch(() => []),
+      prisma.lead.findMany({
+        where: { businessProfileId: profile.id },
+        orderBy: { createdAt: "desc" },
+        take: 8,
+        select: { id: true, name: true, phone: true, email: true, need: true, status: true, source: true, summary: true, createdAt: true, updatedAt: true },
+      }),
+      prisma.bookingAppointment.findMany({
+        where: { businessProfileId: profile.id, scheduledStart: { gte: now } },
+        orderBy: { scheduledStart: "asc" },
+        take: 8,
+        select: {
+          id: true,
+          customerName: true,
+          phone: true,
+          email: true,
+          serviceTitle: true,
+          professionalName: true,
+          status: true,
+          bookingStatus: true,
+          scheduledStart: true,
+          scheduledEnd: true,
+          timezone: true,
+          manageUrl: true,
+        },
+      }),
+      prisma.messageInbound.findMany({
+        where: { businessProfileId: profile.id },
+        orderBy: { createdAt: "desc" },
+        take: 6,
+        select: { id: true, provider: true, fromPhone: true, toPhone: true, text: true, status: true, purpose: true, createdAt: true },
+      }),
+      prisma.messageDelivery.findMany({
+        where: { businessProfileId: profile.id },
+        orderBy: { createdAt: "desc" },
+        take: 6,
+        select: { id: true, provider: true, purpose: true, toPhone: true, status: true, error: true, createdAt: true },
+      }),
+      prisma.voiceCall.findMany({
+        where: { businessProfileId: profile.id },
+        orderBy: { startedAt: "desc" },
+        take: 8,
+        select: { id: true, provider: true, fromNumber: true, toNumber: true, status: true, callMode: true, transcript: true, startedAt: true, endedAt: true },
+      }),
+    ]);
+  return {
+    profile: publicBusinessProfile(profile, config),
+    phoneNumbers: admin.phoneNumbers,
+    entitlements: admin.entitlements,
+    planUsage: admin.planUsage,
+    modules: mobileModuleDescriptors({ profile, config, admin }),
+    metrics: {
+      creditBalance: profile.creditBalance,
+      accountStatus: profile.accountStatus,
+      newLeads: leadCounts.find((row) => row.status === "new")?._count?._all || 0,
+      totalLeads: leadCounts.reduce((sum, row) => sum + Number(row._count?._all || 0), 0),
+      upcomingAppointments: upcomingAppointments.length,
+      assignedNumbers: admin.phoneNumbers.length,
+    },
+    recent: {
+      leads: recentLeads,
+      appointments: upcomingAppointments,
+      inboundMessages: recentInboundMessages,
+      outboundMessages: recentOutboundMessages,
+      calls: recentCalls,
+    },
+  };
+}
+
+app.get("/api/mobile/bootstrap", (_req, res) => {
+  res.json(mobileAppStoreConfig());
+});
+
+app.post("/api/mobile/auth/login", async (req, res) => {
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const user = await prisma.user.findUnique({ where: { email }, include: { businessProfile: { include: { config: true } } } });
+    if (!user?.active || !passwordMatches(req.body.password, user.passwordHash)) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+    if (user.role !== "admin" && user.businessProfile?.archivedAt) {
+      return res.status(403).json({ error: "This business account is archived" });
+    }
+    const { token, tokenHash } = issueToken();
+    const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
+    await prisma.session.create({ data: { tokenHash, userId: user.id, expiresAt } });
+    setSessionCookie(req, res, token);
+    res.json({ token, expiresAt, user: mobileSessionUser(user) });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/mobile/auth/logout", requireAuth, async (req, res) => {
+  const token = requestSessionToken(req);
+  if (token) await prisma.session.deleteMany({ where: { tokenHash: sessionTokenHash(token) } });
+  res.setHeader("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.json({ ok: true });
+});
+
+app.get("/api/mobile/auth/me", requireAuth, (req, res) => {
+  res.json({ user: mobileSessionUser(req.user) });
+});
+
+app.post("/api/mobile/onboarding/agent", async (req, res) => {
+  try {
+    const placeId = cleanGooglePlaceId(req.body.placeId || req.body.place_id || req.query.place_id);
+    const website = normalizeWebsite(req.body.website || req.query.website);
+    const derivedName = businessNameFromWebsite(website);
+    const businessName = normalizeBusinessName(req.body.businessName || req.query.business_name || derivedName);
+    const requestedPlan = await activeSubscriptionPlanFromParam(
+      req.body.plan || req.body.planSlug || req.body.subscriptionPlan || req.query.plan,
+    );
+    if (!businessName && !placeId) throw new Error("Business name or website is required");
+
+    const settings = await getSettings();
+    const existing = placeId ? await findBusinessByGooglePlaceId(placeId) : await findBusinessMatch(businessName, website);
+    const activeTrial = existing?.accountStatus === "trial" && existing.trialEndsAt > new Date();
+    if (existing && (existing.users.length || existing.accountStatus === "paid")) {
+      return res.status(409).json({
+        error: "This business already has an account. Log in to access it.",
+        code: "BUSINESS_ALREADY_ACTIVE",
+      });
+    }
+    if (!activeTrial) enforceOnboardingRateLimit(req);
+
+    const researched = existing
+      ? { profile: existing, cached: true }
+      : placeId
+        ? await createOrUpdateBusinessFromPlace({
+            placeId,
+            businessName,
+            website,
+            researchModel: settings.researchModel,
+          })
+        : await researchBusiness({ businessName, website, researchModel: settings.researchModel });
+    let profile = researched.profile;
+    if (!existing && (profile.users?.length || profile.accountStatus === "paid")) {
+      return res.status(409).json({
+        error: "This business already has an account. Log in to access it.",
+        code: "BUSINESS_ALREADY_ACTIVE",
+      });
+    }
+    const profileActiveTrial = profile.accountStatus === "trial" && profile.trialEndsAt > new Date();
+    const planAssignment = await assignRequestedPlanIfAvailable(profile, requestedPlan);
+    profile = planAssignment.profile;
+    const config = await ensureBusinessConfig(profile);
+    await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
+    const access = issueToken();
+    await prisma.fastAgentSession.create({
+      data: { tokenHash: access.tokenHash, businessProfileId: profile.id, expiresAt: fastAgentAccessExpiresAt(profile, settings) },
+    });
+    let demoAssignment = await prisma.demoNumberAssignment.findUnique({
+      where: { businessProfileId: profile.id },
+      include: { voiceNumber: true },
+    });
+    if (!demoAssignment || demoAssignment.expiresAt <= new Date()) {
+      demoAssignment = await allocateDemoNumber(profile, settings);
+    }
+    const voiceQuota = req.body.deviceId ? await mobileVoiceQuotaStatus(req.body.deviceId) : null;
+    res.status(profileActiveTrial ? 200 : 201).json({
+      accessToken: access.token,
+      cached: researched.cached,
+      profile: publicBusinessProfile(profile, config),
+      trial: {
+        started: profileActiveTrial,
+        days: settings.trialDays,
+        endsAt: profile.trialEndsAt,
+        credits: profile.creditBalance,
+        tokenUsd: settings.tokenUsd,
+      },
+      voiceQuota,
+      demoPhoneNumber: demoAssignment?.voiceNumber.phoneNumber || null,
+      demoCallerLimit: settings.demoCallerLimit,
+      selectedPlan: publicSubscriptionPlan(planAssignment.selectedPlan),
+      planUnavailable: planAssignment.planUnavailable,
+    });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.get("/api/mobile/voice-quota", async (req, res) => {
+  try {
+    res.json(await mobileVoiceQuotaStatus(req.query.deviceId || req.query.device_id));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/mobile/onboarding/email-code", async (req, res) => {
+  try {
+    const session = await fastAgentSession(req.body.accessToken);
+    if (!session) return res.status(401).json({ error: "This agent session is invalid or expired" });
+    if (await prisma.user.findFirst({ where: { businessProfileId: session.businessProfileId } })) {
+      throw new Error("This business has already been claimed");
+    }
+    const email = normalizedEmailAddress(req.body.email);
+    if (await prisma.user.findUnique({ where: { email } })) throw new Error("That email already belongs to an account");
+    const settings = await getSettings();
+    const code = issueVerificationCode();
+    await prisma.emailVerificationCode.updateMany({
+      where: { email, businessProfileId: session.businessProfileId, purpose: "mobile_claim", usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    await prisma.emailVerificationCode.create({
+      data: {
+        email,
+        businessProfileId: session.businessProfileId,
+        purpose: "mobile_claim",
+        codeHash: verificationCodeHash({
+          email,
+          code,
+          purpose: "mobile_claim",
+          businessProfileId: session.businessProfileId,
+        }),
+        expiresAt: new Date(Date.now() + MOBILE_EMAIL_CODE_TTL_MINUTES * 60 * 1000),
+      },
+    });
+    const delivered = await sendVerificationCodeEmail({
+      settings,
+      email,
+      code,
+      businessName: session.businessProfile.businessName,
+    });
+    res.status(201).json({
+      ok: true,
+      delivered,
+      expiresInMinutes: MOBILE_EMAIL_CODE_TTL_MINUTES,
+      message: delivered ? "Verification code sent." : "SMTP is not configured yet.",
+      ...(process.env.NODE_ENV !== "production" && !delivered ? { code } : {}),
+    });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.post("/api/mobile/onboarding/verify-code", async (req, res) => {
+  try {
+    const session = await fastAgentSession(req.body.accessToken);
+    if (!session) return res.status(401).json({ error: "This agent session is invalid or expired" });
+    if (await prisma.user.findFirst({ where: { businessProfileId: session.businessProfileId } })) {
+      throw new Error("This business has already been claimed");
+    }
+    const email = normalizedEmailAddress(req.body.email);
+    const code = String(req.body.code || "").trim().replace(/\D/g, "");
+    const password = String(req.body.password || "");
+    if (code.length !== 6) throw new Error("Enter the 6-digit verification code");
+    if (password.length < 10) throw new Error("Password must be at least 10 characters");
+    if (await prisma.user.findUnique({ where: { email } })) throw new Error("That email already belongs to an account");
+    const verification = await prisma.emailVerificationCode.findFirst({
+      where: {
+        email,
+        businessProfileId: session.businessProfileId,
+        purpose: "mobile_claim",
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!verification) throw new Error("This verification code is invalid or expired");
+    if (verification.attempts >= MOBILE_EMAIL_CODE_MAX_ATTEMPTS) {
+      throw new Error("Too many attempts. Request a new verification code.");
+    }
+    const expectedHash = verificationCodeHash({
+      email,
+      code,
+      purpose: "mobile_claim",
+      businessProfileId: session.businessProfileId,
+    });
+    if (!crypto.timingSafeEqual(Buffer.from(expectedHash), Buffer.from(verification.codeHash))) {
+      await prisma.emailVerificationCode.update({
+        where: { id: verification.id },
+        data: { attempts: { increment: 1 } },
+      });
+      throw new Error("Verification code is incorrect");
+    }
+    const settings = await getSettings();
+    const user = await prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          email,
+          passwordHash: passwordHash(password),
+          name: String(req.body.name || session.businessProfile.businessName).trim(),
+          role: "business",
+          businessProfileId: session.businessProfileId,
+        },
+        include: { businessProfile: { include: { config: true } } },
+      });
+      await tx.emailVerificationCode.update({ where: { id: verification.id }, data: { usedAt: new Date() } });
+      return created;
+    });
+    const trial = await startBusinessTrial({
+      businessProfileId: session.businessProfileId,
+      settings,
+      source: "mobile_email_claim",
+    });
+    const auth = issueToken();
+    const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
+    await prisma.session.create({ data: { tokenHash: auth.tokenHash, userId: user.id, expiresAt } });
+    const responseUser = {
+      ...user,
+      businessProfile: trial.profile ? { ...trial.profile, config: user.businessProfile?.config } : user.businessProfile,
+    };
+    setSessionCookie(req, res, auth.token);
+    res.status(201).json({
+      token: auth.token,
+      expiresAt,
+      user: mobileSessionUser(responseUser),
+      trial: {
+        started: trial.started,
+        endsAt: trial.profile?.trialEndsAt || null,
+        credits: trial.profile?.creditBalance ?? null,
+      },
+    });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.get("/api/mobile/dashboard", requireAuth, requireBusinessMobileUser, async (req, res) => {
+  try {
+    res.json(await mobileDashboard(req.user));
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.get("/api/mobile/modules", requireAuth, requireBusinessMobileUser, async (req, res) => {
+  try {
+    const { profile, config } = await adminContext("", "", req.user);
+    const admin = await businessAdminResponse(profile, config);
+    res.json({ schemaVersion: 1, modules: mobileModuleDescriptors({ profile, config, admin }) });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.post("/api/mobile/push-subscription", requireAuth, async (req, res) => {
+  try {
+    const deviceHash = req.body.deviceId ? mobileDeviceHash(req.body.deviceId) : null;
+    const oneSignalId = String(req.body.oneSignalId || "").trim() || null;
+    const subscriptionId = String(req.body.subscriptionId || "").trim() || null;
+    const platform = String(req.body.platform || "").trim().toLowerCase() || null;
+    const data = {
+      userId: req.user.id,
+      businessProfileId: req.user.businessProfileId || null,
+      deviceHash,
+      oneSignalId,
+      subscriptionId,
+      externalId: String(req.body.externalId || `user:${req.user.id}`).trim(),
+      platform,
+      enabled: req.body.enabled !== false,
+      tags: jsonSafe(req.body.tags || {}),
+    };
+    const subscription = oneSignalId
+      ? await prisma.mobilePushSubscription.upsert({
+          where: { oneSignalId },
+          create: data,
+          update: data,
+        })
+      : await prisma.mobilePushSubscription.create({ data });
+    res.status(201).json({ ok: true, subscription });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
 app.post("/api/auth/login", async (req, res) => {
   try {
     const email = String(req.body.email || "").trim().toLowerCase();
@@ -7847,7 +8459,7 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 app.post("/api/auth/logout", requireAuth, async (req, res) => {
-  const token = cookieValue(req, SESSION_COOKIE);
+  const token = requestSessionToken(req);
   if (token) await prisma.session.deleteMany({ where: { tokenHash: sessionTokenHash(token) } });
   res.setHeader("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
   res.json({ ok: true });
@@ -14187,6 +14799,10 @@ wss.on("connection", (clientWs, request) => {
   let outputAudioChunks = 0;
   let liveUsageStartedAt = null;
   let liveUsageRecorded = false;
+  let mobilePreviewDeviceId = "";
+  let mobilePreviewStartedAt = null;
+  let mobilePreviewLimitTimer = null;
+  let unclaimedPreviewCall = false;
   let browserHangupRequested = false;
   let browserAgentTranscriptBuffer = "";
 
@@ -14249,7 +14865,27 @@ wss.on("connection", (clientWs, request) => {
           if (!demoSession) throw new Error("This demo session is invalid or expired");
           const demoStatus = String(demoSession.businessProfile.accountStatus || "").toLowerCase();
           if (!["unclaimed", "trial"].includes(demoStatus)) throw new Error("This demo is no longer active");
-          if (demoStatus === "trial") {
+          if (demoStatus === "unclaimed") {
+            const alreadyClaimed = await prisma.user.findFirst({ where: { businessProfileId: demoSession.businessProfileId }, select: { id: true } });
+            if (alreadyClaimed) throw new Error("This business has already been claimed. Log in to test it.");
+            unclaimedPreviewCall = true;
+            const incomingMobileDeviceId = message.mobileDeviceId || message.deviceId || "";
+            if (incomingMobileDeviceId) {
+              const quota = await markMobilePreviewVoiceStarted(incomingMobileDeviceId);
+              mobilePreviewDeviceId = cleanMobileDeviceId(incomingMobileDeviceId);
+              mobilePreviewStartedAt = new Date();
+              sendClient({ type: "preview_quota", ...quota });
+              mobilePreviewLimitTimer = setTimeout(() => {
+                sendClient({ type: "end_call", reason: "Preview voice test limit reached. Enter your email to keep testing." });
+                if (geminiWs?.readyState === WebSocket.OPEN) {
+                  geminiWs.close(1000, "Preview voice limit reached");
+                }
+                if (clientWs.readyState === WebSocket.OPEN) {
+                  clientWs.close(1000, "Preview voice limit reached");
+                }
+              }, quota.remainingSeconds * 1000);
+            }
+          } else if (demoStatus === "trial") {
             const trialEndsAt = demoSession.businessProfile.trialEndsAt ? new Date(demoSession.businessProfile.trialEndsAt) : null;
             if (!trialEndsAt || trialEndsAt <= new Date()) throw new Error("This trial has expired");
             if (demoSession.businessProfile.creditBalance <= 0) throw new Error("This trial has no credits remaining");
@@ -14480,6 +15116,15 @@ Live session identity and language:
   async function recordLiveBrowserUsageOnce() {
     if (liveUsageRecorded) return;
     liveUsageRecorded = true;
+    if (mobilePreviewLimitTimer) {
+      clearTimeout(mobilePreviewLimitTimer);
+      mobilePreviewLimitTimer = null;
+    }
+    if (mobilePreviewDeviceId && mobilePreviewStartedAt) {
+      await recordMobilePreviewVoiceUsage(mobilePreviewDeviceId, mobilePreviewStartedAt, new Date());
+      return;
+    }
+    if (unclaimedPreviewCall) return;
     await recordBrowserLiveUsage({
       profile,
       startedAt: liveUsageStartedAt,

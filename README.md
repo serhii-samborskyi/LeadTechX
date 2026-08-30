@@ -31,6 +31,19 @@ http://localhost:3000/admin
 
 The initial administrator is created from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Use the admin panel to configure AI models and encrypted API credentials, then create business logins. Each business login is restricted to its assigned profile and records.
 
+## Mobile App
+
+The Expo mobile app lives in `mobile/`. It is designed as an App Store acquisition funnel for "AI receptionist" searches plus a native business owner dashboard.
+
+```bash
+cd mobile
+npm install
+npm run typecheck
+npm run doctor
+```
+
+The mobile app calls the production backend at `https://ai.ringport.app` by default. Set `EXPO_PUBLIC_RINGPORT_API_URL` in `mobile/.env.local` to override it during development. OneSignal is configured through `EXPO_PUBLIC_ONESIGNAL_APP_ID`.
+
 ## What It Does
 
 - Researches the business using the configured AI research provider.

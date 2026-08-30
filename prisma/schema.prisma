@@ -656,6 +656,50 @@ model AccountClaimToken {
   @@index([email])
 }
 
+model EmailVerificationCode {
+  id                Int       @id @default(autoincrement())
+  email             String
+  codeHash          String
+  purpose           String    @default("mobile_claim")
+  businessProfileId Int?
+  expiresAt         DateTime
+  usedAt            DateTime?
+  attempts          Int       @default(0)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([email, purpose, createdAt])
+  @@index([businessProfileId, purpose])
+}
+
+model MobileDeviceVoiceQuota {
+  id                    Int      @id @default(autoincrement())
+  deviceHash            String   @unique
+  anonymousVoiceSeconds Int      @default(0)
+  lastSessionStartedAt  DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model MobilePushSubscription {
+  id                Int      @id @default(autoincrement())
+  userId            Int?
+  businessProfileId Int?
+  deviceHash        String?
+  oneSignalId       String?  @unique
+  subscriptionId    String?
+  externalId        String?
+  platform          String?
+  enabled           Boolean  @default(true)
+  tags              Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([userId, enabled])
+  @@index([businessProfileId, enabled])
+  @@index([deviceHash])
+}
+
 model DemoNumberAssignment {
   id                Int                 @id @default(autoincrement())
   voiceNumberId     Int
