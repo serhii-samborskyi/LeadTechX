@@ -24,6 +24,7 @@ Create `mobile/.env.local` when values are available:
 EXPO_PUBLIC_RINGPORT_API_URL=https://ai.ringport.app
 EXPO_PUBLIC_ONESIGNAL_APP_ID=your-onesignal-app-id
 EXPO_PUBLIC_ONESIGNAL_MODE=development
+EXPO_APPLE_TEAM_ID=your-apple-team-id
 ```
 
 Use `EXPO_PUBLIC_ONESIGNAL_MODE=production` for preview and production EAS builds.
@@ -37,8 +38,10 @@ cd mobile
 npm install
 npm run typecheck
 npm run doctor
-npx eas build --profile development --platform ios
-npx eas build --profile development --platform android
+npm exec --yes --package eas-cli@23.0.0 -- eas login
+npm exec --yes --package eas-cli@23.0.0 -- eas device:create
+npm exec --yes --package eas-cli@23.0.0 -- eas build --profile development --platform ios
+npm exec --yes --package eas-cli@23.0.0 -- eas build --profile development --platform android
 ```
 
 Run the Metro server for the development client:

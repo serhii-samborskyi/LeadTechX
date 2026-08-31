@@ -5,6 +5,7 @@ import {
   setAudioModeAsync,
   useAudioStream,
 } from "expo-audio";
+import { File, Paths } from "expo-file-system";
 import { decode, encode } from "base-64";
 
 import { LIVE_WS_URL } from "./api";
@@ -97,7 +98,7 @@ function writeUint32(target: Uint8Array, offset: number, value: number) {
   target[offset + 3] = (value >> 24) & 0xff;
 }
 
-function wavDataUriFromPcm16(base64: string, sampleRate: number) {
+function wavBytesFromPcm16(base64: string, sampleRate: number) {
   const pcm = base64ToBytes(base64);
   const wav = new Uint8Array(44 + pcm.length);
   writeString(wav, 0, "RIFF");
@@ -115,7 +116,7 @@ function wavDataUriFromPcm16(base64: string, sampleRate: number) {
   writeUint32(wav, 40, pcm.length);
   wav.set(pcm, 44);
   return {
-    uri: `data:audio/wav;base64,${bytesToBase64(wav)}`,
+    bytes: wav,
     durationMs: Math.ceil((pcm.length / 2 / sampleRate) * 1000),
   };
 }
@@ -136,6 +137,9 @@ export function useLiveAgentCall({ accessToken, deviceId }: UseLiveAgentCallInpu
   const playbackGenerationRef = useRef(0);
   const playbackQueueRef = useRef(Promise.resolve());
   const playersRef = useRef<Array<ReturnType<typeof createAudioPlayer>>>([]);
+  const audioFilesRef = useRef<File[]>([]);
+  const audioSequenceRef = useRef(0);
+  const receivedAudioChunksRef = useRef(0);
 
   const clearPlayback = useCallback(() => {
     playbackGenerationRef.current += 1;
@@ -148,6 +152,15 @@ export function useLiveAgentCall({ accessToken, deviceId }: UseLiveAgentCallInpu
       }
     }
     playersRef.current = [];
+    receivedAudioChunksRef.current = 0;
+    for (const file of audioFilesRef.current) {
+      try {
+        if (file.exists) file.delete();
+      } catch {
+        // Cached file may already be gone.
+      }
+    }
+    audioFilesRef.current = [];
     playbackQueueRef.current = Promise.resolve();
   }, []);
 
@@ -163,14 +176,33 @@ export function useLiveAgentCall({ accessToken, deviceId }: UseLiveAgentCallInpu
     playbackQueueRef.current = playbackQueueRef.current
       .then(async () => {
         if (generation !== playbackGenerationRef.current) return;
-        const audio = wavDataUriFromPcm16(base64, sampleRate);
-        const player = createAudioPlayer({ uri: audio.uri }, { updateInterval: 100, keepAudioSessionActive: true });
+        const audio = wavBytesFromPcm16(base64, sampleRate);
+        if (audio.bytes.length <= 44) return;
+        const file = new File(Paths.cache, `ringport-agent-${Date.now()}-${audioSequenceRef.current++}.wav`);
+        file.write(audio.bytes);
+        audioFilesRef.current.push(file);
+        receivedAudioChunksRef.current += 1;
+        if (receivedAudioChunksRef.current === 1 || receivedAudioChunksRef.current % 10 === 0) {
+          console.log(
+            `[voice] playing agent audio chunk ${receivedAudioChunksRef.current}: ${audio.bytes.length} bytes, ${audio.durationMs}ms`,
+          );
+        }
+        const player = createAudioPlayer(
+          { uri: file.uri },
+          { updateInterval: 100, keepAudioSessionActive: true, preferredForwardBufferDuration: 0.1 },
+        );
         playersRef.current.push(player);
         setStatus("agent_speaking");
         player.play();
-        await wait(audio.durationMs + 40);
+        await wait(Math.max(120, audio.durationMs + 80));
         player.remove();
         playersRef.current = playersRef.current.filter((candidate) => candidate !== player);
+        audioFilesRef.current = audioFilesRef.current.filter((candidate) => candidate !== file);
+        try {
+          if (file.exists) file.delete();
+        } catch {
+          // Cached file cleanup should not affect the call.
+        }
       })
       .catch((playbackError) => {
         addTranscript("system", `Audio playback issue: ${playbackError instanceof Error ? playbackError.message : "unknown"}`);

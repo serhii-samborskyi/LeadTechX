@@ -4172,6 +4172,7 @@ async function getSettings() {
       postbackEvents: DEFAULT_POSTBACK_EVENTS,
       postbackParamKeys: DEFAULT_POSTBACK_PARAM_KEYS.join(","),
       annualPrepayDiscountPercent: 25,
+      fastAgentBuildsPerIpPerHour: 5,
     },
     update: {},
   });
@@ -4451,11 +4452,24 @@ async function findBusinessMatch(businessName, website) {
   return candidates[0] || null;
 }
 
-function enforceOnboardingRateLimit(req) {
+function fastAgentBuildsPerIpLimit(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 5;
+  return Math.max(0, Math.round(parsed));
+}
+
+function enforceOnboardingRateLimit(req, settings) {
+  const limit = fastAgentBuildsPerIpLimit(settings?.fastAgentBuildsPerIpPerHour ?? 5);
+  if (limit <= 0) return;
   const now = Date.now();
   const key = String(req.ip || req.socket.remoteAddress || "unknown");
   const recent = (onboardingAttempts.get(key) || []).filter((timestamp) => now - timestamp < 60 * 60 * 1000);
-  if (recent.length >= 5) throw new Error("Too many demo agents were created from this connection. Try again later.");
+  if (recent.length >= limit) {
+    const error = new Error(`Too many demo agents were created from this connection. Limit is ${limit} per hour.`);
+    error.statusCode = 429;
+    error.code = "FAST_AGENT_IP_RATE_LIMIT";
+    throw error;
+  }
   recent.push(now);
   onboardingAttempts.set(key, recent);
 }
@@ -7433,7 +7447,7 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
         code: "BUSINESS_ALREADY_ACTIVE",
       });
     }
-    if (!activeTrial) enforceOnboardingRateLimit(req);
+    if (!activeTrial) enforceOnboardingRateLimit(req, settings);
 
     const researched = existing
       ? { profile: existing, cached: true }
@@ -8194,7 +8208,7 @@ app.post("/api/mobile/onboarding/agent", async (req, res) => {
         code: "BUSINESS_ALREADY_ACTIVE",
       });
     }
-    if (!activeTrial) enforceOnboardingRateLimit(req);
+    if (!activeTrial) enforceOnboardingRateLimit(req, settings);
 
     const researched = existing
       ? { profile: existing, cached: true }
@@ -9222,6 +9236,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         recordingRetentionDays: Math.max(1, Number(req.body.recordingRetentionDays || 30)),
         demoNumberCapacity: Math.max(1, Number(req.body.demoNumberCapacity || 10)),
         demoCallerLimit: Math.max(1, Number(req.body.demoCallerLimit || 3)),
+        fastAgentBuildsPerIpPerHour: fastAgentBuildsPerIpLimit(req.body.fastAgentBuildsPerIpPerHour ?? 5),
         smtpHost: String(req.body.smtpHost || "").trim(),
         smtpPort: Math.max(1, Number(req.body.smtpPort || 587)),
         smtpSecure: Boolean(req.body.smtpSecure),
@@ -9284,6 +9299,10 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         demoNumberCapacity:
           req.body.demoNumberCapacity === undefined ? undefined : Math.max(1, Number(req.body.demoNumberCapacity)),
         demoCallerLimit: req.body.demoCallerLimit === undefined ? undefined : Math.max(1, Number(req.body.demoCallerLimit)),
+        fastAgentBuildsPerIpPerHour:
+          req.body.fastAgentBuildsPerIpPerHour === undefined
+            ? undefined
+            : fastAgentBuildsPerIpLimit(req.body.fastAgentBuildsPerIpPerHour),
         smtpHost: typeof req.body.smtpHost === "string" ? req.body.smtpHost.trim() : undefined,
         smtpPort: req.body.smtpPort === undefined ? undefined : Math.max(1, Number(req.body.smtpPort)),
         smtpSecure: typeof req.body.smtpSecure === "boolean" ? req.body.smtpSecure : undefined,

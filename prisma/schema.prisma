@@ -509,6 +509,7 @@ model AppSettings {
   recordingRetentionDays      Int      @default(30)
   demoNumberCapacity          Int      @default(10)
   demoCallerLimit             Int      @default(3)
+  fastAgentBuildsPerIpPerHour Int      @default(5)
   smtpHost                    String   @default("")
   smtpPort                    Int      @default(587)
   smtpSecure                  Boolean  @default(false)

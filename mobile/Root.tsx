@@ -1,11 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Stack } from "expo-router";
 import { useEffect, useState } from "react";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
-import { initializeNotifications } from "../src/notifications";
+import RingPortMobile from "./app";
+import { initializeNotifications } from "./src/notifications";
 
-export default function RootLayout() {
+export default function Root() {
   const [queryClient] = useState(() => new QueryClient());
 
   useEffect(() => {
@@ -15,7 +15,7 @@ export default function RootLayout() {
   return (
     <QueryClientProvider client={queryClient}>
       <SafeAreaProvider>
-        <Stack screenOptions={{ headerShown: false }} />
+        <RingPortMobile />
       </SafeAreaProvider>
     </QueryClientProvider>
   );
