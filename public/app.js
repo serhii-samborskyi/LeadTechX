@@ -147,6 +147,7 @@ const el = {
   transferTargetList: document.querySelector("#transferTargetList"),
   calendarProvider: document.querySelector("#calendarProvider"),
   vagaroSettingsPanel: document.querySelector("#vagaroSettingsPanel"),
+  vagaroBusinessUrl: document.querySelector("#vagaroBusinessUrl"),
   vagaroRegion: document.querySelector("#vagaroRegion"),
   vagaroBusinessId: document.querySelector("#vagaroBusinessId"),
   vagaroGroupId: document.querySelector("#vagaroGroupId"),
@@ -1194,6 +1195,7 @@ function renderBooking(data = {}) {
   const connection = data.activeConnection || {};
   const provider = connection.status === "active" ? "vagaro" : state.admin?.calendarProvider || "internal";
   if (el.calendarProvider) el.calendarProvider.value = provider === "vagaro" ? "vagaro" : "internal";
+  if (el.vagaroBusinessUrl) el.vagaroBusinessUrl.value = connection.settings?.vagaroBusinessUrl || connection.bookingUrl || "";
   if (el.vagaroRegion) el.vagaroRegion.value = connection.region || el.vagaroRegion.value || "us02";
   if (el.vagaroBusinessId) el.vagaroBusinessId.value = connection.externalBusinessId || "";
   if (el.vagaroGroupId) el.vagaroGroupId.value = connection.externalGroupId || "";
@@ -1626,6 +1628,7 @@ async function saveVagaroSettings() {
     body: JSON.stringify({
       ...adminIdentity(),
       enabled,
+      businessUrl: fieldValue(el.vagaroBusinessUrl),
       region: fieldValue(el.vagaroRegion) || "us02",
       externalBusinessId: fieldValue(el.vagaroBusinessId),
       externalGroupId: fieldValue(el.vagaroGroupId),

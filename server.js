@@ -4711,6 +4711,139 @@ function normalizeUrlForMatch(value) {
     .replace(/\/$/, "");
 }
 
+function parseVagaroBusinessUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  let url;
+  try {
+    url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+  } catch {
+    throw new Error("Vagaro business link must be a valid URL");
+  }
+  const hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+  if (hostname !== "vagaro.com") throw new Error("Vagaro business link must be on vagaro.com");
+  const parts = url.pathname.split("/").map((part) => part.trim()).filter(Boolean);
+  let region = "";
+  let slug = "";
+  if (/^[a-z]{2}\d{2}$/i.test(parts[0] || "")) {
+    region = parts[0].toLowerCase();
+    slug = parts[1] || "";
+  } else {
+    slug = parts[0] || "";
+  }
+  if (!slug) throw new Error("Vagaro business link must include the business page name");
+  return {
+    inputUrl: raw,
+    url: `https://www.vagaro.com/${region ? `${region}/` : ""}${slug}`,
+    canonicalUrl: `https://www.vagaro.com/${slug}`,
+    region,
+    slug,
+  };
+}
+
+function htmlAttrValue(html, id) {
+  const pattern = new RegExp(`<[^>]+id=["']${id}["'][^>]*value=["']([^"']+)["']`, "i");
+  return String(html || "").match(pattern)?.[1] || "";
+}
+
+function htmlMetaContent(html, property) {
+  const pattern = new RegExp(`<meta[^>]+(?:property|name)=["']${property}["'][^>]+content=["']([^"']+)["']`, "i");
+  return String(html || "").match(pattern)?.[1] || "";
+}
+
+function htmlLinkHref(html, rel) {
+  const pattern = new RegExp(`<link[^>]+rel=["']${rel}["'][^>]+href=["']([^"']+)["']`, "i");
+  return String(html || "").match(pattern)?.[1] || "";
+}
+
+function decodeBasicHtml(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function decodeUrlText(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    return decodeURIComponent(text.replace(/\+/g, " "));
+  } catch {
+    return text.replace(/\+/g, " ");
+  }
+}
+
+function firstRegex(text, patterns) {
+  for (const pattern of patterns) {
+    const match = String(text || "").match(pattern);
+    if (match?.[1]) return String(match[1]).trim();
+  }
+  return "";
+}
+
+function vagaroPublicInfoFromHtml(html, sourceUrl = "") {
+  const decoded = decodeBasicHtml(String(html || "")).replace(/\\"/g, "\"").replace(/\\\//g, "/");
+  const businessId =
+    htmlAttrValue(decoded, "hdnSiteBuilderBusinessID") ||
+    firstRegex(decoded, [
+      /"ReactBusinessId"\s*:\s*"(\d+)"/i,
+      /"MerchantChannelId"\s*:\s*"(\d+)"/i,
+      /"BusinessID"\s*:\s*(\d+)/i,
+      /"BusinessId"\s*:\s*(\d+)/i,
+    ]);
+  const canonical = htmlLinkHref(decoded, "canonical");
+  const parsedCanonical = canonical ? parseVagaroBusinessUrl(canonical) : null;
+  const businessName =
+    firstRegex(decoded, [/"BusinessName"\s*:\s*"([^"]+)"/i]) ||
+    decodeBasicHtml(htmlMetaContent(decoded, "og:title")).replace(/\s*-\s*Vagaro\s*$/i, "").trim() ||
+    decodeBasicHtml(firstRegex(decoded, [/<title>([^<]+)<\/title>/i])).replace(/\s*-\s*.*$/i, "").trim();
+  const apiRegion = firstRegex(decoded, [/https:\/\/api\.vagaro\.com\/([a-z]{2}\d{2})\/api\/v2\//i]);
+  const groupId = firstRegex(decoded, [/"GroupRouteValue"\s*:\s*"([^"]+)"/i, /"GroupId"\s*:\s*"([^"]+)"/i]);
+  const shopAddress = decodeUrlText(firstRegex(decoded, [/"ShopAddress"\s*:\s*"([^"]+)"/i]));
+  return {
+    sourceUrl,
+    businessId,
+    businessName,
+    canonicalUrl: canonical || parsedCanonical?.canonicalUrl || "",
+    bookingUrl: canonical || parsedCanonical?.url || sourceUrl || "",
+    apiRegion,
+    groupId,
+    slug: parsedCanonical?.slug || parseVagaroBusinessUrl(sourceUrl)?.slug || "",
+    publicRegion: groupId ? String(groupId).toLowerCase() : parsedCanonical?.region || "",
+    address: shopAddress,
+  };
+}
+
+async function fetchVagaroPublicBusinessInfo(value, { timeoutMs = 10000 } = {}) {
+  const parsed = parseVagaroBusinessUrl(value);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs || 10000)));
+  let response;
+  try {
+    response = await fetch(parsed.url, {
+      headers: { "User-Agent": "RingPort/1.0 booking integration" },
+      signal: controller.signal,
+    });
+    const html = await response.text();
+    if (!response.ok) throw new Error(`Vagaro page ${response.status}: ${response.statusText}`);
+    const info = vagaroPublicInfoFromHtml(html, response.url || parsed.url);
+    return {
+      ...info,
+      inputUrl: parsed.inputUrl,
+      sourceUrl: response.url || parsed.url,
+      bookingUrl: info.bookingUrl || parsed.canonicalUrl || parsed.url,
+      canonicalUrl: info.canonicalUrl || parsed.canonicalUrl,
+      apiRegion: info.apiRegion || "",
+      publicRegion: info.publicRegion || parsed.region,
+      slug: info.slug || parsed.slug,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function requestBookingProvider(connection, { method = "POST", path: apiPath, accessToken = "", body = {}, query = {}, timeoutMs = 8000 } = {}) {
   const region = bookingProviderRegion(connection);
   const cleanPath = String(apiPath || "").startsWith("/") ? String(apiPath) : `/${apiPath || ""}`;
@@ -4877,13 +5010,85 @@ async function syncVagaroLocations(connection, profile) {
   });
   const { selected, locations } = selectVagaroLocation(profile, vagaroLocationsFromPayload(payload), connection.externalBusinessId);
   if (!selected) {
+    let publicInfo = connection.settings?.vagaroPublicProfile && typeof connection.settings.vagaroPublicProfile === "object"
+      ? connection.settings.vagaroPublicProfile
+      : null;
+    const configuredPublicUrl = connection.settings?.vagaroBusinessUrl || connection.bookingUrl;
+    let publicWarning = "";
+    if (!publicInfo?.businessId && configuredPublicUrl) {
+      try {
+        publicInfo = await fetchVagaroPublicBusinessInfo(configuredPublicUrl);
+      } catch (error) {
+        publicWarning = `Could not read the Vagaro business page: ${error.message}`;
+      }
+    }
+    const fallbackBusinessId = String(publicInfo?.businessId || connection.externalBusinessId || "").trim();
+    if (fallbackBusinessId) {
+      const fallbackLocation = {
+        businessId: fallbackBusinessId,
+        businessName: publicInfo?.businessName || profile?.businessName || connection.displayName || "Vagaro",
+        businessGroupId: publicInfo?.groupId || connection.externalGroupId || "",
+        locationId: connection.externalLocationId || "",
+        website: profile?.website || "",
+        bookingUrl: publicInfo?.bookingUrl || connection.bookingUrl || "",
+        cancelRescheduleUrl: connection.cancelRescheduleUrl || "",
+        timezone: connection.settings?.timezone || null,
+        address: publicInfo?.address || "",
+        city: "",
+        state: "",
+        postalCode: "",
+        phone: "",
+        raw: {
+          source: "vagaro_public_page",
+          publicInfo,
+          apiLocationResponse: payload,
+        },
+      };
+      const settings = {
+        ...(connection.settings && typeof connection.settings === "object" ? connection.settings : {}),
+        realtimeAvailability: true,
+        directBooking: false,
+        locationsLastSyncAt: new Date().toISOString(),
+        locationsSyncWarning: "Vagaro did not return location details. Using the public booking page business ID.",
+        vagaroBusinessUrl: configuredPublicUrl || publicInfo?.bookingUrl || null,
+        vagaroBusinessSlug: publicInfo?.slug || connection.settings?.vagaroBusinessSlug || null,
+        vagaroPublicRegion: publicInfo?.publicRegion || connection.settings?.vagaroPublicRegion || null,
+        vagaroPublicProfile: publicInfo || connection.settings?.vagaroPublicProfile || null,
+        vagaroPublicSyncWarning: publicWarning,
+        locations: [
+          {
+            businessId: fallbackLocation.businessId,
+            businessName: fallbackLocation.businessName,
+            businessGroupId: fallbackLocation.businessGroupId,
+            locationId: fallbackLocation.locationId,
+            website: fallbackLocation.website,
+            bookingUrl: fallbackLocation.bookingUrl,
+            timezone: fallbackLocation.timezone,
+            city: fallbackLocation.city,
+            state: fallbackLocation.state,
+          },
+        ],
+        selectedLocation: fallbackLocation.raw,
+      };
+      const updated = await prisma.bookingConnection.update({
+        where: { id: connection.id },
+        data: {
+          displayName: fallbackLocation.businessName,
+          externalBusinessId: fallbackLocation.businessId,
+          externalGroupId: fallbackLocation.businessGroupId || connection.externalGroupId,
+          bookingUrl: fallbackLocation.bookingUrl || connection.bookingUrl || null,
+          settings,
+        },
+      });
+      return { connection: updated, locationsImported: 1, selectedLocation: fallbackLocation };
+    }
     await prisma.bookingConnection.update({
       where: { id: connection.id },
       data: {
         settings: {
           ...(connection.settings && typeof connection.settings === "object" ? connection.settings : {}),
           locationsLastSyncAt: new Date().toISOString(),
-          locationsSyncWarning: "Vagaro did not return a business location. Add the business ID in advanced settings.",
+          locationsSyncWarning: publicWarning || "Vagaro did not return a business location. Add the business link or business ID in advanced settings.",
           rawLocationResponse: payload,
         },
       },
@@ -10304,14 +10509,30 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
     const enabled = Boolean(req.body.enabled);
-    const externalBusinessId = String(req.body.externalBusinessId || "").trim();
-    const bookingUrl = String(req.body.bookingUrl || "").trim();
-    const cancelRescheduleUrl = String(req.body.cancelRescheduleUrl || "").trim();
-    if (bookingUrl && !/^https?:\/\//i.test(bookingUrl)) throw new Error("Vagaro booking URL must start with http:// or https://");
-    if (cancelRescheduleUrl && !/^https?:\/\//i.test(cancelRescheduleUrl)) throw new Error("Cancel/reschedule URL must start with http:// or https://");
     const currentConnection = await prisma.bookingConnection.findUnique({
       where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
     });
+    const businessUrlInput = String(req.body.businessUrl || req.body.bookingUrl || "").trim();
+    const parsedBusinessUrl = enabled && businessUrlInput ? parseVagaroBusinessUrl(businessUrlInput) : null;
+    let publicBusinessInfo = null;
+    let publicBusinessWarning = "";
+    if (enabled && parsedBusinessUrl) {
+      try {
+        publicBusinessInfo = await fetchVagaroPublicBusinessInfo(parsedBusinessUrl.url);
+      } catch (error) {
+        publicBusinessWarning = `Could not read the Vagaro business page: ${error.message}`;
+      }
+    }
+    const externalBusinessId = String(
+      req.body.externalBusinessId ||
+        publicBusinessInfo?.businessId ||
+        currentConnection?.externalBusinessId ||
+        "",
+    ).trim();
+    const bookingUrl = String(req.body.bookingUrl || publicBusinessInfo?.bookingUrl || parsedBusinessUrl?.canonicalUrl || currentConnection?.bookingUrl || "").trim();
+    const cancelRescheduleUrl = String(req.body.cancelRescheduleUrl || "").trim();
+    if (bookingUrl && !/^https?:\/\//i.test(bookingUrl)) throw new Error("Vagaro booking URL must start with http:// or https://");
+    if (cancelRescheduleUrl && !/^https?:\/\//i.test(cancelRescheduleUrl)) throw new Error("Cancel/reschedule URL must start with http:// or https://");
     const apiClientId = String(req.body.apiClientId || "").trim() || currentConnection?.apiClientId || "";
     const apiClientSecretInput = String(req.body.apiClientSecret || "").trim();
     const manualAccessTokenInput = String(req.body.accessToken || "").trim();
@@ -10327,7 +10548,14 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
       ...(currentConnection?.settings && typeof currentConnection.settings === "object" ? currentConnection.settings : {}),
       realtimeAvailability: true,
       directBooking: false,
+      vagaroBusinessUrl: businessUrlInput || publicBusinessInfo?.bookingUrl || parsedBusinessUrl?.url || currentConnection?.settings?.vagaroBusinessUrl || null,
+      vagaroBusinessSlug: publicBusinessInfo?.slug || parsedBusinessUrl?.slug || currentConnection?.settings?.vagaroBusinessSlug || null,
+      vagaroPublicRegion: publicBusinessInfo?.publicRegion || parsedBusinessUrl?.region || currentConnection?.settings?.vagaroPublicRegion || null,
+      vagaroPublicProfile: publicBusinessInfo || currentConnection?.settings?.vagaroPublicProfile || null,
+      vagaroPublicSyncWarning: publicBusinessWarning,
     };
+    const region = String(req.body.region || publicBusinessInfo?.apiRegion || currentConnection?.region || parsedBusinessUrl?.region || "us02").trim() || "us02";
+    const externalGroupId = String(req.body.externalGroupId || publicBusinessInfo?.groupId || currentConnection?.externalGroupId || "").trim();
     let connection = await prisma.bookingConnection.upsert({
       where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
       create: {
@@ -10335,11 +10563,11 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
         provider: "vagaro",
         status: enabled ? "active" : "disabled",
         workflowMode: "booking_link",
-        displayName: "Vagaro",
+        displayName: publicBusinessInfo?.businessName || "Vagaro",
         externalBusinessId: externalBusinessId || null,
-        externalGroupId: String(req.body.externalGroupId || "").trim() || null,
+        externalGroupId: externalGroupId || null,
         externalLocationId: String(req.body.externalLocationId || "").trim() || null,
-        region: String(req.body.region || "us02").trim() || "us02",
+        region,
         bookingUrl: bookingUrl || null,
         cancelRescheduleUrl: cancelRescheduleUrl || null,
         apiClientId: apiClientId || null,
@@ -10353,10 +10581,11 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
       },
       update: {
         status: enabled ? "active" : "disabled",
+        displayName: publicBusinessInfo?.businessName || undefined,
         externalBusinessId: externalBusinessId || null,
-        externalGroupId: String(req.body.externalGroupId || "").trim() || null,
+        externalGroupId: externalGroupId || null,
         externalLocationId: String(req.body.externalLocationId || "").trim() || null,
-        region: String(req.body.region || "us02").trim() || "us02",
+        region,
         bookingUrl: bookingUrl || null,
         cancelRescheduleUrl: cancelRescheduleUrl || null,
         apiClientId: apiClientId || null,
