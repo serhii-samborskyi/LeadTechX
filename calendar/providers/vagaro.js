@@ -16,6 +16,24 @@ function externalId(value) {
   return String(value || "").trim();
 }
 
+function isPublicNumericVagaroId(value) {
+  return /^\d+$/.test(String(value || "").trim());
+}
+
+function apiBusinessId(connection) {
+  const settings = connection?.settings && typeof connection.settings === "object" ? connection.settings : {};
+  const publicProfile = settings.vagaroPublicProfile && typeof settings.vagaroPublicProfile === "object" ? settings.vagaroPublicProfile : {};
+  for (const candidate of [
+    connection?.externalBusinessId,
+    publicProfile.encryptedBusinessId,
+    publicProfile.businessId,
+  ]) {
+    const value = externalId(candidate);
+    if (value && !isPublicNumericVagaroId(value)) return value;
+  }
+  return "";
+}
+
 function includesText(haystack, needle) {
   const left = String(haystack || "").toLowerCase();
   const right = String(needle || "").toLowerCase().trim();
@@ -144,7 +162,8 @@ function normalizeAvailabilityResponse(data, { service, professional, timezone }
 }
 
 async function liveAvailability({ connection, service, professional, fromDate, days, timezone, resolveBookingAccessToken, requestBookingProvider }) {
-  if (!connection?.externalBusinessId) throw new Error("Vagaro business ID is not configured");
+  const businessId = apiBusinessId(connection);
+  if (!businessId) throw new Error("Vagaro encrypted business ID is not configured");
   if (!service?.externalId) throw new Error("Choose a Vagaro service before searching availability");
   if (typeof resolveBookingAccessToken !== "function" || typeof requestBookingProvider !== "function") {
     throw new Error("Vagaro API helpers are not configured");
@@ -163,7 +182,7 @@ async function liveAvailability({ connection, service, professional, fromDate, d
       path: "/api/v2/appointments/availability",
       accessToken: token,
       body: {
-        businessId: connection.externalBusinessId,
+        businessId,
         appointmentDate,
         bookingItems: [bookingItem],
       },
