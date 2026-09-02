@@ -2807,26 +2807,6 @@ dd {
   display: none;
 }
 
-.advanced-booking-settings {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 12px;
-}
-
-.advanced-booking-settings summary {
-  cursor: pointer;
-  font-weight: 800;
-  color: var(--green-900);
-}
-
-.advanced-booking-settings .booking-provider-grid {
-  margin-top: 12px;
-}
-
-.booking-provider-grid .wide-field {
-  grid-column: span 2;
-}
-
 .booking-provider-actions {
   grid-template-columns: minmax(0, 1fr) auto auto;
 }
@@ -4119,10 +4099,6 @@ a.appointment-field-value {
   .data-row.booking-link-row,
   .data-row.appointment-row {
     grid-template-columns: 1fr;
-  }
-
-  .booking-provider-grid .wide-field {
-    grid-column: auto;
   }
 
   .public-flow-actions {

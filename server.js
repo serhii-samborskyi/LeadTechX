@@ -5129,7 +5129,7 @@ async function syncVagaroLocations(connection, profile) {
         settings: {
           ...(connection.settings && typeof connection.settings === "object" ? connection.settings : {}),
           locationsLastSyncAt: new Date().toISOString(),
-          locationsSyncWarning: publicWarning || "Vagaro did not return a business location. Add the business link or business ID in advanced settings.",
+          locationsSyncWarning: publicWarning || "Vagaro did not return a business location. Save the Vagaro business link again.",
           rawLocationResponse: payload,
         },
       },
@@ -10691,7 +10691,7 @@ app.post("/api/business-admin/booking/vagaro/sync", async (req, res) => {
     });
     if (!connection || connection.status !== "active") throw new Error("Vagaro is not enabled for this business");
     const locationSync = await syncVagaroLocations(connection, profile);
-    if (!locationSync.connection.externalBusinessId) throw new Error("Vagaro business ID could not be discovered. Add it in advanced settings.");
+    if (!locationSync.connection.externalBusinessId) throw new Error("Vagaro business ID could not be discovered. Save the Vagaro business link again.");
     const result = { locationsImported: locationSync.locationsImported, ...(await syncVagaroServices(locationSync.connection)) };
     const settings = await getSettings();
     res.json({ ...(await bookingDataForProfile(profile, settings, req)), sync: result });
