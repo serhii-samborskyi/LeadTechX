@@ -1124,6 +1124,33 @@ function bookingServiceLabel(service) {
   return [service.name || `Service #${service.id}`, details.length ? `(${details.join(", ")})` : ""].filter(Boolean).join(" ");
 }
 
+function vagaroPublicServiceIdFromValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^\d+$/.test(raw)) return raw;
+  try {
+    const url = new URL(raw);
+    const serviceId = String(url.searchParams.get("serviceId") || url.searchParams.get("serviceid") || "").trim();
+    if (/^\d+$/.test(serviceId)) return serviceId;
+  } catch {
+    // Continue with copied URL fragments.
+  }
+  return (raw.match(/[?&]serviceId=(\d+)/i) || raw.match(/\bserviceId[=:](\d+)\b/i))?.[1] || "";
+}
+
+function vagaroPublicServiceIdFromService(service) {
+  const raw = service?.raw && typeof service.raw === "object" ? service.raw : {};
+  return vagaroPublicServiceIdFromValue(
+    raw.publicServiceId ||
+      raw.public_service_id ||
+      raw.vagaroPublicServiceId ||
+      raw.bookingServiceId ||
+      raw.businessServiceId ||
+      service?.bookingUrl ||
+      "",
+  );
+}
+
 function bookingProfessionalLabel(professional) {
   if (!professional) return "Any professional";
   return [professional.displayName || professional.name || `Professional #${professional.id}`, professional.role].filter(Boolean).join(" · ");
@@ -1233,17 +1260,27 @@ function renderBooking(data = {}) {
   el.bookingServiceList.innerHTML = "";
   for (const service of services) {
     const row = document.createElement("div");
-    row.className = "data-row booking-directory-row";
+    row.className = "data-row booking-directory-row booking-service-row";
+    row.dataset.id = service.id;
     const name = document.createElement("strong");
     name.textContent = service.name || `Service #${service.id}`;
+    const publicServiceId = vagaroPublicServiceIdFromService(service);
     const detail = document.createElement("small");
     detail.textContent = [
       service.category,
       service.durationMinutes ? `${service.durationMinutes} min` : "",
       service.price !== null && service.price !== undefined ? `${service.currency || "USD"} ${service.price}` : "",
+      service.bookingUrl ? "Booking link saved" : "",
       service.active === false ? "Inactive" : "Active",
     ].filter(Boolean).join(" · ");
-    row.append(name, detail);
+    const linkTools = document.createElement("div");
+    linkTools.className = "booking-service-link-tools";
+    const serviceIdInput = input("vagaro-service-public-id", publicServiceId, "text");
+    serviceIdInput.placeholder = "Public service ID or booking link";
+    const saveLink = rowButton("save-vagaro-service-link", service.bookingUrl ? "Update link" : "Save link");
+    saveLink.dataset.id = service.id;
+    linkTools.append(serviceIdInput, saveLink);
+    row.append(name, detail, linkTools);
     el.bookingServiceList.appendChild(row);
   }
   if (!services.length) el.bookingServiceList.textContent = "No services synced yet.";
@@ -1677,6 +1714,25 @@ async function addBookingLink() {
   el.bookingLinkProfessional.value = "";
   el.bookingLinkSort.value = "";
   setAdminStatus("Booking link added");
+}
+
+async function saveVagaroServicePublicLink(button) {
+  const row = button.closest(".booking-service-row");
+  const serviceId = button.dataset.id || row?.dataset.id;
+  if (!serviceId) throw new Error("Booking service was not found");
+  const sourceValue = row?.querySelector(".vagaro-service-public-id")?.value.trim() || "";
+  if (!sourceValue) throw new Error("Enter the Vagaro public service ID or paste the service booking link");
+  setAdminStatus("Saving Vagaro service link");
+  const data = await apiJson(`/api/business-admin/booking-services/${serviceId}/public-link`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      publicServiceId: sourceValue,
+    }),
+  });
+  renderBooking(data);
+  setAdminStatus("Vagaro service link saved");
 }
 
 async function deleteBookingLink(button) {
@@ -3497,6 +3553,11 @@ el.saveVagaroSettingsButton.addEventListener("click", () => runAdmin(saveVagaroS
 el.syncVagaroButton.addEventListener("click", () => runAdmin(syncVagaro));
 el.copyVagaroWebhookButton.addEventListener("click", () => runAdmin(copyVagaroWebhook));
 el.addBookingLinkButton.addEventListener("click", () => runAdmin(addBookingLink));
+el.bookingServiceList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action='save-vagaro-service-link']");
+  if (!button) return;
+  runAdmin(() => saveVagaroServicePublicLink(button));
+});
 el.calendarServiceFilter.addEventListener("change", () => runAdmin(loadCalendar));
 el.calendarProfessionalFilter.addEventListener("change", () => runAdmin(loadCalendar));
 el.bookingLinkList.addEventListener("click", (event) => {

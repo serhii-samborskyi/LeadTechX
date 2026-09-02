@@ -5161,6 +5161,60 @@ function bookingLinkTrackingUrl({ settings, req = null, link }) {
   return url.toString();
 }
 
+function vagaroPublicServiceIdFromValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^\d+$/.test(raw)) return raw;
+  try {
+    const url = new URL(raw);
+    const serviceId = String(url.searchParams.get("serviceId") || url.searchParams.get("serviceid") || "").trim();
+    if (/^\d+$/.test(serviceId)) return serviceId;
+  } catch {
+    // Continue with loose parsing for copied URL fragments.
+  }
+  const match = raw.match(/[?&]serviceId=(\d+)/i) || raw.match(/\bserviceId[=:](\d+)\b/i);
+  return match?.[1] || "";
+}
+
+function vagaroPublicServiceIdFromService(service) {
+  const raw = service?.raw && typeof service.raw === "object" ? service.raw : {};
+  return vagaroPublicServiceIdFromValue(
+    raw.publicServiceId ||
+      raw.public_service_id ||
+      raw.vagaroPublicServiceId ||
+      raw.bookingServiceId ||
+      raw.businessServiceId ||
+      service?.bookingUrl ||
+      "",
+  );
+}
+
+function vagaroPublicServiceBookingUrl(connection, serviceId, sourceValue = "") {
+  const publicServiceId = vagaroPublicServiceIdFromValue(serviceId || sourceValue);
+  if (!publicServiceId) throw new Error("Enter the numeric Vagaro public service ID or full service booking link");
+  const rawSource = String(sourceValue || "").trim();
+  if (/^https?:\/\//i.test(rawSource)) {
+    const url = new URL(rawSource);
+    const hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (hostname !== "vagaro.com") throw new Error("Vagaro service booking link must be on vagaro.com");
+    url.searchParams.set("serviceId", publicServiceId);
+    return url.toString();
+  }
+  const settings = connection?.settings && typeof connection.settings === "object" ? connection.settings : {};
+  const baseValue = String(connection?.bookingUrl || settings.vagaroBusinessUrl || "").trim();
+  if (!baseValue) throw new Error("Save the Vagaro business link before creating service-specific booking links");
+  const parsed = parseVagaroBusinessUrl(baseValue);
+  return `${parsed.canonicalUrl}/book-now?serviceId=${encodeURIComponent(publicServiceId)}`;
+}
+
+function maybeVagaroPublicServiceBookingUrl(connection, publicServiceId, sourceValue = "") {
+  try {
+    return publicServiceId ? vagaroPublicServiceBookingUrl(connection, publicServiceId, sourceValue) : "";
+  } catch {
+    return "";
+  }
+}
+
 async function bookingDataForProfile(profile, settings = null, req = null) {
   const activeSettings = settings || (await getSettings());
   const connections = await prisma.bookingConnection.findMany({
@@ -5234,6 +5288,35 @@ async function ensureBookingLinkForConnection(connection, { label = "", url = ""
   });
 }
 
+async function upsertServiceBookingLink(connection, service, url, label = "") {
+  if (!service?.id) throw new Error("Booking service was not found");
+  const safeUrl = String(url || service.bookingUrl || "").trim();
+  if (!/^https?:\/\//i.test(safeUrl)) throw new Error("Booking link URL must start with http:// or https://");
+  const existingLink = await prisma.bookingLink.findFirst({
+    where: { connectionId: connection.id, serviceId: service.id, professionalId: null },
+    orderBy: [{ active: "desc" }, { id: "asc" }],
+  });
+  const linkLabel = String(label || existingLink?.label || service.name || "Book service").trim();
+  if (existingLink) {
+    return prisma.bookingLink.update({
+      where: { id: existingLink.id },
+      data: {
+        label: linkLabel,
+        url: safeUrl,
+        serviceExternalId: service.externalId,
+        active: true,
+      },
+    });
+  }
+  return ensureBookingLinkForConnection(connection, {
+    label: linkLabel,
+    url: safeUrl,
+    serviceId: service.id,
+    professionalId: null,
+    sortOrder: service.sortOrder || 0,
+  });
+}
+
 function vagaroAppointmentStatus(action, bookingStatus) {
   const normalizedAction = String(action || "").toLowerCase();
   const normalizedStatus = String(bookingStatus || "").toLowerCase();
@@ -5248,6 +5331,17 @@ async function upsertVagaroService(connection, payload) {
   if (!externalId) return null;
   const performers = Array.isArray(payload.servicePerformedBy) ? payload.servicePerformedBy : [];
   const firstPerformer = performers[0] || {};
+  const publicServiceId = vagaroPublicServiceIdFromValue(
+    payload.publicServiceId ||
+      payload.public_service_id ||
+      payload.vagaroPublicServiceId ||
+      payload.bookingServiceId ||
+      payload.businessServiceId ||
+      payload.bookingUrl ||
+      "",
+  );
+  const bookingUrl = maybeVagaroPublicServiceBookingUrl(connection, publicServiceId, payload.bookingUrl);
+  const raw = publicServiceId ? { ...payload, publicServiceId, publicBookingUrl: bookingUrl || payload.bookingUrl || null } : payload;
   return prisma.bookingService.upsert({
     where: { connectionId_externalId: { connectionId: connection.id, externalId } },
     create: {
@@ -5261,7 +5355,8 @@ async function upsertVagaroService(connection, payload) {
       price: Number(payload.businessCost ?? firstPerformer.price ?? NaN) || null,
       currency: payload.currency || firstPerformer.currency || null,
       type: String(payload.type || "service").toLowerCase(),
-      raw: payload,
+      bookingUrl: bookingUrl || null,
+      raw,
     },
     update: {
       name: String(payload.serviceTitle || payload.name || "Vagaro service"),
@@ -5270,8 +5365,9 @@ async function upsertVagaroService(connection, payload) {
       price: Number(payload.businessCost ?? firstPerformer.price ?? NaN) || null,
       currency: payload.currency || firstPerformer.currency || null,
       type: String(payload.type || "service").toLowerCase(),
+      bookingUrl: bookingUrl || undefined,
       active: true,
-      raw: payload,
+      raw,
     },
   });
 }
@@ -5323,6 +5419,9 @@ async function syncVagaroServices(connection) {
   const providerIds = new Set();
   for (const servicePayload of services) {
     const service = await upsertVagaroService(connection, servicePayload);
+    if (service?.bookingUrl) {
+      await upsertServiceBookingLink(connection, service, service.bookingUrl);
+    }
     for (const performer of servicePayload.servicePerformedBy || []) {
       const providerId = String(performer.serviceProviderId || "").trim();
       if (!providerId || !service) continue;
@@ -10693,6 +10792,40 @@ app.post("/api/business-admin/booking/vagaro/sync", async (req, res) => {
         };
     const settings = await getSettings();
     res.json({ ...(await bookingDataForProfile(profile, settings, req)), sync: result });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.put("/api/business-admin/booking-services/:id/public-link", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    const serviceId = Number(req.params.id);
+    if (!Number.isInteger(serviceId) || serviceId <= 0) throw new Error("Booking service was not found");
+    const service = await prisma.bookingService.findFirst({
+      where: { id: serviceId, businessProfileId: profile.id },
+      include: { connection: true },
+    });
+    if (!service || !service.connection) throw new Error("Booking service was not found");
+    if (service.provider !== "vagaro" || service.connection.provider !== "vagaro") {
+      throw new Error("Public service booking links are only supported for Vagaro services");
+    }
+    const sourceValue = String(req.body.publicServiceId || req.body.serviceLink || req.body.url || "").trim();
+    const publicServiceId = vagaroPublicServiceIdFromValue(sourceValue);
+    if (!publicServiceId) throw new Error("Enter a numeric Vagaro public service ID, like 39988882, or paste the full service booking link");
+    const bookingUrl = vagaroPublicServiceBookingUrl(service.connection, publicServiceId, sourceValue);
+    const currentRaw = service.raw && typeof service.raw === "object" && !Array.isArray(service.raw) ? service.raw : {};
+    await prisma.bookingService.update({
+      where: { id: service.id },
+      data: {
+        bookingUrl,
+        raw: { ...currentRaw, publicServiceId, publicBookingUrl: bookingUrl },
+      },
+    });
+    await upsertServiceBookingLink(service.connection, service, bookingUrl, req.body.label);
+    const settings = await getSettings();
+    res.json(await bookingDataForProfile(profile, settings, req));
   } catch (error) {
     res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }

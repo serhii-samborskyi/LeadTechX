@@ -3437,6 +3437,17 @@ dd {
   color: var(--muted);
 }
 
+.booking-service-link-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.booking-service-link-tools input {
+  min-width: 0;
+}
+
 .data-row.booking-link-row {
   grid-template-columns: minmax(170px, 0.8fr) minmax(0, 1.2fr) auto auto;
 }
@@ -4117,6 +4128,7 @@ a.appointment-field-value {
   .data-row.review-link-row,
   .data-row.transfer-target-row,
   .data-row.booking-link-row,
+  .booking-service-link-tools,
   .data-row.appointment-row {
     grid-template-columns: 1fr;
   }
