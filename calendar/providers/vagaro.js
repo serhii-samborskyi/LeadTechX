@@ -23,15 +23,24 @@ function isPublicNumericVagaroId(value) {
 function apiBusinessId(connection) {
   const settings = connection?.settings && typeof connection.settings === "object" ? connection.settings : {};
   const publicProfile = settings.vagaroPublicProfile && typeof settings.vagaroPublicProfile === "object" ? settings.vagaroPublicProfile : {};
-  for (const candidate of [
-    connection?.externalBusinessId,
-    publicProfile.encryptedBusinessId,
-    publicProfile.businessId,
-  ]) {
-    const value = externalId(candidate);
-    if (value && !isPublicNumericVagaroId(value)) return value;
-  }
-  return "";
+  const value = externalId(connection?.externalBusinessId);
+  if (!value || isPublicNumericVagaroId(value)) return "";
+  const publicIds = new Set(
+    [
+      publicProfile.businessId,
+      publicProfile.encryptedBusinessId,
+      publicProfile.publicEncryptedBusinessId,
+      publicProfile.numericBusinessId,
+      publicProfile.publicNumericBusinessId,
+    ]
+      .map((item) => externalId(item))
+      .filter(Boolean),
+  );
+  if (publicIds.has(value)) return "";
+  if (settings.apiBusinessIdSource === "locations" || settings.apiBusinessIdSource === "manual") return value;
+  if (settings.selectedLocation?.source === "vagaro_public_page") return "";
+  const apiLocation = Array.isArray(settings.locations) ? settings.locations.find((location) => externalId(location?.businessId) === value) : null;
+  return apiLocation ? value : "";
 }
 
 function includesText(haystack, needle) {
@@ -163,7 +172,7 @@ function normalizeAvailabilityResponse(data, { service, professional, timezone }
 
 async function liveAvailability({ connection, service, professional, fromDate, days, timezone, resolveBookingAccessToken, requestBookingProvider }) {
   const businessId = apiBusinessId(connection);
-  if (!businessId) throw new Error("Vagaro encrypted business ID is not configured");
+  if (!businessId) throw new Error("Vagaro API business location ID is not configured");
   if (!service?.externalId) throw new Error("Choose a Vagaro service before searching availability");
   if (typeof resolveBookingAccessToken !== "function" || typeof requestBookingProvider !== "function") {
     throw new Error("Vagaro API helpers are not configured");

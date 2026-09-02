@@ -150,6 +150,9 @@ const el = {
   vagaroBusinessUrl: document.querySelector("#vagaroBusinessUrl"),
   vagaroClientId: document.querySelector("#vagaroClientId"),
   vagaroClientSecret: document.querySelector("#vagaroClientSecret"),
+  vagaroRegion: document.querySelector("#vagaroRegion"),
+  vagaroTokenScope: document.querySelector("#vagaroTokenScope"),
+  vagaroApiBusinessId: document.querySelector("#vagaroApiBusinessId"),
   vagaroWebhookUrl: document.querySelector("#vagaroWebhookUrl"),
   copyVagaroWebhookButton: document.querySelector("#copyVagaroWebhookButton"),
   saveVagaroSettingsButton: document.querySelector("#saveVagaroSettingsButton"),
@@ -1190,6 +1193,9 @@ function renderBooking(data = {}) {
   if (el.calendarProvider) el.calendarProvider.value = provider === "vagaro" ? "vagaro" : "internal";
   if (el.vagaroBusinessUrl) el.vagaroBusinessUrl.value = connection.settings?.vagaroBusinessUrl || connection.bookingUrl || "";
   if (el.vagaroClientId) el.vagaroClientId.value = connection.apiClientId || "";
+  if (el.vagaroRegion) el.vagaroRegion.value = connection.region || connection.settings?.vagaroPublicRegion || "";
+  if (el.vagaroTokenScope) el.vagaroTokenScope.value = connection.settings?.tokenScope || "read access";
+  if (el.vagaroApiBusinessId) el.vagaroApiBusinessId.value = connection.apiBusinessId || "";
   if (el.vagaroWebhookUrl) el.vagaroWebhookUrl.value = data.webhookUrl || "";
   if (el.vagaroClientSecret) el.vagaroClientSecret.value = "";
 
@@ -1214,12 +1220,13 @@ function renderBooking(data = {}) {
     const credentials = connection.apiClientSecretConfigured
       ? ` · API secret saved${connection.apiClientSecretHint ? ` ending in ${connection.apiClientSecretHint}` : ""}`
       : "";
+    const apiLocation = connection.apiBusinessId ? " · API location ID saved" : "";
     const warning = connection.settings?.locationsSyncWarning ? ` · ${connection.settings.locationsSyncWarning}` : "";
     el.vagaroStatus.textContent =
       provider !== "vagaro"
         ? "RingPort calendar is active."
         : connection.status === "active"
-          ? `Vagaro connected · ${services.length} services · ${professionals.length} professionals · ${links.length} links${lastSync}${credentials}${warning}`
+          ? `Vagaro connected · ${services.length} services · ${professionals.length} professionals · ${links.length} links${lastSync}${credentials}${apiLocation}${warning}`
           : "Vagaro is not connected. Save the client ID, client secret, and business link to connect.";
   }
 
@@ -1617,6 +1624,9 @@ async function saveVagaroSettings() {
       businessUrl: fieldValue(el.vagaroBusinessUrl),
       apiClientId: fieldValue(el.vagaroClientId),
       apiClientSecret: fieldValue(el.vagaroClientSecret),
+      region: fieldValue(el.vagaroRegion),
+      tokenScope: fieldValue(el.vagaroTokenScope),
+      apiBusinessId: fieldValue(el.vagaroApiBusinessId),
     }),
   });
   state.admin = { ...state.admin, calendarProvider: enabled ? "vagaro" : "internal" };

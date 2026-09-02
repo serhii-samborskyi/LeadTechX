@@ -2807,6 +2807,26 @@ dd {
   display: none;
 }
 
+.booking-provider-advanced {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.booking-provider-advanced summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.booking-provider-advanced .form-grid {
+  margin-top: 12px;
+}
+
+.booking-provider-advanced small {
+  display: block;
+  margin-top: 8px;
+}
+
 .booking-provider-actions {
   grid-template-columns: minmax(0, 1fr) auto auto;
 }

@@ -334,6 +334,15 @@
                   <label>API client secret<input id="vagaroClientSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /></label>
                   <label>Vagaro business link<input id="vagaroBusinessUrl" type="url" placeholder="https://www.vagaro.com/shinehairspa" /></label>
                 </div>
+                <details class="booking-provider-advanced" id="vagaroAdvancedSettings">
+                  <summary>Advanced API settings</summary>
+                  <div class="form-grid booking-provider-grid">
+                    <label>API region<input id="vagaroRegion" autocomplete="off" placeholder="us04" /></label>
+                    <label>Access token scope<input id="vagaroTokenScope" autocomplete="off" placeholder="read access" /></label>
+                    <label>API business location ID<input id="vagaroApiBusinessId" autocomplete="off" placeholder="Encrypted businessId from Vagaro API" /></label>
+                  </div>
+                  <small>The API business location ID is the encrypted businessId returned by Vagaro's Locations API. Public numeric page IDs will not work.</small>
+                </details>
                 <div class="crm-webhook-controls booking-provider-actions">
                   <input id="vagaroWebhookUrl" readonly placeholder="Save Vagaro settings to generate webhook URL" />
                   <button id="copyVagaroWebhookButton" type="button">Copy webhook</button>
