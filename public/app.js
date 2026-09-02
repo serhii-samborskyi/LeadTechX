@@ -146,6 +146,7 @@ const el = {
   addTransferTargetButton: document.querySelector("#addTransferTargetButton"),
   transferTargetList: document.querySelector("#transferTargetList"),
   calendarProvider: document.querySelector("#calendarProvider"),
+  vagaroSettingsPanel: document.querySelector("#vagaroSettingsPanel"),
   vagaroRegion: document.querySelector("#vagaroRegion"),
   vagaroBusinessId: document.querySelector("#vagaroBusinessId"),
   vagaroGroupId: document.querySelector("#vagaroGroupId"),
@@ -1155,6 +1156,11 @@ function updateCalendarProviderUi() {
   const provider = el.calendarProvider?.value || state.admin?.calendarProvider || "internal";
   const external = provider === "vagaro";
   const appointmentEditor = document.querySelector(".appointment-editor-card");
+  const bookingDirectory = document.querySelector(".booking-directory-card");
+  if (el.vagaroSettingsPanel) el.vagaroSettingsPanel.hidden = !external;
+  if (bookingDirectory) bookingDirectory.hidden = !external;
+  if (el.syncVagaroButton) el.syncVagaroButton.disabled = !external;
+  if (el.copyVagaroWebhookButton) el.copyVagaroWebhookButton.disabled = !external || !el.vagaroWebhookUrl?.value.trim();
   if (appointmentEditor) {
     appointmentEditor.classList.toggle("is-read-only", external);
     const copy = appointmentEditor.querySelector("p");
@@ -1220,9 +1226,13 @@ function renderBooking(data = {}) {
     const credentials = connection.apiClientSecretConfigured
       ? ` · API secret saved${connection.apiClientSecretHint ? ` ending in ${connection.apiClientSecretHint}` : ""}`
       : "";
-    el.vagaroStatus.textContent = connection.status === "active"
-      ? `Vagaro connected · ${services.length} services · ${professionals.length} professionals · ${links.length} links${lastSync}${credentials}`
-      : "Vagaro is not connected. Use RingPort calendar or save Vagaro settings.";
+    const warning = connection.settings?.locationsSyncWarning ? ` · ${connection.settings.locationsSyncWarning}` : "";
+    el.vagaroStatus.textContent =
+      provider !== "vagaro"
+        ? "RingPort calendar is active."
+        : connection.status === "active"
+          ? `Vagaro connected · ${services.length} services · ${professionals.length} professionals · ${links.length} links${lastSync}${credentials}${warning}`
+          : "Vagaro is not connected. Save the client ID, client secret, and region to connect.";
   }
 
   el.bookingServiceList.innerHTML = "";
@@ -1609,27 +1619,34 @@ async function loadBooking() {
 async function saveVagaroSettings() {
   const enabled = el.calendarProvider.value === "vagaro";
   setAdminStatus(enabled ? "Saving Vagaro booking system" : "Switching to RingPort calendar");
+  const fieldValue = (node) => String(node?.value || "").trim();
   const data = await apiJson("/api/business-admin/booking/vagaro", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       ...adminIdentity(),
       enabled,
-      region: el.vagaroRegion.value.trim() || "us02",
-      externalBusinessId: el.vagaroBusinessId.value.trim(),
-      externalGroupId: el.vagaroGroupId.value.trim(),
-      bookingUrl: el.vagaroBookingUrl.value.trim(),
-      cancelRescheduleUrl: el.vagaroManageUrl.value.trim(),
-      apiClientId: el.vagaroClientId.value.trim(),
-      apiClientSecret: el.vagaroClientSecret.value.trim(),
-      accessToken: el.vagaroAccessToken.value.trim(),
-      webhookSecret: el.vagaroWebhookSecret.value.trim(),
+      region: fieldValue(el.vagaroRegion) || "us02",
+      externalBusinessId: fieldValue(el.vagaroBusinessId),
+      externalGroupId: fieldValue(el.vagaroGroupId),
+      bookingUrl: fieldValue(el.vagaroBookingUrl),
+      cancelRescheduleUrl: fieldValue(el.vagaroManageUrl),
+      apiClientId: fieldValue(el.vagaroClientId),
+      apiClientSecret: fieldValue(el.vagaroClientSecret),
+      accessToken: fieldValue(el.vagaroAccessToken),
+      webhookSecret: fieldValue(el.vagaroWebhookSecret),
     }),
   });
   state.admin = { ...state.admin, calendarProvider: enabled ? "vagaro" : "internal" };
   renderBooking(data);
   await loadCalendar();
-  setAdminStatus(enabled ? "Vagaro settings saved" : "RingPort calendar enabled");
+  if (enabled && data.sync) {
+    setAdminStatus(
+      `Vagaro saved · ${data.sync.locationsImported || 0} locations · ${data.sync.servicesImported || 0} services · ${data.sync.professionalsImported || 0} professionals`,
+    );
+  } else {
+    setAdminStatus(enabled ? "Vagaro settings saved" : "RingPort calendar enabled");
+  }
 }
 
 async function syncVagaro() {
@@ -1689,10 +1706,7 @@ async function copyText(value, statusText = "Copied") {
 }
 
 async function copyVagaroWebhook() {
-  const baseUrl = el.vagaroWebhookUrl.value.trim();
-  const token = el.vagaroWebhookSecret.value.trim();
-  const url = token ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : baseUrl;
-  await copyText(url, "Vagaro webhook URL copied");
+  await copyText(el.vagaroWebhookUrl.value.trim(), "Vagaro webhook URL copied");
 }
 
 async function loadCalendar() {

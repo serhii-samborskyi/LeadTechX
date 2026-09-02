@@ -324,27 +324,36 @@
                 <h4>Booking system</h4>
                 <p>Use RingPort's internal calendar or connect an external booking system.</p>
               </div>
-              <div class="form-grid booking-provider-grid">
+              <div class="booking-provider-header">
                 <label>Provider<select id="calendarProvider"><option value="internal">RingPort calendar</option><option value="vagaro">Vagaro</option></select></label>
-                <label>Region<input id="vagaroRegion" placeholder="us02" /></label>
-                <label>Vagaro business ID<input id="vagaroBusinessId" /></label>
-                <label>Business group ID<input id="vagaroGroupId" /></label>
-                <label class="wide-field">Main booking link<input id="vagaroBookingUrl" type="url" placeholder="https://www.vagaro.com/..." /></label>
-                <label class="wide-field">Cancel/reschedule link<input id="vagaroManageUrl" type="url" placeholder="https://www.vagaro.com/..." /></label>
-                <label>API client ID<input id="vagaroClientId" /></label>
-                <label>API client secret<input id="vagaroClientSecret" type="password" placeholder="Leave blank to keep current" /></label>
-                <label>Access token<input id="vagaroAccessToken" type="password" placeholder="Optional; leave blank to auto-generate" /></label>
-                <label>Webhook token<input id="vagaroWebhookSecret" type="password" placeholder="Leave blank to keep current" /></label>
-              </div>
-              <div class="crm-webhook-controls booking-provider-actions">
-                <input id="vagaroWebhookUrl" readonly placeholder="Save Vagaro settings to generate webhook URL" />
-                <button id="copyVagaroWebhookButton" type="button">Copy webhook</button>
                 <button id="saveVagaroSettingsButton" class="primary" type="button">Save booking system</button>
-                <button id="syncVagaroButton" type="button">Sync services</button>
+              </div>
+              <div id="vagaroSettingsPanel" class="vagaro-settings-panel" hidden>
+                <div class="form-grid booking-provider-grid">
+                  <label>API client ID<input id="vagaroClientId" autocomplete="off" /></label>
+                  <label>API client secret<input id="vagaroClientSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /></label>
+                  <label>Region<input id="vagaroRegion" placeholder="us02" /></label>
+                </div>
+                <details class="advanced-booking-settings">
+                  <summary>Advanced fallback settings</summary>
+                  <div class="form-grid booking-provider-grid">
+                    <label>Vagaro business ID<input id="vagaroBusinessId" placeholder="Auto-discovered" /></label>
+                    <label>Business group ID<input id="vagaroGroupId" placeholder="Auto-discovered" /></label>
+                    <label>Webhook token<input id="vagaroWebhookSecret" type="password" placeholder="Auto-generated" /></label>
+                    <label class="wide-field">Main booking link<input id="vagaroBookingUrl" type="url" placeholder="Auto-discovered or https://www.vagaro.com/..." /></label>
+                    <label class="wide-field">Cancel/reschedule link<input id="vagaroManageUrl" type="url" placeholder="https://www.vagaro.com/..." /></label>
+                  </div>
+                </details>
+                <div class="crm-webhook-controls booking-provider-actions">
+                  <input id="vagaroWebhookUrl" readonly placeholder="Save Vagaro settings to generate webhook URL" />
+                  <button id="copyVagaroWebhookButton" type="button">Copy webhook</button>
+                  <button id="syncVagaroButton" type="button">Sync now</button>
+                </div>
+                <small>Copy the webhook URL into Vagaro's webhook settings after saving.</small>
               </div>
               <small id="vagaroStatus">Vagaro is not connected.</small>
             </div>
-            <div class="crm-webhook-card booking-directory-card">
+            <div class="crm-webhook-card booking-directory-card" hidden>
               <div>
                 <h4>Services, professionals, and links</h4>
                 <p>Imported services and staff help the receptionist search availability and send the best booking link.</p>

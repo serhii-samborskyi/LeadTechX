@@ -2791,12 +2791,44 @@ dd {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.booking-provider-header {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.vagaro-settings-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.vagaro-settings-panel[hidden] {
+  display: none;
+}
+
+.advanced-booking-settings {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.advanced-booking-settings summary {
+  cursor: pointer;
+  font-weight: 800;
+  color: var(--green-900);
+}
+
+.advanced-booking-settings .booking-provider-grid {
+  margin-top: 12px;
+}
+
 .booking-provider-grid .wide-field {
   grid-column: span 2;
 }
 
 .booking-provider-actions {
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 .booking-link-editor {
@@ -4063,6 +4095,7 @@ a.appointment-field-value {
   .form-grid,
   .model-settings-grid,
   .calendar-board,
+  .booking-provider-header,
   .booking-provider-grid,
   .booking-provider-actions,
   .booking-link-editor,

@@ -64,7 +64,7 @@ import type {
   SubscriptionPlan,
 } from "../src/types";
 
-type Screen = "boot" | "landing" | "building" | "review" | "test" | "claim" | "login" | "dashboard" | "billing";
+type Screen = "boot" | "landing" | "building" | "review" | "test" | "claim" | "login" | "dashboard" | "agentTest" | "billing";
 type IconType = ComponentType<{ color?: string; size?: number; strokeWidth?: number }>;
 
 type EditableProfile = {
@@ -268,6 +268,24 @@ function VoiceTestPanel({
   const call = useLiveAgentCall({ accessToken: agent.accessToken, deviceId });
   const remaining = call.previewQuota?.remainingSeconds ?? agent.voiceQuota?.remainingSeconds ?? 300;
   const isLive = ["connecting", "listening", "agent_speaking"].includes(call.status);
+  const hasPreviewTime = remaining > 0;
+  const statusText =
+    !isLive && !hasPreviewTime
+      ? "Your free voice preview was used on this device. Claim with email to keep testing."
+      : call.status === "idle"
+        ? "Your preview includes five minutes of voice testing before claim."
+        : call.status.replace("_", " ");
+  const handleVoicePress = () => {
+    if (isLive) {
+      call.stop();
+      return;
+    }
+    if (!hasPreviewTime) {
+      onClaim();
+      return;
+    }
+    call.start();
+  };
 
   return (
     <View style={styles.section}>
@@ -275,19 +293,17 @@ function VoiceTestPanel({
         <PhoneCall color={isLive ? "#ffffff" : "#31403a"} size={36} strokeWidth={2.3} />
       </View>
       <Text style={styles.sectionTitle}>Test {agent.profile.businessName}</Text>
-      <Text style={styles.bodyText}>
-        {call.status === "idle" ? "Your preview includes five minutes of voice testing before claim." : call.status.replace("_", " ")}
-      </Text>
+      <Text style={styles.bodyText}>{statusText}</Text>
       <Text style={styles.quotaText}>{Math.max(0, Math.floor(remaining / 60))}:{String(Math.max(0, remaining % 60)).padStart(2, "0")} preview left</Text>
       <View style={styles.row}>
         <Button
-          label={isLive ? "Live" : "Start voice test"}
-          icon={PhoneCall}
-          disabled={isLive || remaining <= 0}
-          onPress={call.start}
+          label={isLive ? "Stop voice test" : hasPreviewTime ? "Start voice test" : "Claim to keep testing"}
+          icon={isLive ? PhoneOff : PhoneCall}
+          onPress={handleVoicePress}
         />
-        <Button label="Stop" icon={PhoneOff} variant="secondary" disabled={!isLive} onPress={call.stop} />
+        <Button label="Reset" icon={RefreshCw} variant="secondary" onPress={call.stop} />
       </View>
+      {__DEV__ ? <Button label="Play test tone" icon={RefreshCw} variant="ghost" onPress={call.playDiagnosticTone} /> : null}
       {agent.demoPhoneNumber ? (
         <Button
           label={`Call ${agent.demoPhoneNumber}`}
@@ -310,6 +326,58 @@ function VoiceTestPanel({
         )}
       </View>
       <Button label="Claim this agent" icon={ArrowRight} onPress={onClaim} />
+    </View>
+  );
+}
+
+function OwnerVoiceTestPanel({
+  dashboard,
+  authToken,
+  deviceId,
+}: {
+  dashboard: DashboardResponse;
+  authToken: string;
+  deviceId: string;
+}) {
+  const call = useLiveAgentCall({ sessionToken: authToken, deviceId });
+  const isLive = ["connecting", "listening", "agent_speaking"].includes(call.status);
+  const assignedNumber =
+    dashboard.phoneNumbers.find((number) => number.status === "active")?.phoneNumber || dashboard.phoneNumbers[0]?.phoneNumber || "";
+
+  return (
+    <View style={styles.section}>
+      <View style={styles.voiceOrb}>
+        <PhoneCall color={isLive ? "#ffffff" : "#31403a"} size={36} strokeWidth={2.3} />
+      </View>
+      <Text style={styles.sectionTitle}>Talk to {dashboard.profile.businessName}</Text>
+      <Text style={styles.bodyText}>
+        {call.status === "idle" ? "Start a live test from this phone using your saved business profile." : call.status.replace("_", " ")}
+      </Text>
+      <View style={styles.row}>
+        <Button
+          label={isLive ? "Stop voice test" : "Start voice test"}
+          icon={isLive ? PhoneOff : PhoneCall}
+          onPress={isLive ? call.stop : call.start}
+        />
+        <Button label="Reset" icon={RefreshCw} variant="secondary" onPress={call.stop} />
+      </View>
+      {__DEV__ ? <Button label="Play test tone" icon={RefreshCw} variant="ghost" onPress={call.playDiagnosticTone} /> : null}
+      {assignedNumber ? (
+        <Button label={`Call ${assignedNumber}`} icon={PhoneCall} variant="ghost" onPress={() => Linking.openURL(`tel:${assignedNumber}`)} />
+      ) : null}
+      {call.error ? <Text style={styles.errorText}>{call.error}</Text> : null}
+      <View style={styles.transcript}>
+        {call.transcript.length ? (
+          call.transcript.map((item) => (
+            <View key={item.id} style={[styles.bubble, item.speaker === "agent" ? styles.agentBubble : styles.systemBubble]}>
+              <Text style={styles.bubbleSpeaker}>{item.speaker}</Text>
+              <Text style={styles.bubbleText}>{item.text}</Text>
+            </View>
+          ))
+        ) : (
+          <Text style={styles.emptyText}>Transcript will appear during the test call.</Text>
+        )}
+      </View>
     </View>
   );
 }
@@ -793,6 +861,10 @@ export default function RingPortMobile() {
                 <Metric label="Numbers" value={dashboard.metrics.assignedNumbers} icon={PhoneCall} />
               </View>
 
+              <View style={styles.dashboardPrimaryActions}>
+                <Button label="Test agent" icon={PhoneCall} onPress={() => setScreen("agentTest")} />
+              </View>
+
               <View style={styles.section}>
                 <View style={styles.sectionHeaderRow}>
                   <Text style={styles.sectionTitle}>Control modules</Text>
@@ -834,6 +906,14 @@ export default function RingPortMobile() {
                   <Text style={styles.emptyText}>No leads yet.</Text>
                 )}
               </View>
+            </>
+          ) : null}
+
+          {screen === "agentTest" && dashboard ? (
+            <>
+              <TopChrome onBack={() => setScreen("dashboard")} />
+              <BrandHeader title="Test the receptionist" subtitle={dashboard.profile.businessName} />
+              <OwnerVoiceTestPanel dashboard={dashboard} authToken={authToken} deviceId={deviceId} />
             </>
           ) : null}
 
@@ -1251,6 +1331,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 10,
+    marginBottom: 22,
+  },
+  dashboardPrimaryActions: {
     marginBottom: 22,
   },
   metric: {

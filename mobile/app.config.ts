@@ -28,7 +28,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ...config.ios,
       appleTeamId: process.env.EXPO_APPLE_TEAM_ID || config.ios?.appleTeamId,
       bundleIdentifier: "ai.ringport.app",
-      buildNumber: "1",
+      buildNumber: "2",
       supportsTablet: true,
       infoPlist: {
         ...config.ios?.infoPlist,
@@ -77,6 +77,18 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           recordAudioAndroid: true,
           enableBackgroundRecording: false,
           enableBackgroundPlayback: false,
+        },
+      ],
+      [
+        "react-native-audio-api",
+        {
+          iosMicrophonePermission: "Allow RingPort to access your microphone so you can test your AI receptionist.",
+          iosBackgroundMode: false,
+          androidPermissions: ["android.permission.MODIFY_AUDIO_SETTINGS"],
+          androidForegroundService: false,
+          androidFSTypes: ["mediaPlayback"],
+          disableFFmpeg: false,
+          disableStaticExternalLibs: false,
         },
       ],
     ],
