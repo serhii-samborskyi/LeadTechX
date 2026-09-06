@@ -2205,7 +2205,7 @@ const TOOL_WAIT_NOTICE_MESSAGES = {
   escalate_complaint: ["One moment while I notify management.", "I'm still sending that escalation."],
 };
 const TOOL_WAIT_NOTICE_IMMEDIATE = new Set(["build_business_agent"]);
-const BLUEBUBBLES_SEND_TIMEOUT_MS = Math.max(800, Number(process.env.BLUEBUBBLES_SEND_TIMEOUT_MS || 1800));
+const BLUEBUBBLES_SEND_TIMEOUT_MS = Math.max(800, Number(process.env.BLUEBUBBLES_SEND_TIMEOUT_MS || 6000));
 const DEFAULT_PLATFORM_BUSINESS_RULES =
   "Use only the language configured for the business agent. Do not switch languages automatically when the caller speaks another language. If the caller asks for another language, explain briefly in the configured language that the receptionist is set to use only that language unless the business changes settings.";
 const DEFAULT_ONBOARDING_INSTRUCTIONS =
@@ -3883,24 +3883,76 @@ function phoneFromBlueBubblesChatGuid(value) {
   return normalizeE164Phone(candidate);
 }
 
-function blueBubblesMessageAttempts({ toPhone, message, pathName }) {
-  const phone = normalizeE164Phone(toPhone) || String(toPhone || "").trim();
-  const base = () => ({
+function blueBubblesTextBody(message) {
+  return {
     message,
     tempGuid: `temp-${crypto.randomUUID()}`,
     method: "private-api",
+  };
+}
+
+function blueBubblesNewChatBody({ phone, message, service }) {
+  return {
+    addresses: [phone],
+    message,
+    tempGuid: `temp-${crypto.randomUUID()}`,
+    method: "private-api",
+    service,
+  };
+}
+
+function uniqueBlueBubblesAttempts(attempts) {
+  const seen = new Set();
+  return attempts.filter((attempt) => {
+    const key = `${attempt.mode}|${attempt.pathName || ""}|${JSON.stringify(attempt.body || {})}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
-  if (!pathName.includes("/message/text")) {
-    return [{ mode: "addresses", body: { addresses: [phone], message } }];
+}
+
+function blueBubblesMessageAttempts({ toPhone, message, pathName }) {
+  const phone = normalizeE164Phone(toPhone) || String(toPhone || "").trim();
+  const configuredPath = String(pathName || "/api/v1/message/text");
+  const messageTextPath = "/api/v1/message/text";
+  const chatNewPath = "/api/v1/chat/new";
+  const textAttempt = (mode, chatGuid, sendPath = messageTextPath) => ({
+    mode,
+    pathName: sendPath,
+    body: { ...blueBubblesTextBody(message), chatGuid },
+  });
+  const chatNewAttempt = (mode, service, sendPath = chatNewPath) => ({
+    mode,
+    pathName: sendPath,
+    body: blueBubblesNewChatBody({ phone, message, service }),
+  });
+  const attempts = [];
+  if (configuredPath.includes("/message/text")) {
+    attempts.push(
+      textAttempt("any_chat_guid", `any;-;${phone}`, configuredPath),
+      textAttempt("imessage_chat_guid", `iMessage;-;${phone}`, configuredPath),
+      textAttempt("sms_chat_guid", `SMS;-;${phone}`, configuredPath),
+      chatNewAttempt("sms_chat_new", "SMS"),
+    );
+  } else if (configuredPath.includes("/chat/new")) {
+    attempts.push(
+      chatNewAttempt("imessage_chat_new", "iMessage", configuredPath),
+      chatNewAttempt("sms_chat_new", "SMS", configuredPath),
+      textAttempt("any_chat_guid", `any;-;${phone}`),
+      textAttempt("sms_chat_guid", `SMS;-;${phone}`),
+    );
+  } else {
+    attempts.push(
+      { mode: "configured_addresses", pathName: configuredPath, body: { addresses: [phone], message } },
+      chatNewAttempt("sms_chat_new", "SMS"),
+      textAttempt("any_chat_guid", `any;-;${phone}`),
+      textAttempt("sms_chat_guid", `SMS;-;${phone}`),
+    );
   }
-  const attempts = [
-    { mode: "imessage_chat_guid", body: { ...base(), chatGuid: `iMessage;-;${phone}` } },
-    { mode: "sms_chat_guid", body: { ...base(), chatGuid: `SMS;-;${phone}` } },
-    { mode: "addresses", body: { ...base(), addresses: [phone] } },
-  ];
+  const uniqueAttempts = uniqueBlueBubblesAttempts(attempts);
   const preferred = blueBubblesPreferredModes.get(phone);
-  if (!preferred) return attempts;
-  return attempts.sort((a, b) => (a.mode === preferred ? -1 : b.mode === preferred ? 1 : 0));
+  if (!preferred) return uniqueAttempts;
+  return uniqueAttempts.sort((a, b) => (a.mode === preferred ? -1 : b.mode === preferred ? 1 : 0));
 }
 
 function businessCacheKey(businessName, website) {
@@ -6178,15 +6230,20 @@ async function lookupOnboardingBusiness(callerPhone, settings) {
 async function sendBlueBubblesMessage({ settings, toPhone, message, passwordOverride = "" }) {
   const password = String(passwordOverride || "").trim() || (await systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD"));
   if (!settings.blueBubblesBaseUrl || !password) throw new Error("BlueBubbles is not configured");
-  const url = new URL(settings.blueBubblesSendPath || "/api/v1/message/text", settings.blueBubblesBaseUrl);
-  url.searchParams.set("password", password);
-  const attempts = blueBubblesMessageAttempts({ toPhone, message, pathName: url.pathname });
+  const configuredUrl = new URL(settings.blueBubblesSendPath || "/api/v1/message/text", settings.blueBubblesBaseUrl);
+  configuredUrl.searchParams.set("password", password);
+  const attempts = blueBubblesMessageAttempts({ toPhone, message, pathName: configuredUrl.pathname });
   const errors = [];
   for (const attempt of attempts) {
+    const attemptUrl =
+      attempt.pathName && attempt.pathName !== configuredUrl.pathname
+        ? new URL(attempt.pathName, settings.blueBubblesBaseUrl)
+        : new URL(configuredUrl);
+    attemptUrl.searchParams.set("password", password);
     const attemptStartedAt = Date.now();
     let response;
     try {
-      response = await fetch(url, {
+      response = await fetch(attemptUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify(attempt.body),
@@ -6213,13 +6270,16 @@ async function sendBlueBubblesMessage({ settings, toPhone, message, passwordOver
         detail: {
           ...data,
           blueBubblesAttempt: attempt.mode,
+          blueBubblesPath: attemptUrl.pathname,
           httpStatus: response.status,
           durationMs: Date.now() - attemptStartedAt,
           timeoutMs: BLUEBUBBLES_SEND_TIMEOUT_MS,
         },
       };
     }
-    errors.push(`${attempt.mode}: ${data.message || data.error || `HTTP ${response.status}`} (${Date.now() - attemptStartedAt}ms)`);
+    errors.push(
+      `${attempt.mode}: ${data.message || data.error || `HTTP ${response.status}`} (${Date.now() - attemptStartedAt}ms)`,
+    );
   }
   throw new Error(errors.join("; ") || "BlueBubbles returned no usable response");
 }

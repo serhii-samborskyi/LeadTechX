@@ -255,7 +255,7 @@ Phone onboarding is administered under Admin > Onboarding:
 
 The onboarding agent looks up or collects business details, texts the captured company name and website to the caller for confirmation, creates the trial agent only after confirmation, and sends a unique password-setup link.
 
-For BlueBubbles, enter the server base URL, password, and the send endpoint used by your server version. The default is `/api/v1/chat/new`.
+For BlueBubbles, enter the server base URL, password, and the send endpoint used by your server version. The default is `/api/v1/message/text`; RingPort sends to `any;-;+E164` first and falls back to `/api/v1/chat/new` with `service: "SMS"` for new SMS threads.
 
 For Sent.dm, create and approve a message template before enabling the provider. Configure its template ID or name and optional profile ID. The app sends `business_name` and `setup_url` as template parameters.
 
