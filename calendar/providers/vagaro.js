@@ -49,6 +49,30 @@ function includesText(haystack, needle) {
   return right && left.includes(right);
 }
 
+function safeTimezone(value) {
+  const zone = String(value || "").trim() || "America/Chicago";
+  return DateTime.now().setZone(zone).isValid ? zone : "America/Chicago";
+}
+
+function requestedStartDay(fromDate, timezone) {
+  const zone = safeTimezone(timezone);
+  const today = DateTime.now().setZone(zone).startOf("day");
+  if (!fromDate) return today;
+  const parsed = DateTime.fromISO(String(fromDate), { zone });
+  return parsed.isValid ? parsed.setZone(zone).startOf("day") : today;
+}
+
+function futureStartDay(fromDate, timezone) {
+  const zone = safeTimezone(timezone);
+  const today = DateTime.now().setZone(zone).startOf("day");
+  const requested = requestedStartDay(fromDate, zone);
+  return requested.toMillis() < today.toMillis() ? today : requested;
+}
+
+function isPastDateAvailabilityError(message) {
+  return /appointment date can(?:\s*not|'t)\s+be\s+past date/i.test(String(message || ""));
+}
+
 async function activeConnection(prisma, profile) {
   if (!profile?.id) return null;
   return prisma.bookingConnection.findUnique({
@@ -119,8 +143,8 @@ function mapAppointment(appointment) {
 }
 
 async function localAppointments({ prisma, profile, fromDate, days, timezone }) {
-  const zone = timezone || "America/Chicago";
-  const firstDay = DateTime.fromISO(fromDate || DateTime.now().setZone(zone).toISODate(), { zone }).startOf("day");
+  const zone = safeTimezone(timezone);
+  const firstDay = requestedStartDay(fromDate, zone);
   const dayCount = Math.min(60, Math.max(1, Number(days || 14)));
   const rangeEnd = firstDay.plus({ days: dayCount });
   const appointments = await prisma.bookingAppointment.findMany({
@@ -136,7 +160,7 @@ async function localAppointments({ prisma, profile, fromDate, days, timezone }) 
 }
 
 function normalizeAvailabilityResponse(data, { service, professional, timezone }) {
-  const zone = timezone || "America/Chicago";
+  const zone = safeTimezone(timezone);
   const slots = [];
   const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
   for (const row of rows) {
@@ -179,8 +203,8 @@ async function liveAvailability({ connection, service, professional, fromDate, d
   }
   const token = await resolveBookingAccessToken(connection);
   if (!token) throw new Error("Vagaro access token is not configured");
-  const zone = timezone || "America/Chicago";
-  const startDay = DateTime.fromISO(fromDate || DateTime.now().setZone(zone).toISODate(), { zone }).startOf("day");
+  const zone = safeTimezone(timezone);
+  const startDay = futureStartDay(fromDate, zone);
   const dayCount = Math.min(7, Math.max(1, Number(days || 3)));
   const bookingItem = { serviceId: service.externalId };
   if (professional?.externalId) bookingItem.serviceProviderIds = [professional.externalId];
@@ -201,20 +225,25 @@ async function liveAvailability({ connection, service, professional, fromDate, d
   const results = await Promise.allSettled(calls);
   const slots = [];
   const errors = [];
+  const pastDateErrors = [];
   for (const result of results) {
     if (result.status === "fulfilled") {
       slots.push(...normalizeAvailabilityResponse(result.value, { service, professional, timezone: zone }));
     } else {
-      errors.push(result.reason?.message || "Vagaro availability failed");
+      const message = result.reason?.message || "Vagaro availability failed";
+      if (isPastDateAvailabilityError(message)) pastDateErrors.push(message);
+      else errors.push(message);
     }
   }
-  if (!slots.length && errors.length === results.length) throw new Error(errors[0]);
+  if (!slots.length && errors.length + pastDateErrors.length === results.length) {
+    throw new Error(errors[0] || "Vagaro rejected the selected date as past. Search a future date.");
+  }
   return { slots, errors };
 }
 
 export async function listSlots(args) {
   const { prisma, profile, config } = args;
-  const timezone = config.timezone || "America/Chicago";
+  const timezone = safeTimezone(config.timezone);
   const connection = await activeConnection(prisma, profile);
   const appointments = await localAppointments({
     prisma,

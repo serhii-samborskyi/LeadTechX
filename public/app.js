@@ -844,6 +844,14 @@ function calendarDateKey(value, timezone) {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+function calendarTodayKey(timezone) {
+  try {
+    return calendarDateKey(new Date(), timezone || "America/Chicago");
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
 function calendarDayLabel(value, timezone) {
   return new Intl.DateTimeFormat(undefined, {
     timeZone: timezone,
@@ -1759,7 +1767,11 @@ async function copyVagaroWebhook() {
 
 async function loadCalendar() {
   if (!state.admin) return;
-  const query = new URLSearchParams({ business_name: el.businessName.value.trim(), days: "14" });
+  const query = new URLSearchParams({
+    business_name: el.businessName.value.trim(),
+    days: "14",
+    from: calendarTodayKey(el.calendarTimezone?.value || "America/Chicago"),
+  });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
   if (el.calendarServiceFilter?.value) query.set("service_id", el.calendarServiceFilter.value);
   if (el.calendarProfessionalFilter?.value) query.set("professional_id", el.calendarProfessionalFilter.value);

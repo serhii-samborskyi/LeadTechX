@@ -6995,6 +6995,8 @@ function runtimeBusinessInstructions(config) {
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
   const externalBooking = config.calendarProvider === "vagaro";
+  const localNow = DateTime.now().setZone(config.timezone || "America/Chicago");
+  const currentLocalDate = (localNow.isValid ? localNow : DateTime.now().setZone("America/Chicago")).toISODate();
   return `
 Business-managed receptionist configuration:
 - Appointment mode: ${
@@ -7003,8 +7005,9 @@ Business-managed receptionist configuration:
       : config.appointmentMode === "instant"
         ? "Book available slots immediately"
         : "Create pending appointment requests"
-  }.
+}.
 - Calendar timezone: ${config.timezone}.
+- Current local date: ${currentLocalDate}. Never search availability or schedule appointments before this date. If the caller asks for a past date, ask for a future date.
 - Default appointment duration: ${config.slotDurationMinutes} minutes.
 - Information to collect before an appointment: ${JSON.stringify(intake)}
 - Knowledge base: ${JSON.stringify(knowledge)}
@@ -7094,7 +7097,7 @@ function toolDeclarations(config) {
       parameters: {
         type: "OBJECT",
         properties: {
-          fromDate: { type: "STRING", description: "Start date in YYYY-MM-DD format." },
+          fromDate: { type: "STRING", description: "Start date in YYYY-MM-DD format. Must be today or a future date in the calendar timezone." },
           days: { type: "INTEGER", description: "Number of days to search, up to 30." },
           durationMinutes: { type: "INTEGER" },
           serviceName: { type: "STRING", description: "Service the caller wants, for example haircut, facial, lash fill." },
