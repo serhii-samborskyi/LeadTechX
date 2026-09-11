@@ -627,6 +627,7 @@ function renderBlueBubblesDiagnostic(data) {
   const details = [];
   if (data.toPhone) details.push(`To: ${data.toPhone}`);
   if (data.blueBubblesAttempt) details.push(`Send mode: ${data.blueBubblesAttempt}`);
+  if (data.deliveryStatus) details.push(`Delivery status: ${data.deliveryStatus}`);
   if (data.providerMessageId) details.push(`Message ID: ${data.providerMessageId}`);
   if (data.httpStatus) details.push(`HTTP: ${data.httpStatus}`);
   for (const detail of details) {

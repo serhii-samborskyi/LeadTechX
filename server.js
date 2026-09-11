@@ -165,6 +165,8 @@ const SESSION_DAYS = 14;
 const onboardingAttempts = new Map();
 const activeOnboardingTextSessions = new Map();
 const blueBubblesPreferredModes = new Map();
+const blueBubblesDeliveryRetryLocks = new Set();
+let blueBubblesPendingDeliveryInterval = null;
 const aiRateLimitHits = new Map();
 let prismaReconnectPromise = null;
 
@@ -2206,6 +2208,7 @@ const TOOL_WAIT_NOTICE_MESSAGES = {
 };
 const TOOL_WAIT_NOTICE_IMMEDIATE = new Set(["build_business_agent"]);
 const BLUEBUBBLES_SEND_TIMEOUT_MS = Math.max(800, Number(process.env.BLUEBUBBLES_SEND_TIMEOUT_MS || 6000));
+const BLUEBUBBLES_DELIVERY_CHECK_DELAYS_MS = [8000, 30000];
 const DEFAULT_PLATFORM_BUSINESS_RULES =
   "Use only the language configured for the business agent. Do not switch languages automatically when the caller speaks another language. If the caller asks for another language, explain briefly in the configured language that the receptionist is set to use only that language unless the business changes settings.";
 const DEFAULT_ONBOARDING_INSTRUCTIONS =
@@ -3883,76 +3886,218 @@ function phoneFromBlueBubblesChatGuid(value) {
   return normalizeE164Phone(candidate);
 }
 
-function blueBubblesTextBody(message) {
+function blueBubblesAttemptLog(attempt = {}) {
   return {
-    message,
-    tempGuid: `temp-${crypto.randomUUID()}`,
-    method: "private-api",
+    index: Number.isFinite(Number(attempt.index)) ? Number(attempt.index) : 0,
+    mode: String(attempt.mode || ""),
+    kind: String(attempt.kind || ""),
+    pathName: String(attempt.pathName || ""),
+    service: String(attempt.service || ""),
+    chatGuid: String(attempt.chatGuid || ""),
+    addresses: Array.isArray(attempt.addresses) ? attempt.addresses.map((item) => String(item || "")).filter(Boolean) : [],
+    method: String(attempt.method || "private-api"),
   };
 }
 
-function blueBubblesNewChatBody({ phone, message, service }) {
+function blueBubblesAttemptBody(attempt = {}, message) {
+  const tempGuid = `temp-${crypto.randomUUID()}`;
+  if (attempt.kind === "create_chat") {
+    return {
+      addresses: attempt.addresses || [],
+      message,
+      tempGuid,
+      method: attempt.method || "private-api",
+      service: attempt.service || "iMessage",
+    };
+  }
   return {
-    addresses: [phone],
+    chatGuid: attempt.chatGuid,
     message,
-    tempGuid: `temp-${crypto.randomUUID()}`,
-    method: "private-api",
-    service,
+    tempGuid,
+    method: attempt.method || "private-api",
   };
 }
 
 function uniqueBlueBubblesAttempts(attempts) {
   const seen = new Set();
   return attempts.filter((attempt) => {
-    const key = `${attempt.mode}|${attempt.pathName || ""}|${JSON.stringify(attempt.body || {})}`;
+    const item = blueBubblesAttemptLog(attempt);
+    const key = `${item.mode}|${item.kind}|${item.pathName}|${item.service}|${item.chatGuid}|${item.addresses.join(",")}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 }
 
-function blueBubblesMessageAttempts({ toPhone, message, pathName }) {
+function blueBubblesMessageAttempts({ toPhone, pathName }) {
   const phone = normalizeE164Phone(toPhone) || String(toPhone || "").trim();
   const configuredPath = String(pathName || "/api/v1/message/text");
   const messageTextPath = "/api/v1/message/text";
   const chatNewPath = "/api/v1/chat/new";
-  const textAttempt = (mode, chatGuid, sendPath = messageTextPath) => ({
-    mode,
-    pathName: sendPath,
-    body: { ...blueBubblesTextBody(message), chatGuid },
-  });
-  const chatNewAttempt = (mode, service, sendPath = chatNewPath) => ({
-    mode,
-    pathName: sendPath,
-    body: blueBubblesNewChatBody({ phone, message, service }),
-  });
   const attempts = [];
+  const addTextAttempt = (mode, service, sendPath = messageTextPath) => {
+    attempts.push({
+      index: attempts.length,
+      mode,
+      kind: "chat_guid",
+      pathName: sendPath,
+      service,
+      chatGuid: `${service};-;${phone}`,
+      method: "private-api",
+    });
+  };
+  const addChatNewAttempt = (mode, service, sendPath = chatNewPath) => {
+    attempts.push({
+      index: attempts.length,
+      mode,
+      kind: "create_chat",
+      pathName: sendPath,
+      service,
+      addresses: [phone],
+      method: "private-api",
+    });
+  };
   if (configuredPath.includes("/message/text")) {
-    attempts.push(
-      textAttempt("any_chat_guid", `any;-;${phone}`, configuredPath),
-      textAttempt("imessage_chat_guid", `iMessage;-;${phone}`, configuredPath),
-      textAttempt("sms_chat_guid", `SMS;-;${phone}`, configuredPath),
-      chatNewAttempt("sms_chat_new", "SMS"),
-    );
+    addTextAttempt("imessage_chat_guid", "iMessage", configuredPath);
+    addTextAttempt("sms_chat_guid", "SMS", configuredPath);
+    addChatNewAttempt("imessage_chat_new", "iMessage");
+    addChatNewAttempt("sms_chat_new", "SMS");
   } else if (configuredPath.includes("/chat/new")) {
-    attempts.push(
-      chatNewAttempt("imessage_chat_new", "iMessage", configuredPath),
-      chatNewAttempt("sms_chat_new", "SMS", configuredPath),
-      textAttempt("any_chat_guid", `any;-;${phone}`),
-      textAttempt("sms_chat_guid", `SMS;-;${phone}`),
-    );
+    addChatNewAttempt("imessage_chat_new", "iMessage", configuredPath);
+    addChatNewAttempt("sms_chat_new", "SMS", configuredPath);
+    addTextAttempt("imessage_chat_guid", "iMessage");
+    addTextAttempt("sms_chat_guid", "SMS");
   } else {
-    attempts.push(
-      { mode: "configured_addresses", pathName: configuredPath, body: { addresses: [phone], message } },
-      chatNewAttempt("sms_chat_new", "SMS"),
-      textAttempt("any_chat_guid", `any;-;${phone}`),
-      textAttempt("sms_chat_guid", `SMS;-;${phone}`),
-    );
+    addTextAttempt("imessage_chat_guid", "iMessage");
+    addTextAttempt("sms_chat_guid", "SMS");
+    addChatNewAttempt("imessage_chat_new", "iMessage");
+    addChatNewAttempt("sms_chat_new", "SMS");
+    attempts.push({
+      index: attempts.length,
+      mode: "configured_addresses",
+      kind: "create_chat",
+      pathName: configuredPath,
+      service: "SMS",
+      addresses: [phone],
+      method: "private-api",
+    });
   }
   const uniqueAttempts = uniqueBlueBubblesAttempts(attempts);
   const preferred = blueBubblesPreferredModes.get(phone);
   if (!preferred) return uniqueAttempts;
   return uniqueAttempts.sort((a, b) => (a.mode === preferred ? -1 : b.mode === preferred ? 1 : 0));
+}
+
+function blueBubblesSentMessage(result = {}) {
+  const data = result?.data || result || {};
+  if (Array.isArray(data) && data[0]) return data[0];
+  if (Array.isArray(data?.messages) && data.messages[0]) return data.messages[0];
+  if (data?.message && typeof data.message === "object") return data.message;
+  const messageFields = ["isSent", "isFromMe", "dateCreated", "isDelivered", "dateDelivered", "error", "handle"];
+  if (data?.guid && messageFields.some((field) => Object.hasOwn(data, field))) return data;
+  return null;
+}
+
+function blueBubblesChatGuidFromResult(result = {}, fallback = "") {
+  const data = result?.data || result || {};
+  const message = blueBubblesSentMessage(result);
+  return (
+    data?.chats?.[0]?.guid ||
+    data?.chat?.guid ||
+    data?.chatGuid ||
+    message?.chats?.[0]?.guid ||
+    message?.chat?.guid ||
+    message?.chatGuid ||
+    fallback ||
+    ""
+  );
+}
+
+function blueBubblesProviderMessageId(result = {}) {
+  const data = result?.data || result || {};
+  const message = blueBubblesSentMessage(result);
+  return message?.guid || data?.messageGuid || data?.message_guid || "";
+}
+
+function blueBubblesMessageError(result = {}) {
+  const data = result?.data || result || {};
+  const message = blueBubblesSentMessage(result) || data?.message || {};
+  const rawError = message?.error ?? data?.error ?? "";
+  const errorText = String(rawError ?? "").trim();
+  return errorText && !["0", "false", "null", "undefined"].includes(errorText.toLowerCase()) ? errorText : "";
+}
+
+function blueBubblesDeliveryStatus(result = {}) {
+  const message = blueBubblesSentMessage(result);
+  const error = blueBubblesMessageError(result);
+  if (error) return { status: "delivery_failed", error };
+  if (message?.isDelivered === true || message?.dateDelivered) return { status: "sent", error: "" };
+  return { status: "delivery_pending", error: "" };
+}
+
+function blueBubblesAttemptUrl({ settings, configuredUrl, attempt }) {
+  const attemptPath = String(attempt?.pathName || configuredUrl.pathname || "/api/v1/message/text");
+  return attemptPath === configuredUrl.pathname ? new URL(configuredUrl) : new URL(attemptPath, settings.blueBubblesBaseUrl);
+}
+
+async function blueBubblesJsonRequest({ url, method = "POST", body = null, timeoutMs = BLUEBUBBLES_SEND_TIMEOUT_MS }) {
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: body === null || body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    throw new Error(error.message);
+  }
+  const raw = await response.text().catch(() => "");
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    data = { raw: raw.slice(0, 1000) };
+  }
+  const numericStatus = Number(data.status);
+  const failedStatus = data.status !== undefined && Number.isFinite(numericStatus) && numericStatus >= 400;
+  if (!response.ok || failedStatus || data.success === false) {
+    throw new Error(data.message || data.error || `HTTP ${response.status}`);
+  }
+  return { data, httpStatus: response.status };
+}
+
+async function sendBlueBubblesAttempt({ settings, configuredUrl, attempt, message }) {
+  const attemptUrl = blueBubblesAttemptUrl({ settings, configuredUrl, attempt });
+  configuredUrl.searchParams.forEach((value, key) => {
+    if (!attemptUrl.searchParams.has(key)) attemptUrl.searchParams.set(key, value);
+  });
+  const body = blueBubblesAttemptBody(attempt, message);
+  const attemptStartedAt = Date.now();
+  const { data, httpStatus } = await blueBubblesJsonRequest({ url: attemptUrl, body });
+  const delivery = blueBubblesDeliveryStatus(data);
+  if (delivery.status === "delivery_failed") {
+    throw new Error(`BlueBubbles returned message error ${delivery.error}`);
+  }
+  const providerMessageId = blueBubblesProviderMessageId(data);
+  const chatGuid = blueBubblesChatGuidFromResult(data, attempt.chatGuid);
+  return {
+    providerMessageId: providerMessageId || null,
+    deliveryStatus: delivery.status,
+    detail: {
+      ...data,
+      blueBubblesAttempt: attempt.mode,
+      blueBubblesAttemptIndex: Number(attempt.index),
+      blueBubblesAttemptSpec: blueBubblesAttemptLog(attempt),
+      blueBubblesPath: attemptUrl.pathname,
+      blueBubblesChatGuid: chatGuid || null,
+      blueBubblesTempGuid: body.tempGuid || null,
+      deliveryStatus: delivery.status,
+      httpStatus,
+      durationMs: Date.now() - attemptStartedAt,
+      timeoutMs: BLUEBUBBLES_SEND_TIMEOUT_MS,
+    },
+  };
 }
 
 function businessCacheKey(businessName, website) {
@@ -6232,56 +6377,291 @@ async function sendBlueBubblesMessage({ settings, toPhone, message, passwordOver
   if (!settings.blueBubblesBaseUrl || !password) throw new Error("BlueBubbles is not configured");
   const configuredUrl = new URL(settings.blueBubblesSendPath || "/api/v1/message/text", settings.blueBubblesBaseUrl);
   configuredUrl.searchParams.set("password", password);
-  const attempts = blueBubblesMessageAttempts({ toPhone, message, pathName: configuredUrl.pathname });
+  const attempts = blueBubblesMessageAttempts({ toPhone, pathName: configuredUrl.pathname });
+  const attemptLogs = attempts.map(blueBubblesAttemptLog);
   const errors = [];
   for (const attempt of attempts) {
-    const attemptUrl =
-      attempt.pathName && attempt.pathName !== configuredUrl.pathname
-        ? new URL(attempt.pathName, settings.blueBubblesBaseUrl)
-        : new URL(configuredUrl);
-    attemptUrl.searchParams.set("password", password);
-    const attemptStartedAt = Date.now();
-    let response;
     try {
-      response = await fetch(attemptUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify(attempt.body),
-        signal: AbortSignal.timeout(BLUEBUBBLES_SEND_TIMEOUT_MS),
-      });
+      const result = await sendBlueBubblesAttempt({ settings, configuredUrl, attempt, message });
+      const phone = normalizeE164Phone(toPhone) || String(toPhone || "").trim();
+      if (phone && result.deliveryStatus === "sent") blueBubblesPreferredModes.set(phone, attempt.mode);
+      result.detail.blueBubblesAttempts = attemptLogs;
+      result.detail.blueBubblesAttemptErrors = errors.slice();
+      return result;
     } catch (error) {
       errors.push(`${attempt.mode}: ${error.message}`);
-      continue;
     }
-    const raw = await response.text().catch(() => "");
-    let data = {};
-    try {
-      data = raw ? JSON.parse(raw) : {};
-    } catch {
-      data = { raw: raw.slice(0, 1000) };
-    }
-    const numericStatus = Number(data.status);
-    const failedStatus = data.status && Number.isFinite(numericStatus) && numericStatus >= 400;
-    if (response.ok && !failedStatus && data.success !== false) {
-      const phone = normalizeE164Phone(toPhone) || String(toPhone || "").trim();
-      if (phone) blueBubblesPreferredModes.set(phone, attempt.mode);
-      return {
-        providerMessageId: data.data?.guid || data.data?.tempGuid || data.guid || data.tempGuid || null,
-        detail: {
-          ...data,
-          blueBubblesAttempt: attempt.mode,
-          blueBubblesPath: attemptUrl.pathname,
-          httpStatus: response.status,
-          durationMs: Date.now() - attemptStartedAt,
-          timeoutMs: BLUEBUBBLES_SEND_TIMEOUT_MS,
-        },
-      };
-    }
-    errors.push(
-      `${attempt.mode}: ${data.message || data.error || `HTTP ${response.status}`} (${Date.now() - attemptStartedAt}ms)`,
-    );
   }
   throw new Error(errors.join("; ") || "BlueBubbles returned no usable response");
+}
+
+function blueBubblesDeliveryDetail(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function blueBubblesDeliveryAttemptsFromDetail(delivery, detail, settings) {
+  const attempts = Array.isArray(detail.blueBubblesAttempts)
+    ? detail.blueBubblesAttempts.map((attempt, index) => ({
+        ...blueBubblesAttemptLog(attempt),
+        index: Number.isFinite(Number(attempt.index)) ? Number(attempt.index) : index,
+      }))
+    : blueBubblesMessageAttempts({
+        toPhone: delivery.toPhone,
+        pathName: new URL(settings.blueBubblesSendPath || "/api/v1/message/text", settings.blueBubblesBaseUrl).pathname,
+      });
+  return uniqueBlueBubblesAttempts(attempts);
+}
+
+function blueBubblesDeliveryHistory(detail, entry) {
+  const existing = Array.isArray(detail.blueBubblesDeliveryHistory) ? detail.blueBubblesDeliveryHistory.slice(-8) : [];
+  return [...existing, { at: new Date().toISOString(), ...entry }];
+}
+
+async function queryBlueBubblesMessage(settings, providerMessageId) {
+  const password = await systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD");
+  if (!settings.blueBubblesBaseUrl || !password) throw new Error("BlueBubbles is not configured");
+  const url = new URL("/api/v1/message/query", settings.blueBubblesBaseUrl);
+  url.searchParams.set("password", password);
+  const { data } = await blueBubblesJsonRequest({
+    url,
+    body: {
+      limit: 1,
+      offset: 0,
+      with: ["chat", "handle"],
+      where: [{ statement: "message.guid = :guid", args: { guid: providerMessageId } }],
+      sort: "DESC",
+    },
+    timeoutMs: Math.max(8000, BLUEBUBBLES_SEND_TIMEOUT_MS),
+  });
+  return data;
+}
+
+async function logBlueBubblesDeliveryEvent(delivery, eventType, detail = {}) {
+  if (!delivery?.voiceCallId) return;
+  const voiceCall = await prisma.voiceCall
+    .findUnique({ where: { id: delivery.voiceCallId }, select: { callControlId: true } })
+    .catch(() => null);
+  if (!voiceCall?.callControlId) return;
+  await logVoiceCallEvent(voiceCall.callControlId, eventType, {
+    provider: "bluebubbles",
+    messageDeliveryId: delivery.id,
+    purpose: delivery.purpose,
+    toPhone: delivery.toPhone,
+    ...detail,
+  });
+}
+
+function scheduleBlueBubblesDeliveryChecks(deliveryId) {
+  for (const delayMs of BLUEBUBBLES_DELIVERY_CHECK_DELAYS_MS) {
+    const timer = setTimeout(() => {
+      safeBackground(`bluebubbles-delivery-check:${deliveryId}:${delayMs}`, () =>
+        checkBlueBubblesDelivery(deliveryId, delayMs),
+      );
+    }, delayMs);
+    if (typeof timer.unref === "function") timer.unref();
+  }
+}
+
+async function recoverPendingBlueBubblesDeliveries() {
+  const finalDelayMs = Math.max(...BLUEBUBBLES_DELIVERY_CHECK_DELAYS_MS);
+  const cutoff = new Date(Date.now() - finalDelayMs);
+  const recentFloor = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const deliveries = await prisma.messageDelivery.findMany({
+    where: {
+      provider: "bluebubbles",
+      status: { in: ["sending", "delivery_pending"] },
+      updatedAt: { lte: cutoff },
+      createdAt: { gte: recentFloor },
+    },
+    orderBy: { updatedAt: "asc" },
+    take: 25,
+  });
+  for (const delivery of deliveries) {
+    await checkBlueBubblesDelivery(delivery.id, finalDelayMs);
+  }
+}
+
+function scheduleBlueBubblesPendingDeliveryWorker(delayMs = 10000) {
+  if (blueBubblesPendingDeliveryInterval) return;
+  const run = () => {
+    safeBackground("bluebubbles-pending-delivery-recovery", recoverPendingBlueBubblesDeliveries);
+  };
+  const startupTimer = setTimeout(run, delayMs);
+  if (typeof startupTimer.unref === "function") startupTimer.unref();
+  blueBubblesPendingDeliveryInterval = setInterval(run, 60 * 1000);
+  if (typeof blueBubblesPendingDeliveryInterval.unref === "function") blueBubblesPendingDeliveryInterval.unref();
+}
+
+async function retryBlueBubblesDelivery(delivery, reason = "BlueBubbles delivery failed") {
+  if (!delivery?.id || blueBubblesDeliveryRetryLocks.has(delivery.id)) return null;
+  blueBubblesDeliveryRetryLocks.add(delivery.id);
+  try {
+    const settings = await getSettings();
+    const password = await systemSecret("bluebubbles_password", "BLUEBUBBLES_PASSWORD");
+    if (!settings.blueBubblesBaseUrl || !password) throw new Error("BlueBubbles is not configured");
+    const configuredUrl = new URL(settings.blueBubblesSendPath || "/api/v1/message/text", settings.blueBubblesBaseUrl);
+    configuredUrl.searchParams.set("password", password);
+    const detail = blueBubblesDeliveryDetail(delivery.detail);
+    const message = String(detail.message || "").trim();
+    if (!message) throw new Error("Original BlueBubbles message text is missing");
+    const attempts = blueBubblesDeliveryAttemptsFromDetail(delivery, detail, settings);
+    const currentIndex = Number(
+      detail.blueBubblesAttemptIndex ?? detail.blueBubblesAttemptSpec?.index ?? detail.blueBubblesAttempt?.index ?? -1,
+    );
+    const remaining = attempts.filter((attempt) => Number(attempt.index) > currentIndex);
+    if (!remaining.length) throw new Error("No BlueBubbles fallback attempts remain");
+    const errors = [];
+    for (const attempt of remaining) {
+      try {
+        const result = await sendBlueBubblesAttempt({ settings, configuredUrl, attempt, message });
+        const nextDetail = {
+          ...result.detail,
+          metadata: detail.metadata || {},
+          message,
+          blueBubblesAttempts: attempts.map(blueBubblesAttemptLog),
+          blueBubblesAttemptErrors: [
+            ...(Array.isArray(detail.blueBubblesAttemptErrors) ? detail.blueBubblesAttemptErrors : []),
+            `fallback_reason: ${reason}`,
+            ...errors,
+          ],
+          blueBubblesDeliveryHistory: blueBubblesDeliveryHistory(detail, {
+            status: result.deliveryStatus,
+            reason,
+            retryAttempt: blueBubblesAttemptLog(attempt),
+            providerMessageId: result.providerMessageId || null,
+          }),
+        };
+        const updated = await prisma.messageDelivery.update({
+          where: { id: delivery.id },
+          data: {
+            status: result.deliveryStatus,
+            providerMessageId: result.providerMessageId,
+            error: null,
+            detail: jsonSafe(nextDetail),
+          },
+        });
+        if (result.deliveryStatus === "sent") {
+          blueBubblesPreferredModes.set(delivery.toPhone, attempt.mode);
+          await logBlueBubblesDeliveryEvent(updated, "message.delivery_sent", {
+            providerMessageId: result.providerMessageId || null,
+            blueBubblesAttempt: attempt.mode,
+            fallbackReason: reason,
+          });
+        } else {
+          scheduleBlueBubblesDeliveryChecks(updated.id);
+          await logBlueBubblesDeliveryEvent(updated, "message.delivery_pending", {
+            providerMessageId: result.providerMessageId || null,
+            blueBubblesAttempt: attempt.mode,
+            fallbackReason: reason,
+          });
+        }
+        return updated;
+      } catch (error) {
+        errors.push(`${attempt.mode}: ${error.message}`);
+      }
+    }
+    throw new Error(errors.join("; ") || "All BlueBubbles fallback attempts failed");
+  } catch (error) {
+    const detail = blueBubblesDeliveryDetail(delivery.detail);
+    const updated = await prisma.messageDelivery.update({
+      where: { id: delivery.id },
+      data: {
+        status: "failed",
+        error: `${reason}: ${error.message}`,
+        detail: jsonSafe({
+          ...detail,
+          blueBubblesDeliveryHistory: blueBubblesDeliveryHistory(detail, {
+            status: "failed",
+            reason,
+            error: error.message,
+          }),
+        }),
+      },
+    });
+    await logBlueBubblesDeliveryEvent(updated, "message.delivery_failed", { error: updated.error });
+    return updated;
+  } finally {
+    blueBubblesDeliveryRetryLocks.delete(delivery.id);
+  }
+}
+
+async function checkBlueBubblesDelivery(deliveryId, delayMs = 0) {
+  const delivery = await prisma.messageDelivery.findUnique({ where: { id: deliveryId } });
+  if (!delivery || delivery.provider !== "bluebubbles") return null;
+  if (!["delivery_pending", "sending", "sent"].includes(delivery.status)) return delivery;
+  const detail = blueBubblesDeliveryDetail(delivery.detail);
+  if (!delivery.providerMessageId) {
+    if (delayMs >= Math.max(...BLUEBUBBLES_DELIVERY_CHECK_DELAYS_MS)) {
+      return retryBlueBubblesDelivery(delivery, "BlueBubbles did not return a message GUID to verify");
+    }
+    return delivery;
+  }
+  const settings = await getSettings();
+  const currentAttempt = detail.blueBubblesAttemptSpec || {};
+  const finalCheck = delayMs >= Math.max(...BLUEBUBBLES_DELIVERY_CHECK_DELAYS_MS);
+  try {
+    const result = await queryBlueBubblesMessage(settings, delivery.providerMessageId);
+    const status = blueBubblesDeliveryStatus(result);
+    if (status.status === "sent") {
+      if (currentAttempt.mode) blueBubblesPreferredModes.set(delivery.toPhone, currentAttempt.mode);
+      const updated = await prisma.messageDelivery.update({
+        where: { id: delivery.id },
+        data: {
+          status: "sent",
+          error: null,
+          detail: jsonSafe({
+            ...detail,
+            deliveryStatus: "sent",
+            blueBubblesLastDeliveryCheckAt: new Date().toISOString(),
+            blueBubblesLastDeliveryCheckDelayMs: delayMs,
+            blueBubblesDeliveryHistory: blueBubblesDeliveryHistory(detail, {
+              status: "sent",
+              delayMs,
+              providerMessageId: delivery.providerMessageId,
+            }),
+          }),
+        },
+      });
+      await logBlueBubblesDeliveryEvent(updated, "message.delivery_sent", {
+        providerMessageId: delivery.providerMessageId,
+        blueBubblesAttempt: currentAttempt.mode || detail.blueBubblesAttempt || null,
+      });
+      return updated;
+    }
+    if (status.status === "delivery_failed") {
+      return retryBlueBubblesDelivery(delivery, status.error || "BlueBubbles reported delivery failure");
+    }
+    if (finalCheck && String(currentAttempt.service || "").toLowerCase() === "imessage") {
+      return retryBlueBubblesDelivery(delivery, "BlueBubbles iMessage delivery stayed pending after verification");
+    }
+    return prisma.messageDelivery.update({
+      where: { id: delivery.id },
+      data: {
+        status: "delivery_pending",
+        detail: jsonSafe({
+          ...detail,
+          deliveryStatus: "delivery_pending",
+          blueBubblesLastDeliveryCheckAt: new Date().toISOString(),
+          blueBubblesLastDeliveryCheckDelayMs: delayMs,
+        }),
+      },
+    });
+  } catch (error) {
+    if (finalCheck && String(currentAttempt.service || "").toLowerCase() === "imessage") {
+      return retryBlueBubblesDelivery(delivery, `BlueBubbles iMessage verification failed: ${error.message}`);
+    }
+    return prisma.messageDelivery.update({
+      where: { id: delivery.id },
+      data: {
+        detail: jsonSafe({
+          ...detail,
+          blueBubblesLastDeliveryCheckAt: new Date().toISOString(),
+          blueBubblesLastDeliveryCheckDelayMs: delayMs,
+          blueBubblesLastDeliveryCheckError: error.message,
+        }),
+      },
+    });
+  }
 }
 
 function blueBubblesWebhookCredential(req) {
@@ -6369,6 +6749,86 @@ function normalizeBlueBubblesWebhookPayload(payload) {
     text,
     timestamp,
   };
+}
+
+async function findBlueBubblesOutboundDelivery(normalized) {
+  if (normalized.providerMessageId) {
+    const delivery = await prisma.messageDelivery.findFirst({
+      where: { provider: "bluebubbles", providerMessageId: normalized.providerMessageId },
+      orderBy: { createdAt: "desc" },
+    });
+    if (delivery) return delivery;
+  }
+  const phone = normalized.toPhone || normalized.fromPhone || phoneFromBlueBubblesChatGuid(normalized.chatGuid);
+  if (!phone) return null;
+  return prisma.messageDelivery.findFirst({
+    where: {
+      provider: "bluebubbles",
+      toPhone: phone,
+      status: { in: ["sending", "delivery_pending", "sent"] },
+      createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+async function updateBlueBubblesOutboundDelivery(payload) {
+  const normalized = normalizeBlueBubblesWebhookPayload(payload);
+  if (!normalized.messageLike) return null;
+  const eventType = String(normalized.eventType || "").toLowerCase();
+  const outboundLike =
+    normalized.isFromMe || eventType.includes("message-send-error") || eventType.includes("updated-message");
+  if (!outboundLike) return null;
+  const delivery = await findBlueBubblesOutboundDelivery(normalized);
+  if (!delivery) return null;
+  const status = blueBubblesDeliveryStatus(payload);
+  const detail = blueBubblesDeliveryDetail(delivery.detail);
+  const webhookDetail = {
+    ...detail,
+    blueBubblesWebhookEvent: normalized.eventType,
+    blueBubblesWebhookAt: new Date().toISOString(),
+    blueBubblesWebhookStatus: status.status,
+    blueBubblesWebhookMessageId: normalized.providerMessageId || null,
+    blueBubblesWebhookChatGuid: normalized.chatGuid || null,
+  };
+  if (status.status === "delivery_failed") {
+    await prisma.messageDelivery.update({
+      where: { id: delivery.id },
+      data: {
+        status: "delivery_failed",
+        error: status.error || "BlueBubbles reported delivery failure",
+        detail: jsonSafe({
+          ...webhookDetail,
+          blueBubblesDeliveryHistory: blueBubblesDeliveryHistory(detail, {
+            status: "delivery_failed",
+            reason: status.error || "BlueBubbles webhook reported delivery failure",
+            providerMessageId: normalized.providerMessageId || delivery.providerMessageId || null,
+          }),
+        }),
+      },
+    });
+    return retryBlueBubblesDelivery(delivery, status.error || "BlueBubbles webhook reported delivery failure");
+  }
+  if (status.status === "sent") {
+    const attempt = detail.blueBubblesAttemptSpec || {};
+    if (attempt.mode) blueBubblesPreferredModes.set(delivery.toPhone, attempt.mode);
+  }
+  const nextStatus = delivery.status === "sent" && status.status === "delivery_pending" ? "sent" : status.status;
+  return prisma.messageDelivery.update({
+    where: { id: delivery.id },
+    data: {
+      status: nextStatus,
+      error: null,
+      detail: jsonSafe({
+        ...webhookDetail,
+        deliveryStatus: nextStatus,
+        blueBubblesDeliveryHistory: blueBubblesDeliveryHistory(detail, {
+          status: nextStatus,
+          providerMessageId: normalized.providerMessageId || delivery.providerMessageId || null,
+        }),
+      }),
+    },
+  });
 }
 
 async function recentMessageContextForPhone(fromPhone) {
@@ -6613,11 +7073,13 @@ async function deliverBusinessMessage({
             : (() => {
                 throw new Error(`Unsupported messaging provider: ${provider}`);
               })();
+      const deliveryStatus = provider === "bluebubbles" ? result.deliveryStatus || result.detail?.deliveryStatus || "delivery_pending" : "sent";
       const updated = await prisma.messageDelivery.update({
         where: { id: delivery.id },
-        data: { status: "sent", providerMessageId: result.providerMessageId, detail: { ...result.detail, metadata, message } },
+        data: { status: deliveryStatus, providerMessageId: result.providerMessageId, detail: { ...result.detail, metadata, message } },
       });
-      await logMessageDeliveryEvent("message.delivery_sent", {
+      if (provider === "bluebubbles" && deliveryStatus === "delivery_pending") scheduleBlueBubblesDeliveryChecks(updated.id);
+      await logMessageDeliveryEvent(deliveryStatus === "sent" ? "message.delivery_sent" : "message.delivery_pending", {
         provider,
         messageDeliveryId: updated.id,
         providerMessageId: result.providerMessageId || null,
@@ -9372,10 +9834,13 @@ async function handleBlueBubblesWebhook(req, res) {
     if (!(await verifyBlueBubblesWebhook(req))) {
       return res.status(401).json({ ok: false, error: "Invalid BlueBubbles webhook password" });
     }
+    const outbound = await updateBlueBubblesOutboundDelivery(req.body || {});
     const inbound = await persistBlueBubblesInboundMessage(req.body || {});
     const route = await routeBlueBubblesInboundMessage(inbound);
     res.json({
       ok: true,
+      outboundDeliveryId: outbound?.id || null,
+      outboundStatus: outbound?.status || null,
       inboundMessageId: inbound.id,
       status: route?.routed ? "routed" : inbound.status,
       route,
@@ -9738,6 +10203,7 @@ app.post("/api/admin/bluebubbles/send-test", requireAuth, requireAdmin, async (r
       toPhone,
       providerMessageId: result.providerMessageId || null,
       blueBubblesAttempt: result.detail?.blueBubblesAttempt || null,
+      deliveryStatus: result.deliveryStatus || result.detail?.deliveryStatus || null,
       httpStatus: result.detail?.httpStatus || null,
     });
   } catch (error) {
@@ -15854,6 +16320,7 @@ await bootstrapAdmin();
 await bootstrapBusinessLifecycle();
 await recoverQualificationQueue().catch((error) => console.warn(`[qualification] startup recovery failed: ${error.message}`));
 scheduleQualificationWorker(1000);
+scheduleBlueBubblesPendingDeliveryWorker(10000);
 
 server.listen(PORT, () => {
   const protocol = USE_HTTPS ? "https" : "http";
