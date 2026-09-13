@@ -3635,6 +3635,7 @@ async function initializePortal(user) {
   await loadAdTracking();
   await loadSettings();
   await loadBusinessAdmin();
+  await loadCrm().catch(() => {});
   await loadDemoData();
 }
 
@@ -3787,6 +3788,8 @@ for (const navItem of el.mobileNavItems) {
     } else if (target === "business") {
       document.querySelector("#profileScreen").scrollIntoView({ behavior: "smooth", block: "start" });
     } else {
+      if (target === "crm") openBusinessTool("leads");
+      if (target === "messages") openBusinessTool("messages");
       if (target === "calendar") openBusinessTool("calendar");
       if (target === "setup") openBusinessTool("setup");
       el.businessAdmin.scrollIntoView({ behavior: "smooth", block: "start" });

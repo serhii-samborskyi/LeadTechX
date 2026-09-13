@@ -110,17 +110,17 @@
         </div>
 
         <nav class="admin-tabs" role="tablist" aria-label="Business tools">
-          <button class="admin-tab active" data-tab="setup" role="tab" aria-selected="true" type="button">Setup</button>
+          <button class="admin-tab active" data-tab="leads" role="tab" aria-selected="true" type="button">CRM</button>
+          <button class="admin-tab" data-tab="messages" role="tab" aria-selected="false" type="button">Messages</button>
+          <button class="admin-tab" data-tab="setup" role="tab" aria-selected="false" type="button">Setup</button>
           <button class="admin-tab" data-tab="content" role="tab" aria-selected="false" type="button">Content</button>
           <button class="admin-tab" data-tab="transfers" role="tab" aria-selected="false" type="button">Transfers</button>
           <button class="admin-tab" data-tab="calendar" role="tab" aria-selected="false" type="button">Calendar</button>
-          <button class="admin-tab" data-tab="leads" role="tab" aria-selected="false" type="button">CRM</button>
-          <button class="admin-tab" data-tab="messages" role="tab" aria-selected="false" type="button">Messages</button>
           <button class="admin-tab" data-tab="billing" role="tab" aria-selected="false" type="button">Billing</button>
         </nav>
 
         <div class="admin-content">
-          <section class="admin-view active" data-view="setup">
+          <section class="admin-view" data-view="setup">
             <div class="admin-view-heading">
               <h3>Business information</h3>
               <p>These details tell the receptionist what the business does, where it works, and how customers can book.</p>
@@ -142,7 +142,7 @@
             <button id="saveBusinessProfileButton" class="primary action-button" type="button">Save business information</button>
           </section>
 
-          <section class="admin-view active" data-view="setup">
+          <section class="admin-view" data-view="setup">
             <div class="admin-view-heading">
               <h3>Agent basics</h3>
               <p>Choose the public-facing name, voice, and language for this business receptionist.</p>
@@ -343,7 +343,7 @@
             </div>
           </section>
 
-          <section class="admin-view" data-view="leads">
+          <section class="admin-view active" data-view="leads">
             <div class="section-heading crm-heading">
               <div class="admin-view-heading">
                 <h3>CRM</h3>
@@ -712,6 +712,8 @@
     <nav class="mobile-nav" aria-label="App navigation">
       <button class="mobile-nav-item active" data-mobile-target="call" type="button"><i data-lucide="phone"></i><span>Call</span></button>
       <button class="mobile-nav-item" data-mobile-target="business" type="button"><i data-lucide="building-2"></i><span>Business</span></button>
+      <button class="mobile-nav-item" data-mobile-target="crm" type="button"><i data-lucide="list"></i><span>CRM</span></button>
+      <button class="mobile-nav-item" data-mobile-target="messages" type="button"><i data-lucide="message-square"></i><span>Messages</span></button>
       <button class="mobile-nav-item" data-mobile-target="calendar" type="button"><i data-lucide="calendar-days"></i><span>Calendar</span></button>
       <button class="mobile-nav-item" data-mobile-target="setup" type="button"><i data-lucide="settings-2"></i><span>Setup</span></button>
     </nav>
