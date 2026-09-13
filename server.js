@@ -13869,11 +13869,54 @@ app.post("/api/business-admin/lead-webhook/test", async (req, res) => {
   }
 });
 
+function crmChannelWhere(channel = "inbound") {
+  if (channel === "outbound") {
+    return {
+      OR: [
+        { leadWebhookEvents: { some: {} } },
+        { qualificationCalls: { some: {} } },
+        { source: { in: ["webhook", "website-form", "public_webhook", "admin_test", "manual_outbound", "outbound_qualification"] } },
+        { source: { contains: "webhook", mode: "insensitive" } },
+        { source: { contains: "form", mode: "insensitive" } },
+      ],
+    };
+  }
+  return {
+    OR: [{ voiceCallId: { not: null } }, { source: { in: ["incoming_call", "call_capture", "manual_inbound"] } }],
+  };
+}
+
+function crmDateWhere(query = {}, timezone = "America/Chicago") {
+  const zone = timezone || "America/Chicago";
+  const range = String(query.range || "today");
+  const today = DateTime.now().setZone(zone).startOf("day");
+  const parseDay = (value) => DateTime.fromISO(String(value || ""), { zone }).startOf("day");
+  let from = today;
+  let to = today.plus({ days: 1 });
+  if (range === "yesterday") {
+    from = today.minus({ days: 1 });
+    to = today;
+  } else if (range === "last7") {
+    from = today.minus({ days: 6 });
+    to = today.plus({ days: 1 });
+  } else if (range === "custom") {
+    from = parseDay(query.from);
+    to = parseDay(query.to).plus({ days: 1 });
+  }
+  if (!from.isValid || !to.isValid || from >= to) throw new Error("Choose a valid CRM date range");
+  return {
+    range: ["today", "yesterday", "last7", "custom"].includes(range) ? range : "today",
+    where: { createdAt: { gte: from.toUTC().toJSDate(), lt: to.toUTC().toJSDate() } },
+  };
+}
+
 app.get("/api/business-admin/crm", async (req, res) => {
   try {
-    const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const { profile, config } = await adminContext(req.query.business_name, req.query.website, req.user);
     const status = req.query.status ? normalizeCrmStatus(req.query.status, "new") : null;
     const search = String(req.query.search || "").trim();
+    const channel = String(req.query.channel || "inbound") === "outbound" ? "outbound" : "inbound";
+    const dateRange = crmDateWhere(req.query, config.timezone);
     const searchWhere = search
       ? {
           OR: [
@@ -13887,9 +13930,10 @@ app.get("/api/business-admin/crm", async (req, res) => {
           ],
         }
       : {};
+    const baseFilters = [leadWhereForProfile(profile), crmChannelWhere(channel), dateRange.where, searchWhere];
     const leads = await prisma.lead.findMany({
       where: {
-        AND: [leadWhereForProfile(profile), status ? { status } : {}, searchWhere],
+        AND: [...baseFilters, status ? { status } : {}],
       },
       include: {
         voiceCall: {
@@ -13970,13 +14014,15 @@ app.get("/api/business-admin/crm", async (req, res) => {
     });
     const statusCounts = await prisma.lead.groupBy({
       by: ["status"],
-      where: leadWhereForProfile(profile),
+      where: { AND: baseFilters },
       _count: { _all: true },
     }).catch(() => []);
     res.json({
       leads,
       statuses: Array.from(crmStatuses),
       statusCounts: Object.fromEntries(statusCounts.map((row) => [row.status, row._count._all])),
+      channel,
+      range: dateRange.range,
     });
   } catch (error) {
     res.status(400).json({ error: error.message });

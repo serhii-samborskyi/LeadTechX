@@ -1,6 +1,16 @@
 const params = new URLSearchParams(window.location.search);
 const languageParam = params.get("language");
 const agentNameParam = params.get("agent_name");
+const CRM_CHANNEL_DETAILS = {
+  inbound: {
+    heading: "Inbound leads",
+    description: "Incoming call leads and post-call follow-up status.",
+  },
+  outbound: {
+    heading: "Outbound leads",
+    description: "Ad, form, webhook, and qualification leads.",
+  },
+};
 const state = {
   ws: null,
   micStream: null,
@@ -22,6 +32,8 @@ const state = {
   visualizerFrame: null,
   admin: null,
   crmSearchTimer: null,
+  crmChannel: "inbound",
+  crmDateRange: "today",
   selectedMessageThreadKey: "",
   messageData: { messages: [], inboundMessages: [] },
   booking: null,
@@ -73,10 +85,14 @@ const el = {
   adminStatus: document.querySelector("#adminStatus"),
   adminTabs: document.querySelectorAll(".admin-tab"),
   adminViews: document.querySelectorAll(".admin-view"),
-  automationMenuButtons: document.querySelectorAll(".automation-menu-button"),
-  automationSections: document.querySelectorAll(".automation-section"),
   crmMenuButtons: document.querySelectorAll(".crm-menu-button"),
   crmSections: document.querySelectorAll(".crm-section"),
+  crmRecordsHeading: document.querySelector("#crmRecordsHeading"),
+  crmRecordsDescription: document.querySelector("#crmRecordsDescription"),
+  crmDatePresetButtons: document.querySelectorAll(".crm-date-preset"),
+  crmDateFrom: document.querySelector("#crmDateFrom"),
+  crmDateTo: document.querySelector("#crmDateTo"),
+  crmApplyDatesButton: document.querySelector("#crmApplyDatesButton"),
   profileBusinessName: document.querySelector("#profileBusinessName"),
   profileWebsite: document.querySelector("#profileWebsite"),
   profileSummary: document.querySelector("#profileSummary"),
@@ -869,6 +885,41 @@ function calendarTodayKey(timezone) {
   }
 }
 
+function offsetDateKey(dateKey, offsetDays) {
+  const [year, month, day] = String(dateKey || "").split("-").map(Number);
+  if (!year || !month || !day) return calendarTodayKey("America/Chicago");
+  const date = new Date(Date.UTC(year, month - 1, day + offsetDays, 12, 0, 0));
+  return date.toISOString().slice(0, 10);
+}
+
+function crmTimezone() {
+  return el.calendarTimezone?.value || state.admin?.timezone || "America/Chicago";
+}
+
+function syncCrmDateButtons() {
+  for (const button of el.crmDatePresetButtons || []) {
+    button.classList.toggle("active", button.dataset.crmRange === state.crmDateRange);
+  }
+}
+
+function setCrmDateRange(range = "today", reload = false) {
+  state.crmDateRange = range;
+  const today = calendarTodayKey(crmTimezone());
+  if (range === "today") {
+    el.crmDateFrom.value = today;
+    el.crmDateTo.value = today;
+  } else if (range === "yesterday") {
+    const yesterday = offsetDateKey(today, -1);
+    el.crmDateFrom.value = yesterday;
+    el.crmDateTo.value = yesterday;
+  } else if (range === "last7") {
+    el.crmDateFrom.value = offsetDateKey(today, -6);
+    el.crmDateTo.value = today;
+  }
+  syncCrmDateButtons();
+  if (reload) runAdmin(loadCrm);
+}
+
 function calendarDayLabel(value, timezone) {
   return new Intl.DateTimeFormat(undefined, {
     timeZone: timezone,
@@ -1412,7 +1463,7 @@ function applyPlanLocks() {
     ],
     outboundLocked,
   );
-  planNotice(document.querySelector('[data-automation-section="qualification"] .automation-section-heading'), "outboundQualificationEnabled", outboundLocked);
+  planNotice(document.querySelector('[data-crm-panel="outbound-qualification"] .crm-section-heading'), "outboundQualificationEnabled", outboundLocked);
 
   setNodesDisabled(
     [
@@ -1434,7 +1485,7 @@ function applyPlanLocks() {
     Array.from(el.reviewLinkList.querySelectorAll("input, button[data-action='save-review-link']")),
     reviewsLocked,
   );
-  planNotice(document.querySelector('[data-automation-section="reviews"] .automation-section-heading'), "smartReviewsEnabled", reviewsLocked);
+  planNotice(document.querySelector('[data-crm-panel="reviews"] .crm-section-heading'), "smartReviewsEnabled", reviewsLocked);
 
   setNodesDisabled(
     [el.transferLabel, el.transferPhone, el.transferDescription, el.transferSortOrder, el.transferActive, el.addTransferTargetButton],
@@ -1447,7 +1498,7 @@ function applyPlanLocks() {
   planNotice(document.querySelector('[data-view="transfers"] .admin-view-heading'), "callTransfersEnabled", transfersLocked);
 
   setNodesDisabled([el.copyCrmWebhookButton, el.rotateCrmWebhookButton, el.sendCrmWebhookTestButton], leadWebhookLocked);
-  planNotice(document.querySelector('[data-view="leads"] .admin-view-heading'), "leadWebhookEnabled", leadWebhookLocked);
+  planNotice(document.querySelector('[data-crm-panel="lead-webhook"] .crm-section-heading'), "leadWebhookEnabled", leadWebhookLocked);
 
   setNodesDisabled([el.refreshMessagesButton, el.testMessageProvider, el.testMessagePhone, el.testMessageBody, el.sendTestMessageButton], messageLocked);
   planNotice(document.querySelector('[data-view="messages"] .admin-view-heading'), "messageInboxEnabled", messageLocked);
@@ -1457,7 +1508,7 @@ function applyPlanLocks() {
   }
 
   setNodesDisabled([el.appointmentReminderTemplate], remindersLocked);
-  planNotice(document.querySelector('[data-automation-section="followup"] .automation-section-heading'), "appointmentRemindersEnabled", remindersLocked);
+  planNotice(document.querySelector('[data-crm-panel="inbound-followup"] .crm-section-heading'), "appointmentRemindersEnabled", remindersLocked);
 }
 
 function renderAvailability(rules) {
@@ -1546,6 +1597,7 @@ function applyAdminData(data) {
   el.slotDuration.value = data.config.slotDurationMinutes;
   el.bufferMinutes.value = data.config.bufferMinutes;
   el.calendarTimezone.value = data.config.timezone;
+  if (state.crmDateRange !== "custom") setCrmDateRange(state.crmDateRange, false);
   if (el.calendarProvider) el.calendarProvider.value = data.config.calendarProvider || "internal";
   renderIntakeFields(data.config.intakeFields);
   renderKnowledge(data.config.knowledgeEntries);
@@ -2474,6 +2526,10 @@ async function loadCrm() {
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
   if (el.crmSearch.value.trim()) query.set("search", el.crmSearch.value.trim());
   if (el.crmStatusFilter.value) query.set("status", el.crmStatusFilter.value);
+  query.set("channel", state.crmChannel || "inbound");
+  query.set("range", state.crmDateRange || "today");
+  if (el.crmDateFrom?.value) query.set("from", el.crmDateFrom.value);
+  if (el.crmDateTo?.value) query.set("to", el.crmDateTo.value);
   const [data] = await Promise.all([apiJson(`/api/business-admin/crm?${query}`), loadLeadWebhook(), loadWebhookEvents()]);
   renderCrm(data.leads || []);
   renderCrmStatusCounts(data.statusCounts || {});
@@ -2540,6 +2596,7 @@ async function addCrmLead() {
       email: el.crmEmail.value,
       need: el.crmNeed.value,
       status: el.crmStatus.value,
+      source: state.crmChannel === "outbound" ? "manual_outbound" : "manual_inbound",
     }),
   });
   el.crmName.value = "";
@@ -3438,6 +3495,8 @@ if (initialMicError) {
 el.businessName.value = state.businessName;
 el.website.value = state.website;
 setTitle();
+setCrmDateRange("today", false);
+selectCrmSection("inbound", false);
 loadSettings()
   .then(() => loadPhoneStatus())
   .catch(() => {});
@@ -3492,30 +3551,24 @@ for (const tab of el.adminTabs) {
   });
 }
 
-function selectAutomationSection(sectionName) {
-  for (const button of el.automationMenuButtons) {
-    const selected = button.dataset.automationTarget === sectionName;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-selected", String(selected));
-  }
-  for (const section of el.automationSections) {
-    section.classList.toggle("active", section.dataset.automationSection === sectionName);
-  }
-}
-
-function selectCrmSection(sectionName) {
+function selectCrmSection(sectionName, reload = true) {
+  const channel = CRM_CHANNEL_DETAILS[sectionName] ? sectionName : "inbound";
+  state.crmChannel = channel;
   for (const button of el.crmMenuButtons) {
-    const selected = button.dataset.crmTarget === sectionName;
+    const selected = button.dataset.crmTarget === channel;
     button.classList.toggle("active", selected);
     button.setAttribute("aria-selected", String(selected));
   }
   for (const section of el.crmSections) {
-    section.classList.toggle("active", section.dataset.crmSection === sectionName);
+    section.classList.toggle("active", section.dataset.crmSection === channel);
   }
-}
-
-for (const button of el.automationMenuButtons) {
-  button.addEventListener("click", () => selectAutomationSection(button.dataset.automationTarget));
+  const details = CRM_CHANNEL_DETAILS[channel];
+  if (el.crmRecordsHeading) el.crmRecordsHeading.textContent = details.heading;
+  if (el.crmRecordsDescription) el.crmRecordsDescription.textContent = details.description;
+  if (reload) {
+    el.crmStatusFilter.value = "";
+    runAdmin(loadCrm);
+  }
 }
 
 for (const button of el.crmMenuButtons) {
@@ -3720,6 +3773,20 @@ el.bookedAppointments.addEventListener("click", (event) => {
   if (cancelButton) runAdmin(() => cancelAppointment(cancelButton));
 });
 el.refreshCrmButton.addEventListener("click", () => runAdmin(loadCrm));
+for (const button of el.crmDatePresetButtons) {
+  button.addEventListener("click", () => setCrmDateRange(button.dataset.crmRange || "today", true));
+}
+for (const inputNode of [el.crmDateFrom, el.crmDateTo].filter(Boolean)) {
+  inputNode.addEventListener("change", () => {
+    state.crmDateRange = "custom";
+    syncCrmDateButtons();
+  });
+}
+el.crmApplyDatesButton?.addEventListener("click", () => {
+  state.crmDateRange = "custom";
+  syncCrmDateButtons();
+  runAdmin(loadCrm);
+});
 el.bookingFollowupEnabled?.addEventListener("change", updateBookingFollowupUi);
 el.saveBookingFollowupButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.copyCrmWebhookButton.addEventListener("click", () => runAdmin(copyLeadWebhook));
