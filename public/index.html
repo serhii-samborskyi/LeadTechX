@@ -357,7 +357,16 @@
               <button class="crm-menu-button" data-crm-target="outbound" type="button" role="tab" aria-selected="false">Outbound</button>
             </div>
 
-            <div class="crm-records-panel">
+            <div class="crm-area-subnav" role="tablist" aria-label="CRM subsections">
+              <button class="crm-area-button active" data-crm-area="leads" type="button" role="tab" aria-selected="true"><i data-lucide="list"></i><span>Lead list</span></button>
+              <button class="crm-area-button" data-crm-area="agent-rules" data-crm-channel-only="inbound" type="button" role="tab" aria-selected="false"><i data-lucide="phone-call"></i><span>Call rules</span></button>
+              <button class="crm-area-button" data-crm-area="booking-followup" data-crm-channel-only="inbound" type="button" role="tab" aria-selected="false"><i data-lucide="git-branch"></i><span>Booking sequence</span></button>
+              <button class="crm-area-button" data-crm-area="reviews" data-crm-channel-only="inbound" type="button" role="tab" aria-selected="false"><i data-lucide="star"></i><span>Reviews</span></button>
+              <button class="crm-area-button" data-crm-area="outbound-qualification" data-crm-channel-only="outbound" type="button" role="tab" aria-selected="false"><i data-lucide="phone-forwarded"></i><span>Qualification</span></button>
+              <button class="crm-area-button" data-crm-area="lead-webhook" data-crm-channel-only="outbound" type="button" role="tab" aria-selected="false"><i data-lucide="webhook"></i><span>Lead webhook</span></button>
+            </div>
+
+            <div class="crm-records-panel active" data-crm-area-panel="leads" role="tabpanel">
               <div class="crm-section-heading">
                 <h4 id="crmRecordsHeading">Inbound leads</h4>
                 <p id="crmRecordsDescription">Incoming call leads and post-call follow-up status.</p>
@@ -401,15 +410,28 @@
             </div>
 
             <div class="crm-section active" data-crm-section="inbound" role="tabpanel">
-              <div class="crm-webhook-card" data-crm-panel="agent-rules">
-                <div class="crm-section-heading">
-                  <h4>Incoming call rules</h4>
-                  <p>Global behavior the receptionist follows during live inbound calls.</p>
+              <div class="crm-area-panel" data-crm-area-panel="agent-rules" role="tabpanel">
+                <div class="crm-webhook-card" data-crm-panel="agent-rules">
+                  <div class="crm-section-heading">
+                    <h4>Incoming call rules</h4>
+                    <p>Global behavior the receptionist follows during live inbound calls.</p>
+                  </div>
+                  <label>Agent instructions<textarea id="extraInstructions" rows="8" placeholder="One instruction per line"></textarea></label>
                 </div>
-                <label>Agent instructions<textarea id="extraInstructions" rows="8" placeholder="One instruction per line"></textarea></label>
+
+                <div class="crm-webhook-card" data-crm-panel="inbound-followup">
+                  <div class="crm-section-heading">
+                    <h4>Inbound follow-up messages</h4>
+                    <p>Templates for missed-call follow-up and appointment reminder texts.</p>
+                  </div>
+                  <div class="qualification-settings follow-up-settings">
+                    <label>Missed-call follow-up message<textarea id="missedCallFollowupTemplate" rows="3"></textarea></label>
+                    <label>Appointment reminder message<textarea id="appointmentReminderTemplate" rows="3"></textarea></label>
+                  </div>
+                </div>
               </div>
 
-              <div class="booking-followup-section">
+              <div class="booking-followup-section crm-area-panel" data-crm-area-panel="booking-followup" role="tabpanel">
                 <div class="booking-flow-header">
                   <div>
                     <h4>Booking follow-up sequence</h4>
@@ -487,7 +509,7 @@
                 </div>
               </div>
 
-              <div class="crm-webhook-card review-directory-card" data-crm-panel="reviews">
+              <div class="crm-webhook-card review-directory-card crm-area-panel" data-crm-panel="reviews" data-crm-area-panel="reviews" role="tabpanel">
                 <div class="crm-section-heading">
                   <h4>Smart review and complaint recovery</h4>
                   <p>Ask satisfied customers for reviews and route unhappy customers to management.</p>
@@ -514,78 +536,71 @@
                 </div>
                 <div class="data-list compact-list" id="reviewLinkList"></div>
               </div>
-
-              <div class="crm-webhook-card" data-crm-panel="inbound-followup">
-                <div class="crm-section-heading">
-                  <h4>Inbound follow-up messages</h4>
-                  <p>Templates for missed-call follow-up and appointment reminder texts.</p>
-                </div>
-                <div class="qualification-settings follow-up-settings">
-                  <label>Missed-call follow-up message<textarea id="missedCallFollowupTemplate" rows="3"></textarea></label>
-                  <label>Appointment reminder message<textarea id="appointmentReminderTemplate" rows="3"></textarea></label>
-                </div>
-              </div>
             </div>
 
             <div class="crm-section" data-crm-section="outbound" role="tabpanel">
-              <div class="crm-webhook-card" data-crm-panel="outbound-qualification">
-                <div class="crm-section-heading">
-                  <h4>Outbound qualification agent</h4>
-                  <p>Rules for calling ad/form leads, retrying no-answer calls, and updating CRM outcomes.</p>
-                </div>
-                <div class="qualification-settings">
-                  <label><input id="qualificationEnabled" type="checkbox" /> Enable outbound qualification agent</label>
-                  <label>Launch mode<select id="qualificationLaunchMode"><option value="approval">After approval</option><option value="immediate">Immediately for new leads</option></select></label>
-                  <label>Qualification instructions<textarea id="qualificationInstructions" rows="8" placeholder="What the outbound agent should ask, how to qualify leads, and what outcomes to use"></textarea></label>
-                  <div class="form-grid">
-                    <label>Natural delay min seconds<input id="qualificationDelayMinSeconds" type="number" min="0" step="1" /></label>
-                    <label>Natural delay max seconds<input id="qualificationDelayMaxSeconds" type="number" min="0" step="1" /></label>
-                    <label>Max attempts<input id="qualificationMaxAttempts" type="number" min="1" step="1" /></label>
-                    <label>Retry delay minutes<input id="qualificationRetryDelayMinutes" type="number" min="1" step="15" /></label>
-                    <label>Webhook dedupe hours<input id="leadWebhookDedupeWindowHours" type="number" min="0" step="1" /></label>
+              <div class="crm-area-panel" data-crm-area-panel="outbound-qualification" role="tabpanel">
+                <div class="crm-webhook-card" data-crm-panel="outbound-qualification">
+                  <div class="crm-section-heading">
+                    <h4>Outbound qualification agent</h4>
+                    <p>Rules for calling ad/form leads, retrying no-answer calls, and updating CRM outcomes.</p>
+                  </div>
+                  <div class="qualification-settings">
+                    <label><input id="qualificationEnabled" type="checkbox" /> Enable outbound qualification agent</label>
+                    <label>Launch mode<select id="qualificationLaunchMode"><option value="approval">After approval</option><option value="immediate">Immediately for new leads</option></select></label>
+                    <label>Qualification instructions<textarea id="qualificationInstructions" rows="8" placeholder="What the outbound agent should ask, how to qualify leads, and what outcomes to use"></textarea></label>
+                    <div class="form-grid">
+                      <label>Natural delay min seconds<input id="qualificationDelayMinSeconds" type="number" min="0" step="1" /></label>
+                      <label>Natural delay max seconds<input id="qualificationDelayMaxSeconds" type="number" min="0" step="1" /></label>
+                      <label>Max attempts<input id="qualificationMaxAttempts" type="number" min="1" step="1" /></label>
+                      <label>Retry delay minutes<input id="qualificationRetryDelayMinutes" type="number" min="1" step="15" /></label>
+                      <label>Webhook dedupe hours<input id="leadWebhookDedupeWindowHours" type="number" min="0" step="1" /></label>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div class="crm-webhook-card" data-crm-panel="lead-webhook">
-                <div class="crm-section-heading">
-                  <h4>Lead webhook</h4>
-                  <p>Receive website, ad, and form leads into CRM, then test or audit the intake activity.</p>
+              <div class="crm-area-panel" data-crm-area-panel="lead-webhook" role="tabpanel">
+                <div class="crm-webhook-card" data-crm-panel="lead-webhook">
+                  <div class="crm-section-heading">
+                    <h4>Lead webhook</h4>
+                    <p>Receive website, ad, and form leads into CRM, then test or audit the intake activity.</p>
+                  </div>
+                  <div>
+                    <h4>Webhook URL</h4>
+                    <p>Post new website, ad, or form leads to this URL. Rotating the URL disables the old one.</p>
+                  </div>
+                  <div class="crm-webhook-controls">
+                    <input id="crmWebhookUrl" readonly placeholder="Loading webhook URL" />
+                    <button id="copyCrmWebhookButton" type="button">Copy</button>
+                    <button id="rotateCrmWebhookButton" type="button">Rotate URL</button>
+                    <a id="crmWebhookDocsLink" class="button-link" href="/lead-webhook-api.html" target="_blank" rel="noopener">API docs</a>
+                  </div>
+                  <small id="crmWebhookHelp">Accepted fields: name, phone, email, service, source, notes.</small>
                 </div>
-                <div>
-                  <h4>Webhook URL</h4>
-                  <p>Post new website, ad, or form leads to this URL. Rotating the URL disables the old one.</p>
+                <div class="crm-webhook-card">
+                  <div>
+                    <h4>Webhook activity</h4>
+                    <p>Latest accepted, duplicate, rejected, and failed form submissions.</p>
+                  </div>
+                  <div class="data-list compact-list" id="crmWebhookEvents"></div>
                 </div>
-                <div class="crm-webhook-controls">
-                  <input id="crmWebhookUrl" readonly placeholder="Loading webhook URL" />
-                  <button id="copyCrmWebhookButton" type="button">Copy</button>
-                  <button id="rotateCrmWebhookButton" type="button">Rotate URL</button>
-                  <a id="crmWebhookDocsLink" class="button-link" href="/lead-webhook-api.html" target="_blank" rel="noopener">API docs</a>
-                </div>
-                <small id="crmWebhookHelp">Accepted fields: name, phone, email, service, source, notes.</small>
-              </div>
-              <div class="crm-webhook-card">
-                <div>
-                  <h4>Webhook activity</h4>
-                  <p>Latest accepted, duplicate, rejected, and failed form submissions.</p>
-                </div>
-                <div class="data-list compact-list" id="crmWebhookEvents"></div>
-              </div>
-              <div class="crm-webhook-card">
-                <div>
-                  <h4>Webhook test</h4>
-                  <p>Send a sample form payload through the same intake path used by the public webhook.</p>
-                </div>
-                <textarea id="crmWebhookTestPayload" rows="7"></textarea>
-                <div class="crm-webhook-controls">
-                  <button id="sendCrmWebhookTestButton" type="button">Send test lead</button>
-                  <button id="resetCrmWebhookTestButton" type="button">Reset sample</button>
-                  <span id="crmWebhookTestStatus"></span>
+                <div class="crm-webhook-card">
+                  <div>
+                    <h4>Webhook test</h4>
+                    <p>Send a sample form payload through the same intake path used by the public webhook.</p>
+                  </div>
+                  <textarea id="crmWebhookTestPayload" rows="7"></textarea>
+                  <div class="crm-webhook-controls">
+                    <button id="sendCrmWebhookTestButton" type="button">Send test lead</button>
+                    <button id="resetCrmWebhookTestButton" type="button">Reset sample</button>
+                    <span id="crmWebhookTestStatus"></span>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <button id="saveInstructionsButton" class="primary action-button crm-settings-save" type="button">Save CRM settings</button>
+            <button id="saveInstructionsButton" class="primary action-button crm-settings-save" type="button" hidden>Save CRM settings</button>
           </section>
 
           <section class="admin-view" data-view="messages">

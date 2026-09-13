@@ -3133,11 +3133,15 @@ dd {
 }
 
 .crm-records-panel {
-  display: grid;
+  display: none;
   gap: 14px;
   margin-top: 18px;
   padding-bottom: 20px;
   border-bottom: 1px solid var(--line);
+}
+
+.crm-records-panel.active {
+  display: grid;
 }
 
 .crm-date-toolbar {
@@ -3495,7 +3499,7 @@ dd {
 
 .crm-card summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 12px;
   align-items: center;
   padding: 14px 16px;
@@ -3513,13 +3517,41 @@ dd {
   min-width: 0;
 }
 
+.crm-summary-main {
+  display: grid;
+  gap: 7px;
+}
+
 .crm-card summary strong {
   font-size: 1rem;
 }
 
-.crm-card summary div > span {
+.crm-summary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.crm-card summary .crm-summary-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid #e0ece6;
+  border-radius: 999px;
+  background: #f8fcfa;
   color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
   overflow-wrap: anywhere;
+}
+
+.crm-summary-meta-item svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
 }
 
 .crm-status-badge {
@@ -3530,6 +3562,31 @@ dd {
   font-size: 0.72rem;
   font-weight: 900;
   text-transform: uppercase;
+}
+
+.crm-open-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid #d7e5de;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--accent-dark);
+  font-size: 0.78rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.crm-open-hint svg {
+  width: 15px;
+  height: 15px;
+  transition: transform 0.18s ease;
+}
+
+.crm-card[open] .crm-open-hint svg {
+  transform: rotate(180deg);
 }
 
 .crm-card.status-unqualified .crm-status-badge,
@@ -3617,7 +3674,15 @@ dd {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.crm-menu-button {
+.crm-area-subnav {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 4px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.crm-menu-button,
+.crm-area-button {
   min-width: 0;
   min-height: 42px;
   justify-content: center;
@@ -3629,7 +3694,22 @@ dd {
   white-space: normal;
 }
 
-.crm-menu-button.active {
+.crm-area-button {
+  gap: 8px;
+}
+
+.crm-area-button svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+}
+
+.crm-area-button[hidden] {
+  display: none;
+}
+
+.crm-menu-button.active,
+.crm-area-button.active {
   border-color: #a9d6bd;
   background: var(--accent-soft);
   color: var(--accent-dark);
@@ -3645,6 +3725,15 @@ dd {
 }
 
 .crm-section.active {
+  display: grid;
+}
+
+.crm-area-panel {
+  display: none;
+  gap: 14px;
+}
+
+.crm-area-panel.active {
   display: grid;
 }
 
@@ -4228,6 +4317,8 @@ a.appointment-field-value {
   }
 
   .account-subtabs,
+  .crm-subnav,
+  .crm-area-subnav,
   .profile-toolbar,
   .traffic-toolbar,
   .crm-date-toolbar,
@@ -4253,6 +4344,16 @@ a.appointment-field-value {
   .crm-custom-range input,
   .crm-custom-range button {
     width: 100%;
+  }
+
+  .crm-card summary {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .crm-status-badge,
+  .crm-open-hint {
+    justify-self: start;
   }
 
   .profile-range-buttons,

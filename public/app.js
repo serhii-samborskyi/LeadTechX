@@ -11,6 +11,8 @@ const CRM_CHANNEL_DETAILS = {
     description: "Ad, form, webhook, and qualification leads.",
   },
 };
+const CRM_DEFAULT_AREA = "leads";
+const CRM_SAVE_AREAS = new Set(["agent-rules", "reviews", "outbound-qualification"]);
 const state = {
   ws: null,
   micStream: null,
@@ -33,6 +35,7 @@ const state = {
   admin: null,
   crmSearchTimer: null,
   crmChannel: "inbound",
+  crmArea: CRM_DEFAULT_AREA,
   crmDateRange: "today",
   selectedMessageThreadKey: "",
   messageData: { messages: [], inboundMessages: [] },
@@ -86,7 +89,10 @@ const el = {
   adminTabs: document.querySelectorAll(".admin-tab"),
   adminViews: document.querySelectorAll(".admin-view"),
   crmMenuButtons: document.querySelectorAll(".crm-menu-button"),
+  crmAreaButtons: document.querySelectorAll(".crm-area-button"),
+  crmAreaPanels: document.querySelectorAll("[data-crm-area-panel]"),
   crmSections: document.querySelectorAll(".crm-section"),
+  crmSettingsSave: document.querySelector("#saveInstructionsButton"),
   crmRecordsHeading: document.querySelector("#crmRecordsHeading"),
   crmRecordsDescription: document.querySelector("#crmRecordsDescription"),
   crmDatePresetButtons: document.querySelectorAll(".crm-date-preset"),
@@ -2135,6 +2141,18 @@ function miniRow(parts) {
   return row;
 }
 
+function crmSummaryMetaItem(icon, label, value) {
+  if (!value) return null;
+  const item = document.createElement("span");
+  item.className = "crm-summary-meta-item";
+  const marker = document.createElement("i");
+  marker.setAttribute("data-lucide", icon);
+  const text = document.createElement("span");
+  text.textContent = label ? `${label}: ${value}` : value;
+  item.append(marker, text);
+  return item;
+}
+
 function crmEventDetail(detail) {
   if (!detail || typeof detail !== "object") return "";
   return [
@@ -2157,27 +2175,45 @@ function crmInsight(lead) {
 function renderCrm(leads) {
   el.crmList.innerHTML = "";
   for (const lead of leads) {
+    const call = lead.voiceCall;
     const card = document.createElement("details");
     card.className = `crm-card status-${lead.status || "new"}`;
     card.dataset.id = lead.id;
 
     const summary = document.createElement("summary");
+    summary.setAttribute("aria-label", `Open details for ${lead.name || lead.phone || "lead"}`);
     const title = document.createElement("div");
+    title.className = "crm-summary-main";
     const name = document.createElement("strong");
-    name.textContent = lead.name || lead.phone || "Unknown lead";
-    const sub = document.createElement("span");
-    sub.textContent = [lead.need, lead.phone, lead.email].filter(Boolean).join(" · ") || lead.source || "No details yet";
-    title.append(name, sub);
+    name.textContent = lead.name || "No name yet";
+    const meta = document.createElement("div");
+    meta.className = "crm-summary-meta";
+    const leadTime = call?.startedAt || lead.createdAt;
+    meta.append(
+      ...[
+        crmSummaryMetaItem("phone", "", lead.phone || call?.fromNumber || "No phone"),
+        crmSummaryMetaItem("calendar-clock", "", leadTime ? new Date(leadTime).toLocaleString() : null),
+        crmSummaryMetaItem("clipboard-list", "", lead.need || lead.source || "No need yet"),
+        lead.email ? crmSummaryMetaItem("mail", "", lead.email) : null,
+      ].filter(Boolean),
+    );
+    title.append(name, meta);
     const badge = document.createElement("span");
     badge.className = "crm-status-badge";
     badge.textContent = titleFromKey(lead.status || "new");
-    summary.append(title, badge);
+    const openHint = document.createElement("span");
+    openHint.className = "crm-open-hint";
+    const openText = document.createElement("span");
+    openText.textContent = "Details";
+    const openIcon = document.createElement("i");
+    openIcon.setAttribute("data-lucide", "chevron-down");
+    openHint.append(openText, openIcon);
+    summary.append(title, badge, openHint);
 
     const body = document.createElement("div");
     body.className = "crm-body";
     const grid = document.createElement("div");
     grid.className = "crm-detail-grid";
-    const call = lead.voiceCall;
     const started = call?.startedAt ? new Date(call.startedAt).toLocaleString() : null;
     const insight = crmInsight(lead);
     const duration = call?.metrics?.durationSeconds ? `${call.metrics.durationSeconds}s` : null;
@@ -2430,6 +2466,7 @@ function renderCrm(leads) {
     el.crmList.appendChild(card);
   }
   if (!leads.length) el.crmList.textContent = "No leads yet.";
+  window.lucide?.createIcons();
 }
 
 function renderCrmStatusCounts(counts = {}) {
@@ -3551,6 +3588,44 @@ for (const tab of el.adminTabs) {
   });
 }
 
+function crmAreaAllowed(areaName, channelName = state.crmChannel) {
+  const area = String(areaName || CRM_DEFAULT_AREA);
+  const button = Array.from(el.crmAreaButtons || []).find((item) => item.dataset.crmArea === area);
+  if (!button) return false;
+  const channelOnly = button.dataset.crmChannelOnly || "";
+  return !channelOnly || channelOnly === channelName;
+}
+
+function updateCrmAreaUi() {
+  if (!crmAreaAllowed(state.crmArea, state.crmChannel)) state.crmArea = CRM_DEFAULT_AREA;
+  for (const button of el.crmAreaButtons || []) {
+    const channelOnly = button.dataset.crmChannelOnly || "";
+    const visible = !channelOnly || channelOnly === state.crmChannel;
+    button.hidden = !visible;
+    const selected = visible && button.dataset.crmArea === state.crmArea;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+  }
+  for (const panel of el.crmAreaPanels || []) {
+    const parentSection = panel.closest(".crm-section");
+    const panelChannel = parentSection?.dataset.crmSection || "";
+    const selected =
+      panel.dataset.crmAreaPanel === state.crmArea &&
+      (!panelChannel || panelChannel === state.crmChannel);
+    panel.classList.toggle("active", selected);
+  }
+  for (const section of el.crmSections || []) {
+    section.classList.toggle("active", section.dataset.crmSection === state.crmChannel && state.crmArea !== CRM_DEFAULT_AREA);
+  }
+  if (el.crmSettingsSave) el.crmSettingsSave.hidden = !CRM_SAVE_AREAS.has(state.crmArea);
+  window.lucide?.createIcons();
+}
+
+function selectCrmArea(areaName) {
+  state.crmArea = crmAreaAllowed(areaName, state.crmChannel) ? areaName : CRM_DEFAULT_AREA;
+  updateCrmAreaUi();
+}
+
 function selectCrmSection(sectionName, reload = true) {
   const channel = CRM_CHANNEL_DETAILS[sectionName] ? sectionName : "inbound";
   state.crmChannel = channel;
@@ -3559,12 +3634,10 @@ function selectCrmSection(sectionName, reload = true) {
     button.classList.toggle("active", selected);
     button.setAttribute("aria-selected", String(selected));
   }
-  for (const section of el.crmSections) {
-    section.classList.toggle("active", section.dataset.crmSection === channel);
-  }
   const details = CRM_CHANNEL_DETAILS[channel];
   if (el.crmRecordsHeading) el.crmRecordsHeading.textContent = details.heading;
   if (el.crmRecordsDescription) el.crmRecordsDescription.textContent = details.description;
+  updateCrmAreaUi();
   if (reload) {
     el.crmStatusFilter.value = "";
     runAdmin(loadCrm);
@@ -3573,6 +3646,10 @@ function selectCrmSection(sectionName, reload = true) {
 
 for (const button of el.crmMenuButtons) {
   button.addEventListener("click", () => selectCrmSection(button.dataset.crmTarget));
+}
+
+for (const button of el.crmAreaButtons) {
+  button.addEventListener("click", () => selectCrmArea(button.dataset.crmArea));
 }
 
 function openBusinessTool(tabName) {
