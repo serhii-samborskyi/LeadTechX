@@ -3122,6 +3122,16 @@ dd {
   align-items: flex-start;
 }
 
+.crm-heading .admin-view-heading {
+  margin-bottom: 0;
+}
+
+.crm-section .booking-followup-section {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
 .crm-webhook-card {
   display: grid;
   gap: 12px;
@@ -3548,14 +3558,23 @@ dd {
   margin: 14px 0;
 }
 
-.automation-subnav {
+.automation-subnav,
+.crm-subnav {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin: 16px 0 4px;
 }
 
-.automation-menu-button {
+.automation-subnav {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.crm-subnav {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.automation-menu-button,
+.crm-menu-button {
   min-width: 0;
   min-height: 42px;
   justify-content: center;
@@ -3567,14 +3586,16 @@ dd {
   white-space: normal;
 }
 
-.automation-menu-button.active {
+.automation-menu-button.active,
+.crm-menu-button.active {
   border-color: #a9d6bd;
   background: var(--accent-soft);
   color: var(--accent-dark);
   box-shadow: inset 0 -3px 0 var(--coral);
 }
 
-.automation-section {
+.automation-section,
+.crm-section {
   display: none;
   gap: 14px;
   margin-top: 22px;
@@ -3582,24 +3603,30 @@ dd {
   border-top: 1px solid var(--line);
 }
 
-.automation-section.active {
+.automation-section.active,
+.crm-section.active {
   display: grid;
 }
 
-.automation-section-heading {
+.automation-section-heading,
+.crm-section-heading {
   max-width: 760px;
 }
 
 .automation-section-heading h4,
-.automation-section-heading p {
+.automation-section-heading p,
+.crm-section-heading h4,
+.crm-section-heading p {
   margin: 0;
 }
 
-.automation-section-heading h4 {
+.automation-section-heading h4,
+.crm-section-heading h4 {
   font-size: 0.96rem;
 }
 
-.automation-section-heading p {
+.automation-section-heading p,
+.crm-section-heading p {
   margin-top: 4px;
   color: var(--muted);
   font-size: 0.86rem;
@@ -4374,7 +4401,8 @@ a.appointment-field-value {
     justify-content: center;
   }
 
-  .automation-subnav {
+  .automation-subnav,
+  .crm-subnav {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

@@ -75,6 +75,8 @@ const el = {
   adminViews: document.querySelectorAll(".admin-view"),
   automationMenuButtons: document.querySelectorAll(".automation-menu-button"),
   automationSections: document.querySelectorAll(".automation-section"),
+  crmMenuButtons: document.querySelectorAll(".crm-menu-button"),
+  crmSections: document.querySelectorAll(".crm-section"),
   profileBusinessName: document.querySelector("#profileBusinessName"),
   profileWebsite: document.querySelector("#profileWebsite"),
   profileSummary: document.querySelector("#profileSummary"),
@@ -3501,8 +3503,23 @@ function selectAutomationSection(sectionName) {
   }
 }
 
+function selectCrmSection(sectionName) {
+  for (const button of el.crmMenuButtons) {
+    const selected = button.dataset.crmTarget === sectionName;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+  }
+  for (const section of el.crmSections) {
+    section.classList.toggle("active", section.dataset.crmSection === sectionName);
+  }
+}
+
 for (const button of el.automationMenuButtons) {
   button.addEventListener("click", () => selectAutomationSection(button.dataset.automationTarget));
+}
+
+for (const button of el.crmMenuButtons) {
+  button.addEventListener("click", () => selectCrmSection(button.dataset.crmTarget));
 }
 
 function openBusinessTool(tabName) {

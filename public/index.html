@@ -115,7 +115,7 @@
           <button class="admin-tab" data-tab="automation" role="tab" aria-selected="false" type="button">Automation</button>
           <button class="admin-tab" data-tab="transfers" role="tab" aria-selected="false" type="button">Transfers</button>
           <button class="admin-tab" data-tab="calendar" role="tab" aria-selected="false" type="button">Calendar</button>
-          <button class="admin-tab" data-tab="leads" role="tab" aria-selected="false" type="button">Leads</button>
+          <button class="admin-tab" data-tab="leads" role="tab" aria-selected="false" type="button">CRM</button>
           <button class="admin-tab" data-tab="messages" role="tab" aria-selected="false" type="button">Messages</button>
           <button class="admin-tab" data-tab="billing" role="tab" aria-selected="false" type="button">Billing</button>
         </nav>
@@ -430,145 +430,168 @@
 
           <section class="admin-view" data-view="leads">
             <div class="section-heading crm-heading">
-              <div>
-                <h3>Leads</h3>
-                <p>Incoming calls, captured leads, transcripts, recordings, and follow-up status.</p>
+              <div class="admin-view-heading">
+                <h3>CRM</h3>
+                <p>Lead records, booking follow-up automation, webhook intake, and customer history.</p>
               </div>
               <button id="refreshCrmButton" type="button">Refresh leads</button>
             </div>
-            <div class="booking-followup-section">
-              <div class="booking-flow-header">
-                <div>
-                  <h4>Booking follow-up sequence</h4>
-                  <p>Texts for customers who received a booking link but have not completed the booking yet.</p>
-                </div>
-                <label class="booking-flow-toggle">
-                  <input id="bookingFollowupEnabled" type="checkbox" />
-                  <span>Sequence enabled</span>
-                </label>
+
+            <div class="crm-subnav" role="tablist" aria-label="CRM sections">
+              <button class="crm-menu-button active" data-crm-target="leads" type="button" role="tab" aria-selected="true">Leads</button>
+              <button class="crm-menu-button" data-crm-target="followup" type="button" role="tab" aria-selected="false">Follow-up sequence</button>
+              <button class="crm-menu-button" data-crm-target="webhook" type="button" role="tab" aria-selected="false">Lead webhook</button>
+            </div>
+
+            <div class="crm-section active" data-crm-section="leads" role="tabpanel">
+              <div class="crm-section-heading">
+                <h4>Lead records</h4>
+                <p>Search customers, review call outcomes, update statuses, and manage follow-up work.</p>
               </div>
-              <div class="booking-flow-canvas" aria-label="Booking follow-up flow">
-                <div class="booking-flow-node booking-flow-trigger">
-                  <span class="booking-node-eyebrow">Trigger</span>
-                  <strong>Booking link sent</strong>
-                  <p>Agent sends the tracked Vagaro booking link to the caller.</p>
-                  <div class="booking-flow-chip">Tracked per lead</div>
+              <div class="crm-summary-strip" id="crmStatusCounts"></div>
+              <div class="crm-filter-row">
+                <input id="crmSearch" placeholder="Search name, phone, need, notes" />
+                <select id="crmStatusFilter">
+                  <option value="">All statuses</option>
+                  <option value="new">New</option>
+                  <option value="qualified">Qualified</option>
+                  <option value="unqualified">Unqualified</option>
+                  <option value="callback">Callback</option>
+                  <option value="appointment">Appointment</option>
+                  <option value="needs_reply">Needs reply</option>
+                  <option value="transferred">Transferred</option>
+                  <option value="unreachable">Unreachable</option>
+                </select>
+              </div>
+              <div class="inline-editor crm-editor">
+                <input id="crmName" placeholder="Name" />
+                <input id="crmPhone" placeholder="Phone" />
+                <input id="crmEmail" placeholder="Email" />
+                <input id="crmNeed" placeholder="Need / service" />
+                <select id="crmStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="unqualified">Unqualified</option><option value="callback">Callback</option><option value="appointment">Appointment</option><option value="needs_reply">Needs reply</option><option value="transferred">Transferred</option><option value="unreachable">Unreachable</option></select>
+                <button id="addCrmLeadButton" type="button">Add lead</button>
+              </div>
+              <div class="crm-board" id="crmList"></div>
+            </div>
+
+            <div class="crm-section" data-crm-section="followup" role="tabpanel">
+              <div class="booking-followup-section">
+                <div class="booking-flow-header">
+                  <div>
+                    <h4>Booking follow-up sequence</h4>
+                    <p>Texts for customers who received a booking link but have not completed the booking yet.</p>
+                  </div>
+                  <label class="booking-flow-toggle">
+                    <input id="bookingFollowupEnabled" type="checkbox" />
+                    <span>Sequence enabled</span>
+                  </label>
                 </div>
-                <div class="booking-flow-line" aria-hidden="true"></div>
-                <div class="booking-flow-branch">
-                  <div class="booking-flow-branch-label">Customer action</div>
-                  <div class="booking-flow-node">
+                <div class="booking-flow-canvas" aria-label="Booking follow-up flow">
+                  <div class="booking-flow-node booking-flow-trigger">
+                    <span class="booking-node-eyebrow">Trigger</span>
+                    <strong>Booking link sent</strong>
+                    <p>Agent sends the tracked Vagaro booking link to the caller.</p>
+                    <div class="booking-flow-chip">Tracked per lead</div>
+                  </div>
+                  <div class="booking-flow-line" aria-hidden="true"></div>
+                  <div class="booking-flow-branch">
+                    <div class="booking-flow-branch-label">Customer action</div>
+                    <div class="booking-flow-node">
+                      <div class="booking-node-head">
+                        <span class="booking-node-eyebrow">If not clicked</span>
+                        <label class="booking-delay-control">Wait
+                          <input id="bookingFollowupNotClickedDelayMinutes" type="number" min="1" step="1" />
+                          min
+                        </label>
+                      </div>
+                      <label class="booking-message-editor">Message
+                        <textarea id="bookingFollowupNotClickedTemplate" rows="4"></textarea>
+                      </label>
+                    </div>
+                    <div class="booking-flow-node">
+                      <div class="booking-node-head">
+                        <span class="booking-node-eyebrow">If clicked, not booked</span>
+                        <label class="booking-delay-control">Wait
+                          <input id="bookingFollowupClickedDelayMinutes" type="number" min="1" step="1" />
+                          min
+                        </label>
+                      </div>
+                      <label class="booking-message-editor">Message
+                        <textarea id="bookingFollowupClickedTemplate" rows="4"></textarea>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="booking-flow-line" aria-hidden="true"></div>
+                  <div class="booking-flow-node booking-flow-final">
                     <div class="booking-node-head">
-                      <span class="booking-node-eyebrow">If not clicked</span>
+                      <span class="booking-node-eyebrow">Final reminder</span>
                       <label class="booking-delay-control">Wait
-                        <input id="bookingFollowupNotClickedDelayMinutes" type="number" min="1" step="1" />
+                        <input id="bookingFollowupFinalDelayMinutes" type="number" min="1" step="1" />
                         min
                       </label>
                     </div>
                     <label class="booking-message-editor">Message
-                      <textarea id="bookingFollowupNotClickedTemplate" rows="4"></textarea>
+                      <textarea id="bookingFollowupFinalTemplate" rows="5"></textarea>
                     </label>
                   </div>
-                  <div class="booking-flow-node">
-                    <div class="booking-node-head">
-                      <span class="booking-node-eyebrow">If clicked, not booked</span>
-                      <label class="booking-delay-control">Wait
-                        <input id="bookingFollowupClickedDelayMinutes" type="number" min="1" step="1" />
-                        min
-                      </label>
+                  <div class="booking-flow-line" aria-hidden="true"></div>
+                  <div class="booking-flow-node booking-flow-stop">
+                    <span class="booking-node-eyebrow">Stop rules</span>
+                    <div class="booking-stop-list">
+                      <span>Customer replies: mark lead as Needs reply.</span>
+                      <span>Vagaro webhook matches: mark as Booked.</span>
                     </div>
-                    <label class="booking-message-editor">Message
-                      <textarea id="bookingFollowupClickedTemplate" rows="4"></textarea>
+                    <label class="booking-window-control">Match bookings for
+                      <input id="bookingFollowupMatchWindowHours" type="number" min="1" step="1" />
+                      hours after link send
                     </label>
                   </div>
                 </div>
-                <div class="booking-flow-line" aria-hidden="true"></div>
-                <div class="booking-flow-node booking-flow-final">
-                  <div class="booking-node-head">
-                    <span class="booking-node-eyebrow">Final reminder</span>
-                    <label class="booking-delay-control">Wait
-                      <input id="bookingFollowupFinalDelayMinutes" type="number" min="1" step="1" />
-                      min
-                    </label>
-                  </div>
-                  <label class="booking-message-editor">Message
-                    <textarea id="bookingFollowupFinalTemplate" rows="5"></textarea>
-                  </label>
+                <div class="booking-flow-actions">
+                  <button id="saveBookingFollowupButton" class="primary" type="button">Save sequence</button>
+                  <small>Variables: {{business_name}}, {{customer_name}}, {{customer_phone}}, {{booking_link}}, {{service}}, {{professional}}, {{requested_time}}</small>
                 </div>
-                <div class="booking-flow-line" aria-hidden="true"></div>
-                <div class="booking-flow-node booking-flow-stop">
-                  <span class="booking-node-eyebrow">Stop rules</span>
-                  <div class="booking-stop-list">
-                    <span>Customer replies: mark lead as Needs reply.</span>
-                    <span>Vagaro webhook matches: mark as Booked.</span>
-                  </div>
-                  <label class="booking-window-control">Match bookings for
-                    <input id="bookingFollowupMatchWindowHours" type="number" min="1" step="1" />
-                    hours after link send
-                  </label>
-                </div>
-              </div>
-              <div class="booking-flow-actions">
-                <button id="saveBookingFollowupButton" class="primary" type="button">Save sequence</button>
-                <small>Variables: {{business_name}}, {{customer_name}}, {{customer_phone}}, {{booking_link}}, {{service}}, {{professional}}, {{requested_time}}</small>
               </div>
             </div>
-            <div class="crm-webhook-card">
-              <div>
+
+            <div class="crm-section" data-crm-section="webhook" role="tabpanel">
+              <div class="crm-section-heading">
                 <h4>Lead webhook</h4>
-                <p>Post new website, ad, or form leads to this URL. Rotating the URL disables the old one.</p>
+                <p>Receive website, ad, and form leads into CRM, then test or audit the intake activity.</p>
               </div>
-              <div class="crm-webhook-controls">
-                <input id="crmWebhookUrl" readonly placeholder="Loading webhook URL" />
-                <button id="copyCrmWebhookButton" type="button">Copy</button>
-                <button id="rotateCrmWebhookButton" type="button">Rotate URL</button>
-                <a id="crmWebhookDocsLink" class="button-link" href="/lead-webhook-api.html" target="_blank" rel="noopener">API docs</a>
+              <div class="crm-webhook-card">
+                <div>
+                  <h4>Webhook URL</h4>
+                  <p>Post new website, ad, or form leads to this URL. Rotating the URL disables the old one.</p>
+                </div>
+                <div class="crm-webhook-controls">
+                  <input id="crmWebhookUrl" readonly placeholder="Loading webhook URL" />
+                  <button id="copyCrmWebhookButton" type="button">Copy</button>
+                  <button id="rotateCrmWebhookButton" type="button">Rotate URL</button>
+                  <a id="crmWebhookDocsLink" class="button-link" href="/lead-webhook-api.html" target="_blank" rel="noopener">API docs</a>
+                </div>
+                <small id="crmWebhookHelp">Accepted fields: name, phone, email, service, source, notes.</small>
               </div>
-              <small id="crmWebhookHelp">Accepted fields: name, phone, email, service, source, notes.</small>
-            </div>
-            <div class="crm-summary-strip" id="crmStatusCounts"></div>
-            <div class="crm-filter-row">
-              <input id="crmSearch" placeholder="Search name, phone, need, notes" />
-              <select id="crmStatusFilter">
-                <option value="">All statuses</option>
-                <option value="new">New</option>
-                <option value="qualified">Qualified</option>
-                <option value="unqualified">Unqualified</option>
-                <option value="callback">Callback</option>
-                <option value="appointment">Appointment</option>
-                <option value="needs_reply">Needs reply</option>
-                <option value="transferred">Transferred</option>
-                <option value="unreachable">Unreachable</option>
-              </select>
-            </div>
-            <div class="crm-webhook-card">
-              <div>
-                <h4>Webhook activity</h4>
-                <p>Latest accepted, duplicate, rejected, and failed form submissions.</p>
+              <div class="crm-webhook-card">
+                <div>
+                  <h4>Webhook activity</h4>
+                  <p>Latest accepted, duplicate, rejected, and failed form submissions.</p>
+                </div>
+                <div class="data-list compact-list" id="crmWebhookEvents"></div>
               </div>
-              <div class="data-list compact-list" id="crmWebhookEvents"></div>
-            </div>
-            <div class="crm-webhook-card">
-              <div>
-                <h4>Webhook test</h4>
-                <p>Send a sample form payload through the same intake path used by the public webhook.</p>
-              </div>
-              <textarea id="crmWebhookTestPayload" rows="7"></textarea>
-              <div class="crm-webhook-controls">
-                <button id="sendCrmWebhookTestButton" type="button">Send test lead</button>
-                <button id="resetCrmWebhookTestButton" type="button">Reset sample</button>
-                <span id="crmWebhookTestStatus"></span>
+              <div class="crm-webhook-card">
+                <div>
+                  <h4>Webhook test</h4>
+                  <p>Send a sample form payload through the same intake path used by the public webhook.</p>
+                </div>
+                <textarea id="crmWebhookTestPayload" rows="7"></textarea>
+                <div class="crm-webhook-controls">
+                  <button id="sendCrmWebhookTestButton" type="button">Send test lead</button>
+                  <button id="resetCrmWebhookTestButton" type="button">Reset sample</button>
+                  <span id="crmWebhookTestStatus"></span>
+                </div>
               </div>
             </div>
-            <div class="inline-editor crm-editor">
-              <input id="crmName" placeholder="Name" />
-              <input id="crmPhone" placeholder="Phone" />
-              <input id="crmEmail" placeholder="Email" />
-              <input id="crmNeed" placeholder="Need / service" />
-              <select id="crmStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="unqualified">Unqualified</option><option value="callback">Callback</option><option value="appointment">Appointment</option><option value="needs_reply">Needs reply</option><option value="transferred">Transferred</option><option value="unreachable">Unreachable</option></select>
-              <button id="addCrmLeadButton" type="button">Add lead</button>
-            </div>
-            <div class="crm-board" id="crmList"></div>
           </section>
 
           <section class="admin-view" data-view="messages">
