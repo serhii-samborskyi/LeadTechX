@@ -514,27 +514,83 @@
                   <h4>Smart review and complaint recovery</h4>
                   <p>Ask satisfied customers for reviews and route unhappy customers to management.</p>
                 </div>
-                <div class="qualification-settings review-settings">
-                  <label><input id="reviewRequestsEnabled" type="checkbox" /> Enable smart review and complaint recovery</label>
-                  <label>Fallback review link<input id="reviewLink" type="url" placeholder="https://g.page/r/..." /></label>
-                  <label>Manager notification phone<input id="managerNotificationPhone" type="tel" placeholder="+15551234567" /></label>
-                  <label>Review behavior instructions<textarea id="reviewPromptInstructions" rows="5"></textarea></label>
-                  <label>Review request message<textarea id="reviewRequestTemplate" rows="3"></textarea></label>
-                  <label>Complaint recovery instructions<textarea id="complaintRecoveryInstructions" rows="5"></textarea></label>
-                  <label>Manager complaint message<textarea id="complaintEscalationTemplate" rows="3"></textarea></label>
+                <div class="review-flow-section">
+                  <div class="booking-flow-header">
+                    <div>
+                      <h4>Review recovery sequence</h4>
+                      <p>The agent routes happy customers to reviews and unhappy customers to management.</p>
+                    </div>
+                    <label class="booking-flow-toggle">
+                      <input id="reviewRequestsEnabled" type="checkbox" />
+                      <span>Sequence enabled</span>
+                    </label>
+                  </div>
+                  <div class="booking-flow-canvas review-flow-canvas" aria-label="Review and complaint recovery flow">
+                    <div class="booking-flow-node booking-flow-trigger">
+                      <span class="booking-node-eyebrow">Trigger</span>
+                      <strong>Service completed</strong>
+                      <p>Agent asks whether the customer is happy with the service.</p>
+                      <label class="booking-message-editor">Agent behavior
+                        <textarea id="reviewPromptInstructions" rows="5"></textarea>
+                      </label>
+                    </div>
+                    <div class="booking-flow-line" aria-hidden="true"></div>
+                    <div class="booking-flow-branch review-flow-branch">
+                      <div class="booking-flow-branch-label">Customer sentiment</div>
+                      <div class="booking-flow-node review-flow-happy">
+                        <div class="booking-node-head">
+                          <span class="booking-node-eyebrow">If happy</span>
+                        </div>
+                        <label class="booking-message-editor">Review request message
+                          <textarea id="reviewRequestTemplate" rows="4"></textarea>
+                        </label>
+                      </div>
+                      <div class="booking-flow-node review-flow-complaint">
+                        <div class="booking-node-head">
+                          <span class="booking-node-eyebrow">If not happy</span>
+                        </div>
+                        <label class="booking-message-editor">Complaint recovery instructions
+                          <textarea id="complaintRecoveryInstructions" rows="4"></textarea>
+                        </label>
+                      </div>
+                    </div>
+                    <div class="booking-flow-line" aria-hidden="true"></div>
+                    <div class="booking-flow-node review-flow-destinations">
+                      <span class="booking-node-eyebrow">Review page</span>
+                      <label class="review-flow-field">Fallback review link
+                        <input id="reviewLink" type="url" placeholder="https://g.page/r/..." />
+                      </label>
+                      <div>
+                        <div class="review-flow-title-row">
+                          <strong>Review service buttons</strong>
+                          <a id="reviewDirectoryLink" class="button-link" href="#" target="_blank" rel="noopener" hidden>Open review page</a>
+                        </div>
+                        <p>Customers choose where to leave the review.</p>
+                      </div>
+                      <div class="inline-editor review-link-editor">
+                        <input id="reviewServiceName" placeholder="Google Maps, Yelp, Facebook" />
+                        <input id="reviewServiceUrl" type="url" placeholder="https://..." />
+                        <input id="reviewServiceSort" type="number" step="1" placeholder="Order" />
+                        <button id="addReviewLinkButton" type="button">Add service</button>
+                      </div>
+                      <div class="data-list compact-list" id="reviewLinkList"></div>
+                    </div>
+                    <div class="booking-flow-line" aria-hidden="true"></div>
+                    <div class="booking-flow-node booking-flow-stop review-flow-management">
+                      <span class="booking-node-eyebrow">Management</span>
+                      <label class="review-flow-field">Manager notification phone
+                        <input id="managerNotificationPhone" type="tel" placeholder="+15551234567" />
+                      </label>
+                      <label class="booking-message-editor">Manager complaint message
+                        <textarea id="complaintEscalationTemplate" rows="4"></textarea>
+                      </label>
+                      <div class="booking-stop-list">
+                        <span>Happy customer: send review page.</span>
+                        <span>Unhappy customer: notify manager and keep lead as Needs reply.</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <h4>Review service buttons</h4>
-                  <p>Customers receive one review page and choose the service they prefer.</p>
-                  <a id="reviewDirectoryLink" class="button-link" href="#" target="_blank" rel="noopener" hidden>Open review page</a>
-                </div>
-                <div class="inline-editor review-link-editor">
-                  <input id="reviewServiceName" placeholder="Google Maps, Yelp, Facebook" />
-                  <input id="reviewServiceUrl" type="url" placeholder="https://..." />
-                  <input id="reviewServiceSort" type="number" step="1" placeholder="Order" />
-                  <button id="addReviewLinkButton" type="button">Add service</button>
-                </div>
-                <div class="data-list compact-list" id="reviewLinkList"></div>
               </div>
             </div>
 

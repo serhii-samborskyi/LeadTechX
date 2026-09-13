@@ -156,6 +156,7 @@ const el = {
   bookingFollowupClickedTemplate: document.querySelector("#bookingFollowupClickedTemplate"),
   bookingFollowupFinalTemplate: document.querySelector("#bookingFollowupFinalTemplate"),
   saveBookingFollowupButton: document.querySelector("#saveBookingFollowupButton"),
+  reviewFlowSection: document.querySelector(".review-flow-section"),
   reviewRequestsEnabled: document.querySelector("#reviewRequestsEnabled"),
   reviewLink: document.querySelector("#reviewLink"),
   managerNotificationPhone: document.querySelector("#managerNotificationPhone"),
@@ -626,6 +627,11 @@ async function saveSettings() {
 function updateBookingFollowupUi() {
   if (!el.bookingFollowupSection || !el.bookingFollowupEnabled) return;
   el.bookingFollowupSection.classList.toggle("is-disabled", !el.bookingFollowupEnabled.checked);
+}
+
+function updateReviewFlowUi() {
+  if (!el.reviewFlowSection || !el.reviewRequestsEnabled) return;
+  el.reviewFlowSection.classList.toggle("is-disabled", !el.reviewRequestsEnabled.checked);
 }
 
 function adminIdentity() {
@@ -1597,6 +1603,7 @@ function applyAdminData(data) {
   el.reviewRequestTemplate.value = data.config.reviewRequestTemplate || "";
   el.complaintRecoveryInstructions.value = data.config.complaintRecoveryInstructions || "";
   el.complaintEscalationTemplate.value = data.config.complaintEscalationTemplate || "";
+  updateReviewFlowUi();
   el.missedCallFollowupTemplate.value = data.config.missedCallFollowupTemplate || "";
   el.appointmentReminderTemplate.value = data.config.appointmentReminderTemplate || "";
   el.appointmentMode.value = data.config.appointmentMode;
@@ -3865,6 +3872,7 @@ el.crmApplyDatesButton?.addEventListener("click", () => {
   runAdmin(loadCrm);
 });
 el.bookingFollowupEnabled?.addEventListener("change", updateBookingFollowupUi);
+el.reviewRequestsEnabled?.addEventListener("change", updateReviewFlowUi);
 el.saveBookingFollowupButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.copyCrmWebhookButton.addEventListener("click", () => runAdmin(copyLeadWebhook));
 el.rotateCrmWebhookButton.addEventListener("click", () => runAdmin(rotateLeadWebhook));

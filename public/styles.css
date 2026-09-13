@@ -3072,6 +3072,87 @@ dd {
   line-height: 1.4;
 }
 
+.review-flow-section {
+  display: grid;
+  gap: 16px;
+}
+
+.review-flow-section.is-disabled .review-flow-canvas {
+  opacity: 0.6;
+}
+
+.review-flow-canvas {
+  grid-template-columns:
+    minmax(270px, 1fr)
+    38px
+    minmax(330px, 1.18fr)
+    38px
+    minmax(310px, 1.1fr)
+    38px
+    minmax(270px, 0.95fr);
+}
+
+.review-flow-branch {
+  align-self: stretch;
+}
+
+.review-flow-happy {
+  border-color: #b7d9c8;
+  background: #f3fbf6;
+}
+
+.review-flow-complaint {
+  border-color: #ead3bc;
+  background: #fffaf4;
+}
+
+.review-flow-destinations {
+  align-self: stretch;
+}
+
+.review-flow-management {
+  align-self: stretch;
+}
+
+.review-flow-field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.review-flow-field input {
+  width: 100%;
+  min-height: 42px;
+}
+
+.review-flow-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.review-flow-title-row strong {
+  font-size: 0.95rem;
+}
+
+.review-flow-title-row .button-link {
+  min-height: 34px;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.8rem;
+}
+
+.review-flow-destinations .review-link-editor {
+  margin-top: 0;
+}
+
+.review-flow-destinations .compact-list {
+  max-height: 250px;
+  overflow: auto;
+}
+
 .appointment-editor {
   grid-template-columns: 1fr 0.9fr 1fr 1fr 1fr 0.8fr auto auto auto;
 }
@@ -4545,6 +4626,11 @@ a.appointment-field-value {
   .booking-flow-actions .primary {
     width: 100%;
     justify-content: center;
+  }
+
+  .review-flow-title-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .crm-subnav {
