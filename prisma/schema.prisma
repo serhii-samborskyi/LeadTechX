@@ -62,6 +62,8 @@ model BusinessProfile {
   bookingProfessionals         BookingProfessional[]
   bookingAppointments          BookingAppointment[]
   bookingLinks                 BookingLink[]
+  bookingLinkSends             BookingLinkSend[]
+  bookingLinkClicks            BookingLinkClick[]
   bookingWebhookEvents         BookingWebhookEvent[]
 }
 
@@ -98,43 +100,51 @@ model SubscriptionPlan {
 }
 
 model BusinessConfig {
-  id                             Int                      @id @default(autoincrement())
-  businessProfileId              Int                      @unique
-  businessProfile                BusinessProfile          @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
-  extraInstructions              String                   @default("")
-  qualificationInstructions      String                   @default("You are an outbound lead qualification agent. Confirm you are speaking with the lead, ask if now is a good time, confirm what they need, urgency, location or service area, budget or price expectations when relevant, and whether they want an appointment or callback. Keep the call brief, professional, and honest.")
-  qualificationEnabled           Boolean                  @default(true)
-  qualificationLaunchMode        String                   @default("approval")
-  qualificationDelayMinSeconds   Int                      @default(30)
-  qualificationDelayMaxSeconds   Int                      @default(100)
-  qualificationMaxAttempts       Int                      @default(3)
-  qualificationRetryDelayMinutes Int                      @default(120)
-  leadWebhookDedupeWindowHours   Int                      @default(24)
-  reviewRequestsEnabled          Boolean                  @default(false)
-  reviewLink                     String                   @default("")
-  reviewPromptInstructions       String                   @default("After a completed service or appointment, ask whether the customer is happy with the service. If they are happy, offer to text the review link. If they are not happy, apologize, collect the issue, and escalate it to management.")
-  reviewRequestTemplate          String                   @default("Thank you for choosing {{business_name}}. If you were happy with the service, please leave us a review: {{review_link}}")
-  complaintRecoveryInstructions  String                   @default("Apologize, collect what happened, ask what resolution they want, and tell the customer management will be notified.")
-  complaintEscalationTemplate    String                   @default("Complaint for {{business_name}}. Customer: {{customer_name}}. Phone: {{customer_phone}}. Issue: {{complaint}}")
-  managerNotificationPhone       String                   @default("")
-  missedCallFollowupTemplate     String                   @default("Sorry we missed your call to {{business_name}}. Reply here and we will help.")
-  appointmentReminderTemplate    String                   @default("Reminder: you have an appointment with {{business_name}} on {{appointment_time}}. Reply if you need to reschedule.")
-  appointmentMode                String                   @default("instant")
-  slotDurationMinutes            Int                      @default(30)
-  bufferMinutes                  Int                      @default(0)
-  timezone                       String                   @default("America/Chicago")
-  calendarProvider               String                   @default("internal")
-  providerConfig                 Json?
-  voiceName                      String                   @default("Puck")
-  language                       String                   @default("English")
-  agentName                      String                   @default("Alex")
-  intakeFields                   IntakeField[]
-  knowledgeEntries               KnowledgeEntry[]
-  priceEntries                   PriceEntry[]
-  availabilityRules              AvailabilityRule[]
-  transferTargets                BusinessTransferTarget[]
-  createdAt                      DateTime                 @default(now())
-  updatedAt                      DateTime                 @updatedAt
+  id                                    Int                      @id @default(autoincrement())
+  businessProfileId                     Int                      @unique
+  businessProfile                       BusinessProfile          @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  extraInstructions                     String                   @default("")
+  qualificationInstructions             String                   @default("You are an outbound lead qualification agent. Confirm you are speaking with the lead, ask if now is a good time, confirm what they need, urgency, location or service area, budget or price expectations when relevant, and whether they want an appointment or callback. Keep the call brief, professional, and honest.")
+  qualificationEnabled                  Boolean                  @default(true)
+  qualificationLaunchMode               String                   @default("approval")
+  qualificationDelayMinSeconds          Int                      @default(30)
+  qualificationDelayMaxSeconds          Int                      @default(100)
+  qualificationMaxAttempts              Int                      @default(3)
+  qualificationRetryDelayMinutes        Int                      @default(120)
+  leadWebhookDedupeWindowHours          Int                      @default(24)
+  bookingFollowupEnabled                Boolean                  @default(true)
+  bookingFollowupMatchWindowHours       Int                      @default(48)
+  bookingFollowupNotClickedDelayMinutes Int                      @default(30)
+  bookingFollowupClickedDelayMinutes    Int                      @default(120)
+  bookingFollowupFinalDelayMinutes      Int                      @default(1440)
+  bookingFollowupNotClickedTemplate     String                   @default("Hi {{customer_name}}, here is the booking link for {{business_name}}: {{booking_link}}")
+  bookingFollowupClickedTemplate        String                   @default("Hi {{customer_name}}, were you able to find a time that works? You can book here: {{booking_link}}")
+  bookingFollowupFinalTemplate          String                   @default("Just checking in from {{business_name}}. You can still book here: {{booking_link}}")
+  reviewRequestsEnabled                 Boolean                  @default(false)
+  reviewLink                            String                   @default("")
+  reviewPromptInstructions              String                   @default("After a completed service or appointment, ask whether the customer is happy with the service. If they are happy, offer to text the review link. If they are not happy, apologize, collect the issue, and escalate it to management.")
+  reviewRequestTemplate                 String                   @default("Thank you for choosing {{business_name}}. If you were happy with the service, please leave us a review: {{review_link}}")
+  complaintRecoveryInstructions         String                   @default("Apologize, collect what happened, ask what resolution they want, and tell the customer management will be notified.")
+  complaintEscalationTemplate           String                   @default("Complaint for {{business_name}}. Customer: {{customer_name}}. Phone: {{customer_phone}}. Issue: {{complaint}}")
+  managerNotificationPhone              String                   @default("")
+  missedCallFollowupTemplate            String                   @default("Sorry we missed your call to {{business_name}}. Reply here and we will help.")
+  appointmentReminderTemplate           String                   @default("Reminder: you have an appointment with {{business_name}} on {{appointment_time}}. Reply if you need to reschedule.")
+  appointmentMode                       String                   @default("instant")
+  slotDurationMinutes                   Int                      @default(30)
+  bufferMinutes                         Int                      @default(0)
+  timezone                              String                   @default("America/Chicago")
+  calendarProvider                      String                   @default("internal")
+  providerConfig                        Json?
+  voiceName                             String                   @default("Puck")
+  language                              String                   @default("English")
+  agentName                             String                   @default("Alex")
+  intakeFields                          IntakeField[]
+  knowledgeEntries                      KnowledgeEntry[]
+  priceEntries                          PriceEntry[]
+  availabilityRules                     AvailabilityRule[]
+  transferTargets                       BusinessTransferTarget[]
+  createdAt                             DateTime                 @default(now())
+  updatedAt                             DateTime                 @updatedAt
 }
 
 model BusinessTransferTarget {
@@ -351,46 +361,51 @@ model BookingProfessionalService {
 }
 
 model BookingAppointment {
-  id                     Int                  @id @default(autoincrement())
-  businessProfileId      Int
-  businessProfile        BusinessProfile      @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
-  connectionId           Int
-  connection             BookingConnection    @relation(fields: [connectionId], references: [id], onDelete: Cascade)
-  provider               String
-  externalId             String?
-  calendarEventId        String?
-  customerExternalId     String?
-  customerName           String?
-  phone                  String?
-  email                  String?
-  serviceId              Int?
-  service                BookingService?      @relation(fields: [serviceId], references: [id], onDelete: SetNull)
-  serviceExternalId      String?
-  serviceTitle           String?
-  serviceCategory        String?
-  professionalId         Int?
-  professional           BookingProfessional? @relation(fields: [professionalId], references: [id], onDelete: SetNull)
-  professionalExternalId String?
-  professionalName       String?
-  bookingStatus          String?
-  status                 String               @default("external")
-  source                 String?
-  amount                 Float?
-  currency               String?
-  scheduledStart         DateTime?
-  scheduledEnd           DateTime?
-  timezone               String?
-  bookingUrl             String?
-  manageUrl              String?
-  notes                  String?
-  raw                    Json?
-  createdAt              DateTime             @default(now())
-  updatedAt              DateTime             @updatedAt
+  id                      Int                  @id @default(autoincrement())
+  businessProfileId       Int
+  businessProfile         BusinessProfile      @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  connectionId            Int
+  connection              BookingConnection    @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  provider                String
+  externalId              String?
+  calendarEventId         String?
+  customerExternalId      String?
+  customerName            String?
+  phone                   String?
+  email                   String?
+  leadId                  Int?
+  lead                    Lead?                @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  serviceId               Int?
+  service                 BookingService?      @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  serviceExternalId       String?
+  serviceTitle            String?
+  serviceCategory         String?
+  professionalId          Int?
+  professional            BookingProfessional? @relation(fields: [professionalId], references: [id], onDelete: SetNull)
+  professionalExternalId  String?
+  professionalName        String?
+  bookingStatus           String?
+  status                  String               @default("external")
+  source                  String?
+  amount                  Float?
+  currency                String?
+  scheduledStart          DateTime?
+  scheduledEnd            DateTime?
+  timezone                String?
+  bookingUrl              String?
+  manageUrl               String?
+  notes                   String?
+  raw                     Json?
+  createdAt               DateTime             @default(now())
+  updatedAt               DateTime             @updatedAt
+  bookingLinkSend         BookingLinkSend?     @relation("BookingLinkSendPlaceholderAppointment")
+  matchedBookingLinkSends BookingLinkSend[]    @relation("BookingLinkSendMatchedAppointment")
 
   @@unique([connectionId, externalId])
   @@index([businessProfileId, scheduledStart])
   @@index([businessProfileId, status, scheduledStart])
   @@index([provider, externalId])
+  @@index([leadId, createdAt])
 }
 
 model BookingLink {
@@ -415,9 +430,81 @@ model BookingLink {
   lastClickedAt          DateTime?
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt
+  sends                  BookingLinkSend[]
+  clicks                 BookingLinkClick[]
 
   @@index([businessProfileId, active, sortOrder])
   @@index([connectionId, active])
+}
+
+model BookingLinkSend {
+  id                   Int                 @id @default(autoincrement())
+  businessProfileId    Int
+  businessProfile      BusinessProfile     @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  leadId               Int?
+  lead                 Lead?               @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  voiceCallId          Int?
+  voiceCall            VoiceCall?          @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  bookingLinkId        Int
+  bookingLink          BookingLink         @relation(fields: [bookingLinkId], references: [id], onDelete: Cascade)
+  bookingAppointmentId Int?                @unique
+  bookingAppointment   BookingAppointment? @relation("BookingLinkSendPlaceholderAppointment", fields: [bookingAppointmentId], references: [id], onDelete: SetNull)
+  matchedAppointmentId Int?
+  matchedAppointment   BookingAppointment? @relation("BookingLinkSendMatchedAppointment", fields: [matchedAppointmentId], references: [id], onDelete: SetNull)
+  clickToken           String              @unique
+  status               String              @default("queued")
+  customerName         String?
+  phone                String?
+  email                String?
+  serviceText          String?
+  professionalText     String?
+  requestedTime        String?
+  destinationUrl       String?
+  trackedUrl           String?
+  sentAt               DateTime            @default(now())
+  firstClickedAt       DateTime?
+  lastClickedAt        DateTime?
+  clickCount           Int                 @default(0)
+  bookedAt             DateTime?
+  followupState        String              @default("active")
+  nextFollowupAt       DateTime?
+  lastFollowupStep     String?
+  followupAttempts     Int                 @default(0)
+  metadata             Json?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  clicks               BookingLinkClick[]
+
+  @@index([businessProfileId, status, sentAt])
+  @@index([leadId, sentAt])
+  @@index([phone, sentAt])
+  @@index([nextFollowupAt, followupState])
+  @@index([matchedAppointmentId])
+}
+
+model BookingLinkClick {
+  id                Int              @id @default(autoincrement())
+  businessProfileId Int
+  businessProfile   BusinessProfile  @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  bookingLinkId     Int
+  bookingLink       BookingLink      @relation(fields: [bookingLinkId], references: [id], onDelete: Cascade)
+  bookingLinkSendId Int?
+  bookingLinkSend   BookingLinkSend? @relation(fields: [bookingLinkSendId], references: [id], onDelete: SetNull)
+  leadId            Int?
+  lead              Lead?            @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  phone             String?
+  clickToken        String?
+  sourceUrl         String?
+  referrer          String?
+  ipAddress         String?
+  userAgent         String?
+  queryParams       Json?
+  createdAt         DateTime         @default(now())
+
+  @@index([businessProfileId, createdAt])
+  @@index([leadId, createdAt])
+  @@index([bookingLinkSendId, createdAt])
+  @@index([phone, createdAt])
 }
 
 model BookingWebhookEvent {
@@ -443,31 +530,34 @@ model BookingWebhookEvent {
 }
 
 model Lead {
-  id                 Int                         @id @default(autoincrement())
-  businessName       String
-  website            String?
-  businessProfileId  Int?
-  businessProfile    BusinessProfile?            @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
-  voiceCallId        Int?                        @unique
-  voiceCall          VoiceCall?                  @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
-  name               String
-  phone              String?
-  email              String?
-  need               String?
-  status             String                      @default("new")
-  source             String                      @default("agent")
-  summary            String?
-  transcript         String?
-  notes              String?
-  extractedFields    Json?
-  createdAt          DateTime                    @default(now())
-  updatedAt          DateTime                    @updatedAt
-  qualificationCalls OutboundQualificationCall[]
-  feedback           CustomerFeedback[]
-  leadWebhookEvents  LeadWebhookEvent[]
-  messageDeliveries  MessageDelivery[]
-  inboundMessages    MessageInbound[]
-  usageEvents        UsageEvent[]
+  id                  Int                         @id @default(autoincrement())
+  businessName        String
+  website             String?
+  businessProfileId   Int?
+  businessProfile     BusinessProfile?            @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  voiceCallId         Int?                        @unique
+  voiceCall           VoiceCall?                  @relation(fields: [voiceCallId], references: [id], onDelete: SetNull)
+  name                String
+  phone               String?
+  email               String?
+  need                String?
+  status              String                      @default("new")
+  source              String                      @default("agent")
+  summary             String?
+  transcript          String?
+  notes               String?
+  extractedFields     Json?
+  createdAt           DateTime                    @default(now())
+  updatedAt           DateTime                    @updatedAt
+  qualificationCalls  OutboundQualificationCall[]
+  feedback            CustomerFeedback[]
+  leadWebhookEvents   LeadWebhookEvent[]
+  messageDeliveries   MessageDelivery[]
+  inboundMessages     MessageInbound[]
+  usageEvents         UsageEvent[]
+  bookingAppointments BookingAppointment[]
+  bookingLinkSends    BookingLinkSend[]
+  bookingLinkClicks   BookingLinkClick[]
 
   @@index([businessProfileId, createdAt])
   @@index([phone, createdAt])
@@ -674,12 +764,12 @@ model EmailVerificationCode {
 }
 
 model MobileDeviceVoiceQuota {
-  id                    Int      @id @default(autoincrement())
-  deviceHash            String   @unique
-  anonymousVoiceSeconds Int      @default(0)
+  id                    Int       @id @default(autoincrement())
+  deviceHash            String    @unique
+  anonymousVoiceSeconds Int       @default(0)
   lastSessionStartedAt  DateTime?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 }
 
 model MobilePushSubscription {
@@ -756,6 +846,7 @@ model VoiceCall {
   messageDeliveries         MessageDelivery[]
   inboundMessages           MessageInbound[]
   usageEvents               UsageEvent[]
+  bookingLinkSends          BookingLinkSend[]
 }
 
 model OutboundQualificationCall {

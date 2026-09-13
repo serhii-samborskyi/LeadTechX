@@ -2832,13 +2832,17 @@ dd {
 }
 
 .booking-link-editor {
-  grid-template-columns: 1fr 1.4fr 1fr 1fr 0.45fr auto;
+  grid-template-columns: 1fr 1.5fr auto;
 }
 
 .booking-directory-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
+}
+
+.booking-followup-grid {
+  margin-top: 12px;
 }
 
 .appointment-editor {
@@ -3246,7 +3250,8 @@ dd {
 }
 
 .crm-card.status-callback .crm-status-badge,
-.crm-card.status-transferred .crm-status-badge {
+.crm-card.status-transferred .crm-status-badge,
+.crm-card.status-needs_reply .crm-status-badge {
   background: #fff5e5;
   color: #9b5d13;
 }

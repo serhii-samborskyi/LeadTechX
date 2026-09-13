@@ -354,16 +354,13 @@
             </div>
             <div class="crm-webhook-card booking-directory-card" hidden>
               <div>
-                <h4>Services, professionals, and links</h4>
-                <p>Imported services and staff help the receptionist search availability and send the best booking link.</p>
+                <h4>Services, professionals, and booking link</h4>
+                <p>Imported services and staff help the receptionist search live availability. Customers receive the general booking link.</p>
               </div>
               <div class="inline-editor booking-link-editor">
                 <input id="bookingLinkLabel" placeholder="Link label" />
                 <input id="bookingLinkUrl" type="url" placeholder="https://..." />
-                <select id="bookingLinkService"><option value="">Any service</option></select>
-                <select id="bookingLinkProfessional"><option value="">Any professional</option></select>
-                <input id="bookingLinkSort" type="number" step="1" placeholder="Order" />
-                <button id="addBookingLinkButton" type="button">Add link</button>
+                <button id="addBookingLinkButton" type="button">Save general link</button>
               </div>
               <div class="booking-directory-grid">
                 <div>
@@ -439,6 +436,26 @@
               </div>
               <button id="refreshCrmButton" type="button">Refresh leads</button>
             </div>
+            <div class="crm-webhook-card booking-followup-card">
+              <div>
+                <h4>Booking follow-up sequence</h4>
+                <p>Texts for customers who received a booking link but have not completed the booking yet.</p>
+              </div>
+              <label class="check-label"><input id="bookingFollowupEnabled" type="checkbox" /> Enable booking follow-up</label>
+              <div class="form-grid booking-followup-grid">
+                <label>Match booking window (hours)<input id="bookingFollowupMatchWindowHours" type="number" min="1" step="1" /></label>
+                <label>Not clicked delay (minutes)<input id="bookingFollowupNotClickedDelayMinutes" type="number" min="1" step="1" /></label>
+                <label>Clicked, not booked delay (minutes)<input id="bookingFollowupClickedDelayMinutes" type="number" min="1" step="1" /></label>
+                <label>Final reminder delay (minutes)<input id="bookingFollowupFinalDelayMinutes" type="number" min="1" step="1" /></label>
+                <label class="wide-field">Not clicked message<textarea id="bookingFollowupNotClickedTemplate" rows="3"></textarea></label>
+                <label class="wide-field">Clicked, not booked message<textarea id="bookingFollowupClickedTemplate" rows="3"></textarea></label>
+                <label class="wide-field">Final reminder message<textarea id="bookingFollowupFinalTemplate" rows="3"></textarea></label>
+              </div>
+              <div class="crm-webhook-controls">
+                <button id="saveBookingFollowupButton" class="primary" type="button">Save sequence</button>
+                <small>Variables: {{business_name}}, {{customer_name}}, {{customer_phone}}, {{booking_link}}, {{service}}, {{professional}}, {{requested_time}}</small>
+              </div>
+            </div>
             <div class="crm-webhook-card">
               <div>
                 <h4>Lead webhook</h4>
@@ -462,6 +479,7 @@
                 <option value="unqualified">Unqualified</option>
                 <option value="callback">Callback</option>
                 <option value="appointment">Appointment</option>
+                <option value="needs_reply">Needs reply</option>
                 <option value="transferred">Transferred</option>
                 <option value="unreachable">Unreachable</option>
               </select>
@@ -490,7 +508,7 @@
               <input id="crmPhone" placeholder="Phone" />
               <input id="crmEmail" placeholder="Email" />
               <input id="crmNeed" placeholder="Need / service" />
-              <select id="crmStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="unqualified">Unqualified</option><option value="callback">Callback</option><option value="appointment">Appointment</option><option value="transferred">Transferred</option><option value="unreachable">Unreachable</option></select>
+              <select id="crmStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="unqualified">Unqualified</option><option value="callback">Callback</option><option value="appointment">Appointment</option><option value="needs_reply">Needs reply</option><option value="transferred">Transferred</option><option value="unreachable">Unreachable</option></select>
               <button id="addCrmLeadButton" type="button">Add lead</button>
             </div>
             <div class="crm-board" id="crmList"></div>

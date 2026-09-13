@@ -122,6 +122,15 @@ const el = {
   qualificationMaxAttempts: document.querySelector("#qualificationMaxAttempts"),
   qualificationRetryDelayMinutes: document.querySelector("#qualificationRetryDelayMinutes"),
   leadWebhookDedupeWindowHours: document.querySelector("#leadWebhookDedupeWindowHours"),
+  bookingFollowupEnabled: document.querySelector("#bookingFollowupEnabled"),
+  bookingFollowupMatchWindowHours: document.querySelector("#bookingFollowupMatchWindowHours"),
+  bookingFollowupNotClickedDelayMinutes: document.querySelector("#bookingFollowupNotClickedDelayMinutes"),
+  bookingFollowupClickedDelayMinutes: document.querySelector("#bookingFollowupClickedDelayMinutes"),
+  bookingFollowupFinalDelayMinutes: document.querySelector("#bookingFollowupFinalDelayMinutes"),
+  bookingFollowupNotClickedTemplate: document.querySelector("#bookingFollowupNotClickedTemplate"),
+  bookingFollowupClickedTemplate: document.querySelector("#bookingFollowupClickedTemplate"),
+  bookingFollowupFinalTemplate: document.querySelector("#bookingFollowupFinalTemplate"),
+  saveBookingFollowupButton: document.querySelector("#saveBookingFollowupButton"),
   reviewRequestsEnabled: document.querySelector("#reviewRequestsEnabled"),
   reviewLink: document.querySelector("#reviewLink"),
   managerNotificationPhone: document.querySelector("#managerNotificationPhone"),
@@ -1237,12 +1246,9 @@ function renderBooking(data = {}) {
   const services = Array.isArray(data.services) ? data.services : [];
   const professionals = Array.isArray(data.professionals) ? data.professionals : [];
   const links = Array.isArray(data.links) ? data.links : [];
-  setSelectOptions(el.bookingLinkService, [["", "Any service"], ...services.map((service) => [service.id, bookingServiceLabel(service)])], el.bookingLinkService?.value);
-  setSelectOptions(
-    el.bookingLinkProfessional,
-    [["", "Any professional"], ...professionals.map((professional) => [professional.id, bookingProfessionalLabel(professional)])],
-    el.bookingLinkProfessional?.value,
-  );
+  const generalLink = links[0] || null;
+  if (el.bookingLinkLabel && document.activeElement !== el.bookingLinkLabel) el.bookingLinkLabel.value = generalLink?.label || "Book online";
+  if (el.bookingLinkUrl && document.activeElement !== el.bookingLinkUrl) el.bookingLinkUrl.value = generalLink?.url || connection.bookingUrl || "";
   setSelectOptions(el.calendarServiceFilter, [["", "First available service"], ...services.map((service) => [service.id, bookingServiceLabel(service)])], el.calendarServiceFilter?.value);
   setSelectOptions(
     el.calendarProfessionalFilter,
@@ -1261,7 +1267,7 @@ function renderBooking(data = {}) {
       provider !== "vagaro"
         ? "RingPort calendar is active."
         : connection.status === "active"
-          ? `Vagaro connected · ${services.length} services · ${professionals.length} professionals · ${links.length} links${lastSync}${credentials}${apiLocation}${warning}`
+          ? `Vagaro connected · ${services.length} services · ${professionals.length} professionals · ${links.length ? "general link saved" : "no general link"}${lastSync}${credentials}${apiLocation}${warning}`
           : "Vagaro is not connected. Save the client ID, client secret, and business link to connect.";
   }
 
@@ -1272,23 +1278,14 @@ function renderBooking(data = {}) {
     row.dataset.id = service.id;
     const name = document.createElement("strong");
     name.textContent = service.name || `Service #${service.id}`;
-    const publicServiceId = vagaroPublicServiceIdFromService(service);
     const detail = document.createElement("small");
     detail.textContent = [
       service.category,
       service.durationMinutes ? `${service.durationMinutes} min` : "",
       service.price !== null && service.price !== undefined ? `${service.currency || "USD"} ${service.price}` : "",
-      service.bookingUrl ? "Booking link saved" : "",
       service.active === false ? "Inactive" : "Active",
     ].filter(Boolean).join(" · ");
-    const linkTools = document.createElement("div");
-    linkTools.className = "booking-service-link-tools";
-    const serviceIdInput = input("vagaro-service-public-id", publicServiceId, "text");
-    serviceIdInput.placeholder = "Public service ID or booking link";
-    const saveLink = rowButton("save-vagaro-service-link", service.bookingUrl ? "Update link" : "Save link");
-    saveLink.dataset.id = service.id;
-    linkTools.append(serviceIdInput, saveLink);
-    row.append(name, detail, linkTools);
+    row.append(name, detail);
     el.bookingServiceList.appendChild(row);
   }
   if (!services.length) el.bookingServiceList.textContent = "No services synced yet.";
@@ -1316,8 +1313,7 @@ function renderBooking(data = {}) {
     label.textContent = link.label || "Booking link";
     const detail = document.createElement("small");
     detail.textContent = [
-      link.service?.name || "Any service",
-      link.professional?.displayName || "Any professional",
+      "General link",
       `${link.clickCount || 0} clicks`,
       link.active === false ? "Inactive" : "Active",
     ].filter(Boolean).join(" · ");
@@ -1329,7 +1325,7 @@ function renderBooking(data = {}) {
     row.append(main, trackedUrl, copy, rowButton("delete-booking-link", "Delete", true));
     el.bookingLinkList.appendChild(row);
   }
-  if (!links.length) el.bookingLinkList.textContent = "No booking links yet. Add a general link or service-specific links.";
+  if (!links.length) el.bookingLinkList.textContent = "No booking link yet. Save the general Vagaro booking link.";
 
   el.vagaroWebhookEvents.innerHTML = "";
   const events = Array.isArray(data.webhookEvents) ? data.webhookEvents : [];
@@ -1505,6 +1501,29 @@ function applyAdminData(data) {
   el.qualificationMaxAttempts.value = data.config.qualificationMaxAttempts || 3;
   el.qualificationRetryDelayMinutes.value = data.config.qualificationRetryDelayMinutes || 120;
   el.leadWebhookDedupeWindowHours.value = data.config.leadWebhookDedupeWindowHours ?? 24;
+  if (el.bookingFollowupEnabled) el.bookingFollowupEnabled.checked = data.config.bookingFollowupEnabled !== false;
+  if (el.bookingFollowupMatchWindowHours) el.bookingFollowupMatchWindowHours.value = data.config.bookingFollowupMatchWindowHours ?? 48;
+  if (el.bookingFollowupNotClickedDelayMinutes) {
+    el.bookingFollowupNotClickedDelayMinutes.value = data.config.bookingFollowupNotClickedDelayMinutes ?? 30;
+  }
+  if (el.bookingFollowupClickedDelayMinutes) {
+    el.bookingFollowupClickedDelayMinutes.value = data.config.bookingFollowupClickedDelayMinutes ?? 120;
+  }
+  if (el.bookingFollowupFinalDelayMinutes) el.bookingFollowupFinalDelayMinutes.value = data.config.bookingFollowupFinalDelayMinutes ?? 1440;
+  if (el.bookingFollowupNotClickedTemplate) {
+    el.bookingFollowupNotClickedTemplate.value =
+      data.config.bookingFollowupNotClickedTemplate ||
+      "Hi {{customer_name}}, here is the booking link for {{business_name}}: {{booking_link}}";
+  }
+  if (el.bookingFollowupClickedTemplate) {
+    el.bookingFollowupClickedTemplate.value =
+      data.config.bookingFollowupClickedTemplate ||
+      "Hi {{customer_name}}, were you able to find a time that works? You can book here: {{booking_link}}";
+  }
+  if (el.bookingFollowupFinalTemplate) {
+    el.bookingFollowupFinalTemplate.value =
+      data.config.bookingFollowupFinalTemplate || "Just checking in from {{business_name}}. You can still book here: {{booking_link}}";
+  }
   el.reviewRequestsEnabled.checked = Boolean(data.config.reviewRequestsEnabled);
   el.reviewLink.value = data.config.reviewLink || "";
   el.managerNotificationPhone.value = data.config.managerNotificationPhone || "";
@@ -1596,6 +1615,14 @@ async function saveBusinessConfig() {
     qualificationMaxAttempts: Number(el.qualificationMaxAttempts.value || 3),
     qualificationRetryDelayMinutes: Number(el.qualificationRetryDelayMinutes.value || 120),
     leadWebhookDedupeWindowHours: Number(el.leadWebhookDedupeWindowHours.value || 0),
+    bookingFollowupEnabled: el.bookingFollowupEnabled ? el.bookingFollowupEnabled.checked : true,
+    bookingFollowupMatchWindowHours: Number(el.bookingFollowupMatchWindowHours?.value || 48),
+    bookingFollowupNotClickedDelayMinutes: Number(el.bookingFollowupNotClickedDelayMinutes?.value || 30),
+    bookingFollowupClickedDelayMinutes: Number(el.bookingFollowupClickedDelayMinutes?.value || 120),
+    bookingFollowupFinalDelayMinutes: Number(el.bookingFollowupFinalDelayMinutes?.value || 1440),
+    bookingFollowupNotClickedTemplate: el.bookingFollowupNotClickedTemplate?.value || "",
+    bookingFollowupClickedTemplate: el.bookingFollowupClickedTemplate?.value || "",
+    bookingFollowupFinalTemplate: el.bookingFollowupFinalTemplate?.value || "",
     reviewRequestsEnabled: planAllows("smartReviewsEnabled") ? el.reviewRequestsEnabled.checked : false,
     reviewLink: el.reviewLink.value,
     managerNotificationPhone: el.managerNotificationPhone.value,
@@ -1705,9 +1732,7 @@ async function addBookingLink() {
     provider: "vagaro",
     label: el.bookingLinkLabel.value.trim(),
     url: el.bookingLinkUrl.value.trim(),
-    serviceId: el.bookingLinkService.value || null,
-    professionalId: el.bookingLinkProfessional.value || null,
-    sortOrder: Number(el.bookingLinkSort.value || 0),
+    sortOrder: 0,
   };
   setAdminStatus("Saving booking link");
   const data = await apiJson("/api/business-admin/booking-links", {
@@ -1716,12 +1741,7 @@ async function addBookingLink() {
     body: JSON.stringify(payload),
   });
   renderBooking(data);
-  el.bookingLinkLabel.value = "";
-  el.bookingLinkUrl.value = "";
-  el.bookingLinkService.value = "";
-  el.bookingLinkProfessional.value = "";
-  el.bookingLinkSort.value = "";
-  setAdminStatus("Booking link added");
+  setAdminStatus("General booking link saved");
 }
 
 async function saveVagaroServicePublicLink(button) {
@@ -2020,12 +2040,18 @@ async function deleteTransferTarget(row) {
   setAdminStatus("Transfer destination deleted");
 }
 
-const crmStatusOptions = ["new", "qualified", "unqualified", "callback", "appointment", "transferred", "unreachable"];
+const crmStatusOptions = ["new", "qualified", "unqualified", "callback", "appointment", "needs_reply", "transferred", "unreachable"];
 
 function qualificationStatusLabel(status) {
   const value = String(status || "");
   if (value === "dispatching") return "queued";
   return value || "unknown";
+}
+
+function titleFromKey(value) {
+  return String(value || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function crmField(label, value, href = null) {
@@ -2083,7 +2109,7 @@ function renderCrm(leads) {
     title.append(name, sub);
     const badge = document.createElement("span");
     badge.className = "crm-status-badge";
-    badge.textContent = lead.status || "new";
+    badge.textContent = titleFromKey(lead.status || "new");
     summary.append(title, badge);
 
     const body = document.createElement("div");
@@ -2169,7 +2195,7 @@ function renderCrm(leads) {
     for (const status of crmStatusOptions) {
       const option = document.createElement("option");
       option.value = status;
-      option.textContent = status[0].toUpperCase() + status.slice(1);
+      option.textContent = titleFromKey(status);
       option.selected = status === (lead.status || "new");
       statusSelect.appendChild(option);
     }
@@ -2214,6 +2240,43 @@ function renderCrm(leads) {
       }
       body.appendChild(attempts);
     }
+    const bookingSends = lead.bookingLinkSends || [];
+    const bookingAppointments = lead.bookingAppointments || [];
+    if (bookingSends.length || bookingAppointments.length) {
+      const booking = document.createElement("div");
+      booking.className = "qualification-attempts booking-journey";
+      const heading = document.createElement("strong");
+      heading.textContent = "Booking journey";
+      booking.appendChild(heading);
+      for (const send of bookingSends) {
+        const matched = send.matchedAppointment;
+        booking.appendChild(
+          miniRow([
+            "Link",
+            titleFromKey(send.status || "sent"),
+            send.followupState ? `follow-up ${titleFromKey(send.followupState)}` : null,
+            `${send.clickCount || 0} clicks`,
+            send.sentAt ? `sent ${new Date(send.sentAt).toLocaleString()}` : null,
+            send.firstClickedAt ? `first click ${new Date(send.firstClickedAt).toLocaleString()}` : null,
+            send.nextFollowupAt ? `next text ${new Date(send.nextFollowupAt).toLocaleString()}` : null,
+            matched?.scheduledStart ? `booked ${new Date(matched.scheduledStart).toLocaleString()}` : null,
+          ]),
+        );
+      }
+      for (const appointment of bookingAppointments) {
+        booking.appendChild(
+          miniRow([
+            "Vagaro",
+            appointment.status,
+            appointment.bookingStatus,
+            appointment.serviceTitle,
+            appointment.professionalName,
+            appointment.scheduledStart ? new Date(appointment.scheduledStart).toLocaleString() : null,
+          ]),
+        );
+      }
+      body.appendChild(booking);
+    }
     if (lead.feedback?.length) {
       const feedback = document.createElement("div");
       feedback.className = "qualification-attempts";
@@ -2234,7 +2297,14 @@ function renderCrm(leads) {
       }
       body.appendChild(feedback);
     }
-    if (lead.leadWebhookEvents?.length || lead.messageDeliveries?.length || lead.inboundMessages?.length || call?.events?.length) {
+    if (
+      lead.leadWebhookEvents?.length ||
+      lead.messageDeliveries?.length ||
+      lead.inboundMessages?.length ||
+      bookingSends.length ||
+      bookingAppointments.length ||
+      call?.events?.length
+    ) {
       const timeline = document.createElement("div");
       timeline.className = "qualification-attempts";
       const heading = document.createElement("strong");
@@ -2268,6 +2338,31 @@ function renderCrm(leads) {
           ]),
         );
       }
+      for (const send of bookingSends) {
+        timeline.appendChild(
+          miniRow([
+            "Booking link",
+            titleFromKey(send.status),
+            `${send.clickCount || 0} clicks`,
+            send.sentAt ? new Date(send.sentAt).toLocaleString() : null,
+          ]),
+        );
+        for (const click of send.clicks || []) {
+          timeline.appendChild(
+            miniRow(["Booking click", click.createdAt ? new Date(click.createdAt).toLocaleString() : null, click.referrer]),
+          );
+        }
+      }
+      for (const appointment of bookingAppointments) {
+        timeline.appendChild(
+          miniRow([
+            "Vagaro appointment",
+            appointment.status,
+            appointment.bookingStatus,
+            appointment.scheduledStart ? new Date(appointment.scheduledStart).toLocaleString() : null,
+          ]),
+        );
+      }
       body.appendChild(timeline);
     }
     card.append(summary, body);
@@ -2282,7 +2377,7 @@ function renderCrmStatusCounts(counts = {}) {
   const all = document.createElement("button");
   all.type = "button";
   all.className = `status-pill ${el.crmStatusFilter.value ? "" : "active"}`;
-  all.textContent = `all: ${total}`;
+  all.textContent = `All: ${total}`;
   all.addEventListener("click", () => {
     el.crmStatusFilter.value = "";
     runAdmin(loadCrm);
@@ -2292,7 +2387,7 @@ function renderCrmStatusCounts(counts = {}) {
     const pill = document.createElement("button");
     pill.type = "button";
     pill.className = `status-pill ${el.crmStatusFilter.value === status ? "active" : ""}`;
-    pill.textContent = `${status}: ${counts[status] || 0}`;
+    pill.textContent = `${titleFromKey(status)}: ${counts[status] || 0}`;
     pill.addEventListener("click", () => {
       el.crmStatusFilter.value = status;
       runAdmin(loadCrm);
@@ -3601,6 +3696,7 @@ el.bookedAppointments.addEventListener("click", (event) => {
   if (cancelButton) runAdmin(() => cancelAppointment(cancelButton));
 });
 el.refreshCrmButton.addEventListener("click", () => runAdmin(loadCrm));
+el.saveBookingFollowupButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.copyCrmWebhookButton.addEventListener("click", () => runAdmin(copyLeadWebhook));
 el.rotateCrmWebhookButton.addEventListener("click", () => runAdmin(rotateLeadWebhook));
 el.sendCrmWebhookTestButton.addEventListener("click", () => runAdmin(sendWebhookTest));

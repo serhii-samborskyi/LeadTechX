@@ -167,6 +167,8 @@ const activeOnboardingTextSessions = new Map();
 const blueBubblesPreferredModes = new Map();
 const blueBubblesDeliveryRetryLocks = new Set();
 let blueBubblesPendingDeliveryInterval = null;
+let bookingFollowupWorkerTimer = null;
+let bookingFollowupWorkerRunning = false;
 const aiRateLimitHits = new Map();
 let prismaReconnectPromise = null;
 
@@ -4939,6 +4941,19 @@ function parseVagaroBusinessUrl(value) {
   };
 }
 
+function vagaroGeneralBookingUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+  const parsed = parseVagaroBusinessUrl(raw);
+  if (url.pathname.toLowerCase().includes("/book-now")) {
+    url.searchParams.delete("serviceId");
+    url.searchParams.delete("serviceid");
+    return url.toString();
+  }
+  return `${parsed.canonicalUrl}/book-now`;
+}
+
 function htmlAttrValue(html, id) {
   const pattern = new RegExp(`<[^>]+id=["']${id}["'][^>]*value=["']([^"']+)["']`, "i");
   return String(html || "").match(pattern)?.[1] || "";
@@ -5358,6 +5373,59 @@ function bookingLinkTrackingUrl({ settings, req = null, link }) {
   return url.toString();
 }
 
+function bookingLinkSendTrackingUrl({ settings, req = null, token }) {
+  const url = new URL(`/book/t/${encodeURIComponent(token)}`, bookingBaseUrl(settings, req));
+  return url.toString();
+}
+
+function bookingFollowupConfig(config = {}) {
+  return {
+    enabled: config.bookingFollowupEnabled !== false,
+    matchWindowHours: Math.max(1, Number(config.bookingFollowupMatchWindowHours ?? 48)),
+    notClickedDelayMinutes: Math.max(1, Number(config.bookingFollowupNotClickedDelayMinutes ?? 30)),
+    clickedDelayMinutes: Math.max(1, Number(config.bookingFollowupClickedDelayMinutes ?? 120)),
+    finalDelayMinutes: Math.max(1, Number(config.bookingFollowupFinalDelayMinutes ?? 1440)),
+    notClickedTemplate: String(
+      config.bookingFollowupNotClickedTemplate ||
+        "Hi {{customer_name}}, here is the booking link for {{business_name}}: {{booking_link}}",
+    ),
+    clickedTemplate: String(
+      config.bookingFollowupClickedTemplate ||
+        "Hi {{customer_name}}, were you able to find a time that works? You can book here: {{booking_link}}",
+    ),
+    finalTemplate: String(
+      config.bookingFollowupFinalTemplate || "Just checking in from {{business_name}}. You can still book here: {{booking_link}}",
+    ),
+  };
+}
+
+function datePlusMinutes(baseDate, minutes) {
+  return new Date(new Date(baseDate || Date.now()).getTime() + Math.max(0, Number(minutes || 0)) * 60 * 1000);
+}
+
+function bookingSourceValue(send) {
+  return send?.clickToken ? `ringport_${send.clickToken}` : "";
+}
+
+function bookingSourceToken(value) {
+  const raw = String(value || "").trim();
+  const match = raw.match(/^ringport_([A-Za-z0-9_-]+)$/);
+  return match?.[1] || "";
+}
+
+function bookingDestinationUrl(send) {
+  const destination = String(send?.destinationUrl || send?.bookingLink?.url || "").trim();
+  if (!destination) return "";
+  try {
+    const url = new URL(destination);
+    const source = bookingSourceValue(send);
+    if (source) url.searchParams.set("bookingSource", source);
+    return url.toString();
+  } catch {
+    return destination;
+  }
+}
+
 function vagaroPublicServiceIdFromValue(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -5432,7 +5500,7 @@ async function bookingDataForProfile(profile, settings = null, req = null) {
           include: { services: { include: { service: true } } },
         }),
         prisma.bookingLink.findMany({
-          where: { connectionId: activeConnection.id },
+          where: { connectionId: activeConnection.id, active: true, serviceId: null, professionalId: null },
           orderBy: [{ active: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
           include: { service: true, professional: true },
         }),
@@ -5483,6 +5551,32 @@ async function ensureBookingLinkForConnection(connection, { label = "", url = ""
       clickToken,
     },
   });
+}
+
+async function ensureGeneralBookingLinkForConnection(connection, { label = "", url = "", sortOrder = 0 } = {}) {
+  const rawUrl = String(url || connection?.bookingUrl || "").trim();
+  const safeUrl = connection?.provider === "vagaro" && rawUrl ? vagaroGeneralBookingUrl(rawUrl) : rawUrl;
+  if (!/^https?:\/\//i.test(safeUrl)) throw new Error("Booking link URL must start with http:// or https://");
+  const existingLink = await prisma.bookingLink.findFirst({
+    where: { connectionId: connection.id, serviceId: null, professionalId: null },
+    orderBy: [{ active: "desc" }, { id: "asc" }],
+  });
+  const linkLabel = String(label || existingLink?.label || "Book online").trim() || "Book online";
+  const link = existingLink
+    ? await prisma.bookingLink.update({
+        where: { id: existingLink.id },
+        data: { label: linkLabel, url: safeUrl, active: true, sortOrder: Number(sortOrder || existingLink.sortOrder || 0) },
+      })
+    : await ensureBookingLinkForConnection(connection, { label: linkLabel, url: safeUrl, sortOrder });
+  await prisma.bookingLink.updateMany({
+    where: {
+      connectionId: connection.id,
+      id: { not: link.id },
+      OR: [{ serviceId: { not: null } }, { professionalId: { not: null } }, { active: true }],
+    },
+    data: { active: false },
+  });
+  return link;
 }
 
 async function upsertServiceBookingLink(connection, service, url, label = "") {
@@ -5616,9 +5710,6 @@ async function syncVagaroServices(connection) {
   const providerIds = new Set();
   for (const servicePayload of services) {
     const service = await upsertVagaroService(connection, servicePayload);
-    if (service?.bookingUrl) {
-      await upsertServiceBookingLink(connection, service, service.bookingUrl);
-    }
     for (const performer of servicePayload.servicePerformedBy || []) {
       const providerId = String(performer.serviceProviderId || "").trim();
       if (!providerId || !service) continue;
@@ -5661,6 +5752,103 @@ async function syncVagaroServices(connection) {
   }
   await prisma.bookingConnection.update({ where: { id: connection.id }, data: { lastSyncAt: new Date() } });
   return { servicesImported: services.length, professionalsImported: providerIds.size };
+}
+
+async function matchBookingLinkSendToAppointment({ connection, appointment, payload = {} }) {
+  if (!appointment?.id || !connection?.businessProfileId) return null;
+  const config = await prisma.businessConfig
+    .findUnique({ where: { businessProfileId: connection.businessProfileId } })
+    .catch(() => null);
+  const followup = bookingFollowupConfig(config || {});
+  const cutoff = new Date(Date.now() - followup.matchWindowHours * 60 * 60 * 1000);
+  const payloadSourceToken = bookingSourceToken(payload.bookingSource || payload.booking_source || payload.source);
+  let send = payloadSourceToken
+    ? await prisma.bookingLinkSend.findFirst({
+        where: { businessProfileId: connection.businessProfileId, clickToken: payloadSourceToken },
+        include: { lead: true },
+      })
+    : null;
+
+  const phone = normalizeE164Phone(appointment.phone || payload.customerPhone || payload.phone || payload.mobilePhone || payload.phoneNumber);
+  const email = String(appointment.email || payload.customerEmail || payload.email || "").trim().toLowerCase();
+  if (!send && (phone || email)) {
+    send = await prisma.bookingLinkSend.findFirst({
+      where: {
+        businessProfileId: connection.businessProfileId,
+        sentAt: { gte: cutoff },
+        followupState: { in: ["active", "needs_reply"] },
+        status: { in: ["sent", "clicked", "needs_reply"] },
+        OR: [
+          phone ? { phone } : null,
+          email ? { email } : null,
+        ].filter(Boolean),
+      },
+      include: { lead: true },
+      orderBy: [{ clickCount: "desc" }, { lastClickedAt: "desc" }, { sentAt: "desc" }],
+    });
+  }
+  if (!send) return null;
+
+  const now = new Date();
+  const matchSource = payloadSourceToken ? "booking_source" : phone ? "phone" : "email";
+  await prisma.bookingLinkSend.update({
+    where: { id: send.id },
+    data: {
+      status: "booked",
+      followupState: "completed",
+      bookedAt: now,
+      nextFollowupAt: null,
+      matchedAppointmentId: appointment.id,
+      metadata: {
+        ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+        matchedAt: now.toISOString(),
+        matchSource,
+        matchedAppointmentExternalId: appointment.externalId || null,
+      },
+    },
+  });
+
+  const existingRaw = appointment.raw && typeof appointment.raw === "object" ? appointment.raw : {};
+  await prisma.bookingAppointment.update({
+    where: { id: appointment.id },
+    data: {
+      leadId: send.leadId || undefined,
+      phone: appointment.phone || phone || undefined,
+      email: appointment.email || email || undefined,
+      raw: jsonSafe({
+        ...existingRaw,
+        matchedBookingLinkSendId: send.id,
+        matchedLeadId: send.leadId || null,
+        matchSource,
+      }),
+    },
+  });
+
+  if (send.leadId) {
+    const lead = send.lead;
+    await prisma.lead.update({
+      where: { id: send.leadId },
+      data: {
+        status: "appointment",
+        phone: lead?.phone || phone || undefined,
+        email: lead?.email || email || undefined,
+        extractedFields: {
+          ...(lead?.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {}),
+          latestBookingLink: {
+            ...((lead?.extractedFields?.latestBookingLink &&
+              typeof lead.extractedFields.latestBookingLink === "object" &&
+              lead.extractedFields.latestBookingLink) ||
+              {}),
+            bookedAt: now.toISOString(),
+            bookingAppointmentId: appointment.id,
+            bookingLinkSendId: send.id,
+            matchSource,
+          },
+        },
+      },
+    });
+  }
+  return { bookingLinkSendId: send.id, leadId: send.leadId || null, matchSource };
 }
 
 async function processVagaroAppointmentEvent({ connection, event }) {
@@ -5721,7 +5909,8 @@ async function processVagaroAppointmentEvent({ connection, event }) {
     create: { ...data, externalId },
     update: data,
   });
-  return { appointmentId: appointment.id, status };
+  const match = await matchBookingLinkSendToAppointment({ connection, appointment, payload });
+  return { appointmentId: appointment.id, status, match };
 }
 
 async function processVagaroEmployeeEvent({ connection, event }) {
@@ -6072,15 +6261,7 @@ function textMatches(left, right) {
 function pickBookingLink({ links = [], service = null, professional = null }) {
   const active = links.filter((link) => link.active !== false);
   if (!active.length) return null;
-  const serviceId = service?.id || null;
-  const professionalId = professional?.id || null;
-  return (
-    active.find((link) => link.serviceId === serviceId && link.professionalId === professionalId) ||
-    active.find((link) => serviceId && link.serviceId === serviceId && !link.professionalId) ||
-    active.find((link) => professionalId && link.professionalId === professionalId && !link.serviceId) ||
-    active.find((link) => !link.serviceId && !link.professionalId) ||
-    active[0]
-  );
+  return active.find((link) => !link.serviceId && !link.professionalId) || null;
 }
 
 async function externalBookingLinkContext({ profile, args = {} }) {
@@ -6105,11 +6286,9 @@ async function externalBookingLinkContext({ profile, args = {} }) {
     null;
   let link = pickBookingLink({ links: connection.links, service, professional });
   if (!link && connection.bookingUrl) {
-    link = await ensureBookingLinkForConnection(connection, {
+    link = await ensureGeneralBookingLinkForConnection(connection, {
       label: "Book online",
       url: connection.bookingUrl,
-      serviceId: service?.id || null,
-      professionalId: professional?.id || null,
       sortOrder: 0,
     });
   }
@@ -6123,10 +6302,13 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
   const toPhone = normalizeE164Phone(args.phone) || lead?.phone || null;
   if (!toPhone) throw new Error("A caller phone number is required before sending a booking link");
   const customerName = String(args.name || args.customerName || lead?.name || "Customer").trim() || "Customer";
-  const trackedUrl = bookingLinkTrackingUrl({ settings, link });
+  const clickToken = issueToken().token;
+  const trackedUrl = bookingLinkSendTrackingUrl({ settings, token: clickToken });
   const serviceText = service?.name || args.serviceName || "";
   const professionalText = professional?.displayName || args.professionalName || "";
   const requestedTime = String(args.requestedTime || args.start || "").trim();
+  const followup = bookingFollowupConfig(config);
+  const now = new Date();
   const message = [
     `${profile.businessName} booking link: ${trackedUrl}`,
     serviceText ? `Service: ${serviceText}` : "",
@@ -6142,6 +6324,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
       customerName,
       phone: toPhone,
       email: args.email ? String(args.email).trim().toLowerCase() : lead?.email || null,
+      leadId: lead?.id || null,
       serviceId: service?.id || null,
       serviceExternalId: service?.externalId || null,
       serviceTitle: serviceText || null,
@@ -6156,29 +6339,87 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
       raw: {
         requestedTime,
         linkId: link.id,
+        clickToken,
         directUrl: link.url,
         trackedUrl,
       },
     },
   });
-  const delivery = await deliverBusinessMessage({
-    settings,
-    profile,
-    toPhone,
-    message,
-    purpose: "booking_link",
-    leadId: lead?.id || null,
-    voiceCallId,
-    metadata: {
-      provider: connection.provider,
-      bookingAppointmentId: appointment.id,
+  const send = await prisma.bookingLinkSend.create({
+    data: {
+      businessProfileId: profile.id,
+      leadId: lead?.id || null,
+      voiceCallId,
       bookingLinkId: link.id,
+      bookingAppointmentId: appointment.id,
+      clickToken,
+      status: "queued",
+      customerName,
+      phone: toPhone,
+      email: appointment.email,
+      serviceText: serviceText || null,
+      professionalText: professionalText || null,
+      requestedTime: requestedTime || null,
+      destinationUrl: link.url,
       trackedUrl,
-      service: serviceText,
-      professional: professionalText,
-      requestedTime,
+      sentAt: now,
+      followupState: followup.enabled ? "active" : "stopped",
+      nextFollowupAt: followup.enabled ? datePlusMinutes(now, followup.notClickedDelayMinutes) : null,
+      metadata: {
+        provider: connection.provider,
+        bookingAppointmentId: appointment.id,
+        bookingLinkId: link.id,
+        trackedUrl,
+        destinationUrl: link.url,
+        bookingSource: bookingSourceValue({ clickToken }),
+        service: serviceText,
+        professional: professionalText,
+        requestedTime,
+      },
     },
   });
+  const deliveryMetadata = {
+    provider: connection.provider,
+    bookingAppointmentId: appointment.id,
+    bookingLinkId: link.id,
+    bookingLinkSendId: send.id,
+    trackedUrl,
+    destinationUrl: link.url,
+    bookingSource: bookingSourceValue(send),
+    service: serviceText,
+    professional: professionalText,
+    requestedTime,
+  };
+  let delivery = null;
+  try {
+    delivery = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone,
+      message,
+      purpose: "booking_link",
+      leadId: lead?.id || null,
+      voiceCallId,
+      metadata: deliveryMetadata,
+    });
+    await prisma.bookingLinkSend.update({
+      where: { id: send.id },
+      data: {
+        status: "sent",
+        metadata: {
+          ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+          messageDeliveryId: delivery.delivery.id,
+          deliveryProvider: delivery.provider,
+        },
+      },
+    });
+  } catch (error) {
+    await prisma.bookingLinkSend.update({
+      where: { id: send.id },
+      data: { status: "failed", followupState: "stopped", nextFollowupAt: null, metadata: { ...deliveryMetadata, error: error.message } },
+    });
+    throw error;
+  }
   if (lead?.id) {
     await prisma.lead.update({
       where: { id: lead.id },
@@ -6192,15 +6433,18 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
             provider: connection.provider,
             bookingAppointmentId: appointment.id,
             bookingLinkId: link.id,
+            bookingLinkSendId: send.id,
             service: serviceText,
             professional: professionalText,
             requestedTime,
             sentAt: new Date().toISOString(),
+            trackedUrl,
           },
         },
       },
     });
   }
+  scheduleBookingFollowupWorker(1000);
   return {
     ok: true,
     sent: true,
@@ -6209,6 +6453,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
     provider: connection.provider,
     bookingAppointmentId: appointment.id,
     bookingLinkId: link.id,
+    bookingLinkSendId: send.id,
     trackedUrl,
     service: serviceText,
     professional: professionalText,
@@ -7115,6 +7360,188 @@ async function deliverBusinessMessage({
     }
   }
   throw new Error(errors.join("; ") || "No messaging provider is configured");
+}
+
+function bookingFollowupTemplate(config, step) {
+  const followup = bookingFollowupConfig(config);
+  if (step === "not_clicked") return followup.notClickedTemplate;
+  if (step === "clicked") return followup.clickedTemplate;
+  return followup.finalTemplate;
+}
+
+function bookingFollowupStep(send) {
+  const clicked = Number(send.clickCount || 0) > 0;
+  if (!clicked && send.lastFollowupStep !== "not_clicked") return "not_clicked";
+  if (clicked && send.lastFollowupStep !== "clicked") return "clicked";
+  if (send.lastFollowupStep !== "final") return "final";
+  return "";
+}
+
+function bookingFollowupNextAt(send, config, step, now = new Date()) {
+  if (step === "final") return null;
+  const followup = bookingFollowupConfig(config);
+  const finalAt = datePlusMinutes(send.sentAt || send.createdAt || now, followup.finalDelayMinutes);
+  return finalAt > now ? finalAt : datePlusMinutes(now, 1);
+}
+
+async function processBookingFollowupQueue() {
+  if (bookingFollowupWorkerRunning) return;
+  bookingFollowupWorkerRunning = true;
+  try {
+    const now = new Date();
+    const sends = await prisma.bookingLinkSend.findMany({
+      where: {
+        followupState: "active",
+        bookedAt: null,
+        nextFollowupAt: { lte: now },
+        status: { in: ["sent", "clicked"] },
+      },
+      include: {
+        businessProfile: { include: { config: true } },
+        bookingLink: true,
+        lead: true,
+      },
+      orderBy: [{ nextFollowupAt: "asc" }, { sentAt: "asc" }],
+      take: 20,
+    });
+    const settings = await getSettings();
+    for (const send of sends) {
+      const profile = send.businessProfile;
+      if (!profile) {
+        await prisma.bookingLinkSend.update({
+          where: { id: send.id },
+          data: { followupState: "stopped", nextFollowupAt: null, status: "stopped" },
+        });
+        continue;
+      }
+      const config = profile.config || (await ensureBusinessConfig(profile));
+      const followup = bookingFollowupConfig(config);
+      if (!followup.enabled || send.status === "booked" || send.bookedAt) {
+        await prisma.bookingLinkSend.update({
+          where: { id: send.id },
+          data: { followupState: send.bookedAt ? "completed" : "stopped", nextFollowupAt: null },
+        });
+        continue;
+      }
+      const step = bookingFollowupStep(send);
+      if (!step) {
+        await prisma.bookingLinkSend.update({
+          where: { id: send.id },
+          data: { followupState: "completed", nextFollowupAt: null },
+        });
+        continue;
+      }
+      const targetPhone = normalizeE164Phone(send.phone || send.lead?.phone || "");
+      if (!targetPhone) {
+        await prisma.bookingLinkSend.update({
+          where: { id: send.id },
+          data: { status: "failed", followupState: "stopped", nextFollowupAt: null, metadata: { ...(send.metadata || {}), error: "Missing phone" } },
+        });
+        continue;
+      }
+      const trackedUrl = send.trackedUrl || bookingLinkSendTrackingUrl({ settings, token: send.clickToken });
+      const message = templateText(bookingFollowupTemplate(config, step), {
+        business_name: profile.businessName,
+        customer_name: send.customerName || send.lead?.name || "there",
+        customer_phone: targetPhone,
+        booking_link: trackedUrl,
+        service: send.serviceText || "",
+        professional: send.professionalText || "",
+        requested_time: send.requestedTime || "",
+      }).trim();
+      if (!message) {
+        await prisma.bookingLinkSend.update({
+          where: { id: send.id },
+          data: { followupState: "stopped", nextFollowupAt: null, metadata: { ...(send.metadata || {}), error: "Empty follow-up template" } },
+        });
+        continue;
+      }
+      try {
+        const delivery = await deliverBusinessMessage({
+          settings,
+          profile,
+          toPhone: targetPhone,
+          message,
+          purpose: "booking_followup",
+          leadId: send.leadId,
+          voiceCallId: send.voiceCallId,
+          metadata: {
+            bookingLinkSendId: send.id,
+            bookingLinkId: send.bookingLinkId,
+            step,
+            trackedUrl,
+          },
+        });
+        const nextFollowupAt = bookingFollowupNextAt(send, config, step, now);
+        await prisma.bookingLinkSend.update({
+          where: { id: send.id },
+          data: {
+            lastFollowupStep: step,
+            followupAttempts: { increment: 1 },
+            nextFollowupAt,
+            followupState: nextFollowupAt ? "active" : "completed",
+            metadata: {
+              ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+              lastFollowupAt: new Date().toISOString(),
+              lastFollowupStep: step,
+              lastFollowupDeliveryId: delivery.delivery.id,
+              lastFollowupProvider: delivery.provider,
+            },
+          },
+        });
+      } catch (error) {
+        console.warn(`[booking-followup] send ${send.id} failed: ${error.message}`);
+        await prisma.bookingLinkSend.update({
+          where: { id: send.id },
+          data: {
+            nextFollowupAt: datePlusMinutes(now, 60),
+            metadata: {
+              ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+              lastFollowupError: error.message,
+              lastFollowupErrorAt: new Date().toISOString(),
+            },
+          },
+        });
+      }
+    }
+  } finally {
+    bookingFollowupWorkerRunning = false;
+    scheduleBookingFollowupWorker(60 * 1000);
+  }
+}
+
+function scheduleBookingFollowupWorker(delayMs = 60 * 1000) {
+  if (bookingFollowupWorkerTimer) return;
+  bookingFollowupWorkerTimer = setTimeout(() => {
+    bookingFollowupWorkerTimer = null;
+    processBookingFollowupQueue().catch((error) => console.warn(`[booking-followup] worker failed: ${error.message}`));
+  }, delayMs);
+  if (typeof bookingFollowupWorkerTimer.unref === "function") bookingFollowupWorkerTimer.unref();
+}
+
+async function pauseBookingFollowupsForInboundMessage(inbound) {
+  if (!inbound || inbound.status === "ignored" || !String(inbound.text || "").trim()) return { count: 0 };
+  const fromPhone = normalizeE164Phone(inbound.fromPhone);
+  const where = {
+    followupState: "active",
+    status: { in: ["sent", "clicked"] },
+    OR: [
+      inbound.leadId ? { leadId: inbound.leadId } : null,
+      fromPhone ? { phone: fromPhone } : null,
+    ].filter(Boolean),
+  };
+  if (!where.OR.length) return { count: 0 };
+  const result = await prisma.bookingLinkSend.updateMany({
+    where,
+    data: { followupState: "needs_reply", status: "needs_reply", nextFollowupAt: null },
+  });
+  if (result.count && inbound.leadId) {
+    await prisma.lead.updateMany({
+      where: { id: inbound.leadId },
+      data: { status: "needs_reply" },
+    });
+  }
+  return { count: result.count };
 }
 
 async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, profile = null }) {
@@ -9836,12 +10263,14 @@ async function handleBlueBubblesWebhook(req, res) {
     }
     const outbound = await updateBlueBubblesOutboundDelivery(req.body || {});
     const inbound = await persistBlueBubblesInboundMessage(req.body || {});
+    const pausedFollowups = await pauseBookingFollowupsForInboundMessage(inbound);
     const route = await routeBlueBubblesInboundMessage(inbound);
     res.json({
       ok: true,
       outboundDeliveryId: outbound?.id || null,
       outboundStatus: outbound?.status || null,
       inboundMessageId: inbound.id,
+      pausedBookingFollowups: pausedFollowups.count,
       status: route?.routed ? "routed" : inbound.status,
       route,
     });
@@ -11177,7 +11606,8 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
     }
     const trustedSavedBusinessId = vagaroApiBusinessId(currentConnection);
     const externalBusinessId = String(requestedApiBusinessId || trustedSavedBusinessId || "").trim();
-    const bookingUrl = String(req.body.bookingUrl || publicBusinessInfo?.bookingUrl || parsedBusinessUrl?.canonicalUrl || currentConnection?.bookingUrl || "").trim();
+    const rawBookingUrl = String(req.body.bookingUrl || publicBusinessInfo?.bookingUrl || parsedBusinessUrl?.canonicalUrl || currentConnection?.bookingUrl || "").trim();
+    const bookingUrl = enabled && rawBookingUrl ? vagaroGeneralBookingUrl(rawBookingUrl) : rawBookingUrl;
     const cancelRescheduleUrl = String(req.body.cancelRescheduleUrl || "").trim();
     if (bookingUrl && !/^https?:\/\//i.test(bookingUrl)) throw new Error("Vagaro booking URL must start with http:// or https://");
     if (cancelRescheduleUrl && !/^https?:\/\//i.test(cancelRescheduleUrl)) throw new Error("Cancel/reschedule URL must start with http:// or https://");
@@ -11281,17 +11711,7 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
     });
     const generalBookingUrl = enabled ? bookingUrl || connection.bookingUrl || "" : "";
     if (generalBookingUrl) {
-      const existingGeneralLink = await prisma.bookingLink.findFirst({
-        where: { connectionId: connection.id, serviceId: null, professionalId: null },
-      });
-      if (existingGeneralLink) {
-        await prisma.bookingLink.update({
-          where: { id: existingGeneralLink.id },
-          data: { label: existingGeneralLink.label || "Book online", url: generalBookingUrl, active: true, sortOrder: existingGeneralLink.sortOrder || 0 },
-        });
-      } else {
-        await ensureBookingLinkForConnection(connection, { label: "Book online", url: generalBookingUrl, sortOrder: 0 });
-      }
+      await ensureGeneralBookingLinkForConnection(connection, { label: "Book online", url: generalBookingUrl, sortOrder: 0 });
     }
     const settings = await getSettings();
     res.json({ ...(await bookingDataForProfile(profile, settings, req)), sync });
@@ -11319,6 +11739,13 @@ app.post("/api/business-admin/booking/vagaro/sync", async (req, res) => {
             locationSync.connection.settings?.locationsSyncWarning ||
             "Vagaro did not return an API business location for these credentials. Add the API business location ID in Advanced API settings.",
         };
+    if (locationSync.connection.bookingUrl) {
+      await ensureGeneralBookingLinkForConnection(locationSync.connection, {
+        label: "Book online",
+        url: locationSync.connection.bookingUrl,
+        sortOrder: 0,
+      });
+    }
     const settings = await getSettings();
     res.json({ ...(await bookingDataForProfile(profile, settings, req)), sync: result });
   } catch (error) {
@@ -11328,33 +11755,7 @@ app.post("/api/business-admin/booking/vagaro/sync", async (req, res) => {
 
 app.put("/api/business-admin/booking-services/:id/public-link", async (req, res) => {
   try {
-    const identity = adminRequestIdentity(req);
-    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
-    const serviceId = Number(req.params.id);
-    if (!Number.isInteger(serviceId) || serviceId <= 0) throw new Error("Booking service was not found");
-    const service = await prisma.bookingService.findFirst({
-      where: { id: serviceId, businessProfileId: profile.id },
-      include: { connection: true },
-    });
-    if (!service || !service.connection) throw new Error("Booking service was not found");
-    if (service.provider !== "vagaro" || service.connection.provider !== "vagaro") {
-      throw new Error("Public service booking links are only supported for Vagaro services");
-    }
-    const sourceValue = String(req.body.publicServiceId || req.body.serviceLink || req.body.url || "").trim();
-    const publicServiceId = vagaroPublicServiceIdFromValue(sourceValue);
-    if (!publicServiceId) throw new Error("Enter a numeric Vagaro public service ID, like 39988882, or paste the full service booking link");
-    const bookingUrl = vagaroPublicServiceBookingUrl(service.connection, publicServiceId, sourceValue);
-    const currentRaw = service.raw && typeof service.raw === "object" && !Array.isArray(service.raw) ? service.raw : {};
-    await prisma.bookingService.update({
-      where: { id: service.id },
-      data: {
-        bookingUrl,
-        raw: { ...currentRaw, publicServiceId, publicBookingUrl: bookingUrl },
-      },
-    });
-    await upsertServiceBookingLink(service.connection, service, bookingUrl, req.body.label);
-    const settings = await getSettings();
-    res.json(await bookingDataForProfile(profile, settings, req));
+    throw new Error("Service-specific Vagaro booking links are disabled. Use the general booking link.");
   } catch (error) {
     res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
@@ -11369,11 +11770,9 @@ app.post("/api/business-admin/booking-links", async (req, res) => {
       where: { businessProfileId_provider: { businessProfileId: profile.id, provider } },
     });
     if (!connection) throw new Error("Connect the booking provider before adding links");
-    await ensureBookingLinkForConnection(connection, {
+    await ensureGeneralBookingLinkForConnection(connection, {
       label: req.body.label,
       url: req.body.url,
-      serviceId: req.body.serviceId || null,
-      professionalId: req.body.professionalId || null,
       sortOrder: req.body.sortOrder || 0,
     });
     const settings = await getSettings();
@@ -11398,6 +11797,79 @@ app.delete("/api/business-admin/booking-links/:id", async (req, res) => {
   }
 });
 
+app.get("/book/t/:token", async (req, res) => {
+  try {
+    const send = await prisma.bookingLinkSend.findUnique({
+      where: { clickToken: req.params.token },
+      include: { bookingLink: true, lead: true },
+    });
+    if (!send || !send.bookingLink || !send.bookingLink.active) return res.status(404).send("Booking link is unavailable");
+    const now = new Date();
+    const config = await prisma.businessConfig
+      .findUnique({ where: { businessProfileId: send.businessProfileId } })
+      .catch(() => null);
+    const followup = bookingFollowupConfig(config || {});
+    const shouldKeepFollowing =
+      followup.enabled && !send.bookedAt && send.followupState === "active" && !["booked", "stopped", "failed"].includes(send.status);
+    await prisma.bookingLink.update({
+      where: { id: send.bookingLinkId },
+      data: { clickCount: { increment: 1 }, lastClickedAt: now },
+    });
+    await prisma.bookingLinkSend.update({
+      where: { id: send.id },
+      data: {
+        status: send.status === "booked" ? "booked" : "clicked",
+        firstClickedAt: send.firstClickedAt || now,
+        lastClickedAt: now,
+        clickCount: { increment: 1 },
+        nextFollowupAt: shouldKeepFollowing ? datePlusMinutes(now, followup.clickedDelayMinutes) : send.nextFollowupAt,
+        metadata: {
+          ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+          lastClickAt: now.toISOString(),
+          lastClickReferrer: String(req.get("referer") || ""),
+        },
+      },
+    });
+    await prisma.bookingLinkClick.create({
+      data: {
+        businessProfileId: send.businessProfileId,
+        bookingLinkId: send.bookingLinkId,
+        bookingLinkSendId: send.id,
+        leadId: send.leadId,
+        phone: send.phone,
+        clickToken: send.clickToken,
+        sourceUrl: req.originalUrl,
+        referrer: String(req.get("referer") || ""),
+        ipAddress: adRequestIp(req),
+        userAgent: String(req.get("user-agent") || ""),
+        queryParams: jsonSafe(req.query || {}),
+      },
+    });
+    if (send.leadId) {
+      await prisma.lead.update({
+        where: { id: send.leadId },
+        data: {
+          extractedFields: {
+            ...(send.lead?.extractedFields && typeof send.lead.extractedFields === "object" ? send.lead.extractedFields : {}),
+            latestBookingLink: {
+              ...((send.lead?.extractedFields?.latestBookingLink &&
+                typeof send.lead.extractedFields.latestBookingLink === "object" &&
+                send.lead.extractedFields.latestBookingLink) ||
+                {}),
+              bookingLinkSendId: send.id,
+              clickedAt: now.toISOString(),
+              clickCount: Number(send.clickCount || 0) + 1,
+            },
+          },
+        },
+      });
+    }
+    res.redirect(bookingDestinationUrl(send) || send.bookingLink.url);
+  } catch (error) {
+    res.status(400).send(error.message);
+  }
+});
+
 app.get("/book/:token", async (req, res) => {
   try {
     const link = await prisma.bookingLink.findUnique({
@@ -11408,6 +11880,17 @@ app.get("/book/:token", async (req, res) => {
     await prisma.bookingLink.update({
       where: { id: link.id },
       data: { clickCount: { increment: 1 }, lastClickedAt: new Date() },
+    });
+    await prisma.bookingLinkClick.create({
+      data: {
+        businessProfileId: link.businessProfileId,
+        bookingLinkId: link.id,
+        sourceUrl: req.originalUrl,
+        referrer: String(req.get("referer") || ""),
+        ipAddress: adRequestIp(req),
+        userAgent: String(req.get("user-agent") || ""),
+        queryParams: jsonSafe(req.query || {}),
+      },
     });
     res.redirect(link.url);
   } catch (error) {
@@ -11556,6 +12039,33 @@ app.put("/api/business-admin/config", async (req, res) => {
           0,
           Number(req.body.leadWebhookDedupeWindowHours ?? config.leadWebhookDedupeWindowHours ?? 24),
         ),
+        bookingFollowupEnabled:
+          req.body.bookingFollowupEnabled === undefined ? config.bookingFollowupEnabled !== false : Boolean(req.body.bookingFollowupEnabled),
+        bookingFollowupMatchWindowHours: Math.max(
+          1,
+          Number(req.body.bookingFollowupMatchWindowHours ?? config.bookingFollowupMatchWindowHours ?? 48),
+        ),
+        bookingFollowupNotClickedDelayMinutes: Math.max(
+          1,
+          Number(req.body.bookingFollowupNotClickedDelayMinutes ?? config.bookingFollowupNotClickedDelayMinutes ?? 30),
+        ),
+        bookingFollowupClickedDelayMinutes: Math.max(
+          1,
+          Number(req.body.bookingFollowupClickedDelayMinutes ?? config.bookingFollowupClickedDelayMinutes ?? 120),
+        ),
+        bookingFollowupFinalDelayMinutes: Math.max(
+          1,
+          Number(req.body.bookingFollowupFinalDelayMinutes ?? config.bookingFollowupFinalDelayMinutes ?? 1440),
+        ),
+        bookingFollowupNotClickedTemplate: String(
+          req.body.bookingFollowupNotClickedTemplate ?? config.bookingFollowupNotClickedTemplate ?? "",
+        ).trim(),
+        bookingFollowupClickedTemplate: String(
+          req.body.bookingFollowupClickedTemplate ?? config.bookingFollowupClickedTemplate ?? "",
+        ).trim(),
+        bookingFollowupFinalTemplate: String(
+          req.body.bookingFollowupFinalTemplate ?? config.bookingFollowupFinalTemplate ?? "",
+        ).trim(),
         reviewRequestsEnabled: nextReviewRequestsEnabled,
         reviewLink: String(req.body.reviewLink ?? config.reviewLink ?? "").trim(),
         reviewPromptInstructions: String(
@@ -12094,7 +12604,7 @@ app.delete("/api/business-admin/review-links/:id", async (req, res) => {
   }
 });
 
-const crmStatuses = new Set(["new", "qualified", "unqualified", "callback", "appointment", "transferred", "unreachable"]);
+const crmStatuses = new Set(["new", "qualified", "unqualified", "callback", "appointment", "needs_reply", "transferred", "unreachable"]);
 
 function normalizeCrmStatus(value, fallback = "new") {
   const status = String(value || fallback).trim().toLowerCase();
@@ -13440,6 +13950,20 @@ app.get("/api/business-admin/crm", async (req, res) => {
         leadWebhookEvents: { orderBy: { createdAt: "desc" }, take: 5 },
         messageDeliveries: { orderBy: { createdAt: "desc" }, take: 5 },
         inboundMessages: { orderBy: { createdAt: "desc" }, take: 5 },
+        bookingLinkSends: {
+          orderBy: { sentAt: "desc" },
+          take: 10,
+          include: {
+            bookingLink: { select: { id: true, label: true, url: true } },
+            bookingAppointment: { select: { id: true, status: true, createdAt: true } },
+            matchedAppointment: { select: { id: true, status: true, bookingStatus: true, scheduledStart: true, createdAt: true } },
+            clicks: { orderBy: { createdAt: "desc" }, take: 5 },
+          },
+        },
+        bookingAppointments: {
+          orderBy: { createdAt: "desc" },
+          take: 10,
+        },
       },
       orderBy: { updatedAt: "desc" },
       take: Math.min(200, Math.max(1, Number(req.query.limit || 100))),
@@ -16321,6 +16845,7 @@ await bootstrapBusinessLifecycle();
 await recoverQualificationQueue().catch((error) => console.warn(`[qualification] startup recovery failed: ${error.message}`));
 scheduleQualificationWorker(1000);
 scheduleBlueBubblesPendingDeliveryWorker(10000);
+scheduleBookingFollowupWorker(5000);
 
 server.listen(PORT, () => {
   const protocol = USE_HTTPS ? "https" : "http";
