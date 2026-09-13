@@ -7432,19 +7432,33 @@ function bookingFollowupTemplate(config, step) {
   return followup.finalTemplate;
 }
 
+function bookingFollowupHasClick(send) {
+  return Number(send?.clickCount || 0) > 0 || Boolean(send?.firstClickedAt) || send?.status === "clicked";
+}
+
 function bookingFollowupStep(send) {
-  const clicked = Number(send.clickCount || 0) > 0;
+  const clicked = bookingFollowupHasClick(send);
   if (!clicked && send.lastFollowupStep !== "not_clicked") return "not_clicked";
   if (clicked && send.lastFollowupStep !== "clicked") return "clicked";
   if (send.lastFollowupStep !== "final") return "final";
   return "";
 }
 
-function bookingFollowupNextAt(send, config, step, now = new Date()) {
+function bookingFollowupStateReady(send, now = new Date()) {
+  return Boolean(
+    send &&
+      send.followupState === "active" &&
+      !send.bookedAt &&
+      ["sent", "clicked"].includes(send.status) &&
+      send.nextFollowupAt &&
+      send.nextFollowupAt <= now,
+  );
+}
+
+function bookingFollowupNextAt(_send, config, step, now = new Date()) {
   if (step === "final") return null;
   const followup = bookingFollowupConfig(config);
-  const finalAt = datePlusMinutes(send.sentAt || send.createdAt || now, followup.finalDelayMinutes);
-  return finalAt > now ? finalAt : datePlusMinutes(now, 1);
+  return datePlusMinutes(now, followup.finalDelayMinutes);
 }
 
 async function processBookingFollowupQueue() {
@@ -7468,7 +7482,16 @@ async function processBookingFollowupQueue() {
       take: 20,
     });
     const settings = await getSettings();
-    for (const send of sends) {
+    for (const dueSend of sends) {
+      const send = await prisma.bookingLinkSend.findUnique({
+        where: { id: dueSend.id },
+        include: {
+          businessProfile: { include: { config: true } },
+          bookingLink: true,
+          lead: true,
+        },
+      });
+      if (!bookingFollowupStateReady(send)) continue;
       const profile = send.businessProfile;
       if (!profile) {
         await prisma.bookingLinkSend.update({
@@ -7492,6 +7515,41 @@ async function processBookingFollowupQueue() {
           where: { id: send.id },
           data: { followupState: "completed", nextFollowupAt: null },
         });
+        continue;
+      }
+      const latest = await prisma.bookingLinkSend.findUnique({
+        where: { id: send.id },
+        select: {
+          status: true,
+          bookedAt: true,
+          clickCount: true,
+          firstClickedAt: true,
+          followupState: true,
+          nextFollowupAt: true,
+          lastFollowupStep: true,
+          metadata: true,
+        },
+      });
+      const latestNow = new Date();
+      const latestStep = latest ? bookingFollowupStep(latest) : "";
+      if (!bookingFollowupStateReady(latest, latestNow) || latestStep !== step || latest.lastFollowupStep !== send.lastFollowupStep) {
+        if (latest && step === "not_clicked" && bookingFollowupHasClick(latest)) {
+          await prisma.bookingLinkSend.update({
+            where: { id: send.id },
+            data: {
+              status: "clicked",
+              nextFollowupAt:
+                latest.nextFollowupAt && latest.nextFollowupAt > latestNow
+                  ? latest.nextFollowupAt
+                  : datePlusMinutes(latestNow, followup.clickedDelayMinutes),
+              metadata: {
+                ...(latest.metadata && typeof latest.metadata === "object" ? latest.metadata : {}),
+                notClickedFollowupSkippedAt: latestNow.toISOString(),
+                notClickedFollowupSkippedReason: "booking link already clicked",
+              },
+            },
+          });
+        }
         continue;
       }
       const targetPhone = normalizeE164Phone(send.phone || send.lead?.phone || "");
@@ -7535,7 +7593,7 @@ async function processBookingFollowupQueue() {
             trackedUrl,
           },
         });
-        const nextFollowupAt = bookingFollowupNextAt(send, config, step, now);
+        const nextFollowupAt = bookingFollowupNextAt(send, config, step, new Date());
         await prisma.bookingLinkSend.update({
           where: { id: send.id },
           data: {
@@ -7544,7 +7602,7 @@ async function processBookingFollowupQueue() {
             nextFollowupAt,
             followupState: nextFollowupAt ? "active" : "completed",
             metadata: {
-              ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+              ...(latest.metadata && typeof latest.metadata === "object" ? latest.metadata : {}),
               lastFollowupAt: new Date().toISOString(),
               lastFollowupStep: step,
               lastFollowupDeliveryId: delivery.delivery.id,
@@ -7559,7 +7617,7 @@ async function processBookingFollowupQueue() {
           data: {
             nextFollowupAt: datePlusMinutes(now, 60),
             metadata: {
-              ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+              ...(latest?.metadata && typeof latest.metadata === "object" ? latest.metadata : {}),
               lastFollowupError: error.message,
               lastFollowupErrorAt: new Date().toISOString(),
             },
@@ -11964,10 +12022,6 @@ app.get("/book/t/:token", async (req, res) => {
     const followup = bookingFollowupConfig(config || {});
     const shouldKeepFollowing =
       followup.enabled && !send.bookedAt && send.followupState === "active" && !["booked", "stopped", "failed"].includes(send.status);
-    await prisma.bookingLink.update({
-      where: { id: send.bookingLinkId },
-      data: { clickCount: { increment: 1 }, lastClickedAt: now },
-    });
     await prisma.bookingLinkSend.update({
       where: { id: send.id },
       data: {
@@ -11982,6 +12036,10 @@ app.get("/book/t/:token", async (req, res) => {
           lastClickReferrer: String(req.get("referer") || ""),
         },
       },
+    });
+    await prisma.bookingLink.update({
+      where: { id: send.bookingLinkId },
+      data: { clickCount: { increment: 1 }, lastClickedAt: now },
     });
     await prisma.bookingLinkClick.create({
       data: {
