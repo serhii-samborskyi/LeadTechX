@@ -80,7 +80,6 @@ const el = {
   profileHours: document.querySelector("#profileHours"),
   profileServices: document.querySelector("#profileServices"),
   profileArea: document.querySelector("#profileArea"),
-  records: document.querySelector("#records"),
   orb: document.querySelector("#orb"),
   voiceVisualizer: document.querySelector("#voiceVisualizer"),
   diagnostics: document.querySelector("#diagnostics"),
@@ -3470,50 +3469,6 @@ async function refreshResearch() {
   setStatus("Profile refreshed");
 }
 
-async function loadDemoData() {
-  const response = await fetch("/api/demo-data");
-  const data = await response.json();
-  const records = [
-    ...data.appointments.map((item) => ({
-      type: "Appointment",
-      title: `${appointmentCode(item.id)} - ${item.customerName}`,
-      detail: [
-        `${item.status}: ${item.requestedAt}`,
-        item.phone ? `Phone: ${item.phone}` : null,
-        item.email ? `Email: ${item.email}` : null,
-        item.reason ? `Reason: ${item.reason}` : null,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    })),
-    ...data.leads.map((item) => ({
-      type: "Lead",
-      title: item.name,
-      detail: item.need || item.phone || item.email || "No detail",
-    })),
-    ...data.transferMessages.map((item) => ({
-      type: "Transfer",
-      title: item.name || "Caller",
-      detail: item.message,
-    })),
-  ].slice(0, 8);
-
-  if (!records.length) {
-    el.records.textContent = "No records yet";
-    return;
-  }
-
-  el.records.innerHTML = "";
-  for (const item of records) {
-    const node = document.createElement("div");
-    node.className = "record";
-    node.innerHTML = `<strong></strong><span></span>`;
-    node.querySelector("strong").textContent = `${item.type}: ${item.title}`;
-    node.querySelector("span").textContent = item.detail;
-    el.records.appendChild(node);
-  }
-}
-
 async function startCall() {
   if (!el.businessName.value.trim()) {
     setStatus("Business missing", "error");
@@ -3585,7 +3540,6 @@ async function startCall() {
       stopCall();
     }
     if (message.type === "tool_call") {
-      loadDemoData();
       loadCalendar();
       loadCrm().catch(() => {});
       loadMessages().catch(() => {});
@@ -3643,7 +3597,6 @@ async function initializePortal(user) {
   await loadSettings();
   await loadBusinessAdmin();
   await loadCrm().catch(() => {});
-  await loadDemoData();
 }
 
 async function checkSession() {

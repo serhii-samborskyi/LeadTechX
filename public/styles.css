@@ -2617,30 +2617,6 @@ dd {
   line-height: 1.45;
 }
 
-.records {
-  display: grid;
-  gap: 10px;
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-
-.record {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px;
-  color: var(--ink);
-  background: #fff;
-}
-
-.record strong {
-  display: block;
-  margin-bottom: 4px;
-}
-
-.record span {
-  white-space: pre-line;
-}
-
 .admin-panel {
   margin-top: 16px;
   overflow: hidden;
