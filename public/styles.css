@@ -3580,7 +3580,7 @@ dd {
 
 .crm-card summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   gap: 12px;
   align-items: center;
   padding: 14px 16px;
@@ -3643,6 +3643,64 @@ dd {
   font-size: 0.72rem;
   font-weight: 900;
   text-transform: uppercase;
+}
+
+.crm-booking-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid #d7e5de;
+  border-radius: 999px;
+  background: #f7fbf9;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.crm-booking-stage svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.crm-booking-stage.stage-sent {
+  background: #eef7ff;
+  border-color: #cfe3f7;
+  color: #24618e;
+}
+
+.crm-booking-stage.stage-delivered {
+  background: #eef7f1;
+  border-color: #cce9da;
+  color: #267052;
+}
+
+.crm-booking-stage.stage-clicked {
+  background: #fff7e8;
+  border-color: #f1ddb8;
+  color: #8a5b16;
+}
+
+.crm-booking-stage.stage-booked {
+  background: #e7f6ef;
+  border-color: #bde4d2;
+  color: #1f6a52;
+}
+
+.crm-booking-stage.stage-pending {
+  background: #f4f3fb;
+  border-color: #ddd9ef;
+  color: #5d5680;
+}
+
+.crm-booking-stage.stage-failed {
+  background: #f9eeee;
+  border-color: #edcccc;
+  color: #a33d32;
 }
 
 .crm-open-hint {
@@ -4433,6 +4491,7 @@ a.appointment-field-value {
   }
 
   .crm-status-badge,
+  .crm-booking-stage,
   .crm-open-hint {
     justify-self: start;
   }

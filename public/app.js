@@ -2179,6 +2179,104 @@ function crmInsight(lead) {
   return fields.postCallAi || fields.callSummary?.fallbackInsight || fields.callSummary || fields.callTranscript || {};
 }
 
+function bookingMessageDelivery(lead, send) {
+  const deliveries = Array.isArray(lead.messageDeliveries) ? lead.messageDeliveries : [];
+  const deliveryId = send?.metadata?.messageDeliveryId;
+  if (deliveryId) {
+    const exact = deliveries.find((delivery) => String(delivery.id) === String(deliveryId));
+    if (exact) return exact;
+  }
+  return deliveries.find(
+    (delivery) =>
+      delivery.purpose === "booking_link" &&
+      (!send?.phone || delivery.toPhone === send.phone) &&
+      (!send?.sentAt || Math.abs(new Date(delivery.createdAt).getTime() - new Date(send.sentAt).getTime()) < 5 * 60 * 1000),
+  );
+}
+
+function crmBookingStage(lead) {
+  const sends = Array.isArray(lead.bookingLinkSends) ? lead.bookingLinkSends : [];
+  const appointments = Array.isArray(lead.bookingAppointments) ? lead.bookingAppointments : [];
+  const bookedSend = sends.find((send) => send.status === "booked" || send.bookedAt || send.matchedAppointment);
+  const bookedAppointment = appointments.find((appointment) => {
+    const status = String(appointment.status || "").toLowerCase();
+    return status && !["booking_link_sent", "requested", "cancelled", "canceled"].includes(status);
+  });
+  if (bookedSend || bookedAppointment) {
+    const bookedAt = bookedSend?.bookedAt || bookedSend?.matchedAppointment?.scheduledStart || bookedAppointment?.scheduledStart || bookedAppointment?.createdAt;
+    return {
+      label: "Appointment booked",
+      detail: bookedAt ? new Date(bookedAt).toLocaleString() : "",
+      icon: "calendar-check",
+      tone: "booked",
+    };
+  }
+
+  const clickedSend = sends.find((send) => Number(send.clickCount || 0) > 0 || send.firstClickedAt || (send.clicks || []).length);
+  if (clickedSend) {
+    return {
+      label: "Link clicked",
+      detail: `${clickedSend.clickCount || 1} click${Number(clickedSend.clickCount || 1) === 1 ? "" : "s"}`,
+      icon: "mouse-pointer-click",
+      tone: "clicked",
+    };
+  }
+
+  const deliveredSend = sends.find((send) => bookingMessageDelivery(lead, send)?.status === "sent");
+  if (deliveredSend) {
+    return {
+      label: "Link delivered",
+      detail: deliveredSend.sentAt ? new Date(deliveredSend.sentAt).toLocaleString() : "",
+      icon: "check-check",
+      tone: "delivered",
+    };
+  }
+
+  const sentSend = sends.find((send) => ["sent", "clicked", "booked"].includes(String(send.status || "")));
+  if (sentSend) {
+    return {
+      label: "Link sent",
+      detail: sentSend.sentAt ? new Date(sentSend.sentAt).toLocaleString() : "",
+      icon: "send",
+      tone: "sent",
+    };
+  }
+
+  const pendingSend = sends.find((send) => ["queued", "sending"].includes(String(send.status || "")) || bookingMessageDelivery(lead, send)?.status === "delivery_pending");
+  if (pendingSend) {
+    return {
+      label: "Link pending",
+      detail: pendingSend.sentAt ? new Date(pendingSend.sentAt).toLocaleString() : "",
+      icon: "clock",
+      tone: "pending",
+    };
+  }
+
+  const failedSend = sends.find((send) => send.status === "failed" || bookingMessageDelivery(lead, send)?.status === "failed");
+  if (failedSend) {
+    return {
+      label: "Link failed",
+      detail: failedSend.updatedAt ? new Date(failedSend.updatedAt).toLocaleString() : "",
+      icon: "circle-alert",
+      tone: "failed",
+    };
+  }
+
+  return { label: "No booking link", detail: "", icon: "link", tone: "none" };
+}
+
+function crmBookingStageBadge(stage) {
+  const badge = document.createElement("span");
+  badge.className = `crm-booking-stage stage-${stage.tone || "none"}`;
+  if (stage.detail) badge.title = stage.detail;
+  const icon = document.createElement("i");
+  icon.setAttribute("data-lucide", stage.icon || "link");
+  const label = document.createElement("span");
+  label.textContent = stage.label;
+  badge.append(icon, label);
+  return badge;
+}
+
 function renderCrm(leads) {
   el.crmList.innerHTML = "";
   for (const lead of leads) {
@@ -2208,6 +2306,7 @@ function renderCrm(leads) {
     const badge = document.createElement("span");
     badge.className = "crm-status-badge";
     badge.textContent = titleFromKey(lead.status || "new");
+    const bookingStage = crmBookingStageBadge(crmBookingStage(lead));
     const openHint = document.createElement("span");
     openHint.className = "crm-open-hint";
     const openText = document.createElement("span");
@@ -2215,7 +2314,7 @@ function renderCrm(leads) {
     const openIcon = document.createElement("i");
     openIcon.setAttribute("data-lucide", "chevron-down");
     openHint.append(openText, openIcon);
-    summary.append(title, badge, openHint);
+    summary.append(title, badge, bookingStage, openHint);
 
     const body = document.createElement("div");
     body.className = "crm-body";

@@ -14145,7 +14145,7 @@ app.get("/api/business-admin/crm", async (req, res) => {
           include: { messageDeliveries: { orderBy: { createdAt: "desc" }, take: 3 } },
         },
         leadWebhookEvents: { orderBy: { createdAt: "desc" }, take: 5 },
-        messageDeliveries: { orderBy: { createdAt: "desc" }, take: 5 },
+        messageDeliveries: { orderBy: { createdAt: "desc" }, take: 20 },
         inboundMessages: { orderBy: { createdAt: "desc" }, take: 5 },
         bookingLinkSends: {
           orderBy: { sentAt: "desc" },
