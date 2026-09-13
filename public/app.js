@@ -207,6 +207,9 @@ const el = {
   slotDuration: document.querySelector("#slotDuration"),
   bufferMinutes: document.querySelector("#bufferMinutes"),
   calendarTimezone: document.querySelector("#calendarTimezone"),
+  followupTextStartTime: document.querySelector("#followupTextStartTime"),
+  followupTextEndTime: document.querySelector("#followupTextEndTime"),
+  saveFollowupHoursButton: document.querySelector("#saveFollowupHoursButton"),
   calendarServiceFilter: document.querySelector("#calendarServiceFilter"),
   calendarProfessionalFilter: document.querySelector("#calendarProfessionalFilter"),
   availabilityRules: document.querySelector("#availabilityRules"),
@@ -1610,6 +1613,8 @@ function applyAdminData(data) {
   el.slotDuration.value = data.config.slotDurationMinutes;
   el.bufferMinutes.value = data.config.bufferMinutes;
   el.calendarTimezone.value = data.config.timezone;
+  if (el.followupTextStartTime) el.followupTextStartTime.value = data.config.followupTextStartTime || "09:00";
+  if (el.followupTextEndTime) el.followupTextEndTime.value = data.config.followupTextEndTime || "20:00";
   if (state.crmDateRange !== "custom") setCrmDateRange(state.crmDateRange, false);
   if (el.calendarProvider) el.calendarProvider.value = data.config.calendarProvider || "internal";
   renderIntakeFields(data.config.intakeFields);
@@ -1710,6 +1715,8 @@ async function saveBusinessConfig() {
     slotDurationMinutes: Number(el.slotDuration.value || 30),
     bufferMinutes: Number(el.bufferMinutes.value || 0),
     timezone: el.calendarTimezone.value.trim() || "America/Chicago",
+    followupTextStartTime: el.followupTextStartTime?.value || "09:00",
+    followupTextEndTime: el.followupTextEndTime?.value || "20:00",
     voiceName: el.voiceName.value,
     language: el.language.value,
     agentName: el.agentName.value.trim() || "Alex",
@@ -3914,6 +3921,7 @@ el.importPricesButton.addEventListener("click", () => {
 });
 
 el.saveInstructionsButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
+el.saveFollowupHoursButton?.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.addReviewLinkButton.addEventListener("click", () => runAdmin(addReviewLink));
 el.reviewLinkList.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");

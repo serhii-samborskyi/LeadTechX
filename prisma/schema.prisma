@@ -133,6 +133,8 @@ model BusinessConfig {
   slotDurationMinutes                   Int                      @default(30)
   bufferMinutes                         Int                      @default(0)
   timezone                              String                   @default("America/Chicago")
+  followupTextStartTime                 String                   @default("09:00")
+  followupTextEndTime                   String                   @default("20:00")
   calendarProvider                      String                   @default("internal")
   providerConfig                        Json?
   voiceName                             String                   @default("Puck")

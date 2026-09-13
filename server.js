@@ -5464,6 +5464,69 @@ function datePlusMinutes(baseDate, minutes) {
   return new Date(new Date(baseDate || Date.now()).getTime() + Math.max(0, Number(minutes || 0)) * 60 * 1000);
 }
 
+function normalizeTimezone(value, fallback = "America/Chicago") {
+  const zone = String(value || fallback).trim() || fallback;
+  return DateTime.now().setZone(zone).isValid ? zone : fallback;
+}
+
+function normalizeClockTime(value, fallback) {
+  const raw = String(value || fallback || "").trim();
+  const match = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return fallback;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return fallback;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function clockMinutes(value) {
+  const [hour, minute] = normalizeClockTime(value, "00:00").split(":").map((part) => Number(part));
+  return hour * 60 + minute;
+}
+
+function localTimeOnDay(day, value) {
+  const [hour, minute] = normalizeClockTime(value, "09:00").split(":").map((part) => Number(part));
+  return day.set({ hour, minute, second: 0, millisecond: 0 });
+}
+
+function followupTextWindow(config = {}) {
+  const timezone = normalizeTimezone(config.timezone || "America/Chicago");
+  const startTime = normalizeClockTime(config.followupTextStartTime, "09:00");
+  const endTime = normalizeClockTime(config.followupTextEndTime, "20:00");
+  return {
+    timezone,
+    startTime,
+    endTime,
+    startMinutes: clockMinutes(startTime),
+    endMinutes: clockMinutes(endTime),
+  };
+}
+
+function followupTextAllowedAt(candidate, config = {}) {
+  const window = followupTextWindow(config);
+  if (window.startMinutes === window.endMinutes) return true;
+  const local = DateTime.fromJSDate(new Date(candidate || Date.now())).setZone(window.timezone);
+  if (!local.isValid) return true;
+  const current = local.hour * 60 + local.minute;
+  if (window.startMinutes < window.endMinutes) {
+    return current >= window.startMinutes && current < window.endMinutes;
+  }
+  return current >= window.startMinutes || current < window.endMinutes;
+}
+
+function nextAllowedFollowupTextAt(candidate, config = {}) {
+  const window = followupTextWindow(config);
+  if (window.startMinutes === window.endMinutes) return new Date(candidate || Date.now());
+  const local = DateTime.fromJSDate(new Date(candidate || Date.now())).setZone(window.timezone);
+  if (!local.isValid || followupTextAllowedAt(candidate, config)) return new Date(candidate || Date.now());
+  const current = local.hour * 60 + local.minute;
+  const startsToday = localTimeOnDay(local, window.startTime);
+  if (window.startMinutes < window.endMinutes) {
+    return (current < window.startMinutes ? startsToday : startsToday.plus({ days: 1 })).toJSDate();
+  }
+  return startsToday.toJSDate();
+}
+
 function bookingSourceValue(send) {
   return send?.clickToken ? `ringport_${send.clickToken}` : "";
 }
@@ -6425,7 +6488,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
       trackedUrl,
       sentAt: now,
       followupState: followup.enabled ? "active" : "stopped",
-      nextFollowupAt: followup.enabled ? datePlusMinutes(now, followup.notClickedDelayMinutes) : null,
+      nextFollowupAt: followup.enabled ? nextAllowedFollowupTextAt(datePlusMinutes(now, followup.notClickedDelayMinutes), config) : null,
       metadata: {
         provider: connection.provider,
         bookingAppointmentId: appointment.id,
@@ -7458,7 +7521,7 @@ function bookingFollowupStateReady(send, now = new Date()) {
 function bookingFollowupNextAt(_send, config, step, now = new Date()) {
   if (step === "final") return null;
   const followup = bookingFollowupConfig(config);
-  return datePlusMinutes(now, followup.finalDelayMinutes);
+  return nextAllowedFollowupTextAt(datePlusMinutes(now, followup.finalDelayMinutes), config);
 }
 
 async function processBookingFollowupQueue() {
@@ -7509,6 +7572,21 @@ async function processBookingFollowupQueue() {
         });
         continue;
       }
+      if (!followupTextAllowedAt(new Date(), config)) {
+        const allowedAt = nextAllowedFollowupTextAt(new Date(), config);
+        await prisma.bookingLinkSend.update({
+          where: { id: send.id },
+          data: {
+            nextFollowupAt: allowedAt,
+            metadata: {
+              ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+              quietHoursDelayedAt: new Date().toISOString(),
+              quietHoursNextAllowedAt: allowedAt.toISOString(),
+            },
+          },
+        });
+        continue;
+      }
       const step = bookingFollowupStep(send);
       if (!step) {
         await prisma.bookingLinkSend.update({
@@ -7541,7 +7619,7 @@ async function processBookingFollowupQueue() {
               nextFollowupAt:
                 latest.nextFollowupAt && latest.nextFollowupAt > latestNow
                   ? latest.nextFollowupAt
-                  : datePlusMinutes(latestNow, followup.clickedDelayMinutes),
+                  : nextAllowedFollowupTextAt(datePlusMinutes(latestNow, followup.clickedDelayMinutes), config),
               metadata: {
                 ...(latest.metadata && typeof latest.metadata === "object" ? latest.metadata : {}),
                 notClickedFollowupSkippedAt: latestNow.toISOString(),
@@ -7615,7 +7693,7 @@ async function processBookingFollowupQueue() {
         await prisma.bookingLinkSend.update({
           where: { id: send.id },
           data: {
-            nextFollowupAt: datePlusMinutes(now, 60),
+            nextFollowupAt: nextAllowedFollowupTextAt(datePlusMinutes(now, 60), config),
             metadata: {
               ...(latest?.metadata && typeof latest.metadata === "object" ? latest.metadata : {}),
               lastFollowupError: error.message,
@@ -12029,7 +12107,9 @@ app.get("/book/t/:token", async (req, res) => {
         firstClickedAt: send.firstClickedAt || now,
         lastClickedAt: now,
         clickCount: { increment: 1 },
-        nextFollowupAt: shouldKeepFollowing ? datePlusMinutes(now, followup.clickedDelayMinutes) : send.nextFollowupAt,
+        nextFollowupAt: shouldKeepFollowing
+          ? nextAllowedFollowupTextAt(datePlusMinutes(now, followup.clickedDelayMinutes), config || {})
+          : send.nextFollowupAt,
         metadata: {
           ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
           lastClickAt: now.toISOString(),
@@ -12299,7 +12379,9 @@ app.put("/api/business-admin/config", async (req, res) => {
         appointmentMode,
         slotDurationMinutes: Math.max(5, Number(req.body.slotDurationMinutes || 30)),
         bufferMinutes: Math.max(0, Number(req.body.bufferMinutes || 0)),
-        timezone: String(req.body.timezone || "America/Chicago"),
+        timezone: normalizeTimezone(req.body.timezone || config.timezone || "America/Chicago"),
+        followupTextStartTime: normalizeClockTime(req.body.followupTextStartTime ?? config.followupTextStartTime, "09:00"),
+        followupTextEndTime: normalizeClockTime(req.body.followupTextEndTime ?? config.followupTextEndTime, "20:00"),
         voiceName: String(req.body.voiceName || config.voiceName || "Puck"),
         language: String(req.body.language || config.language || "English"),
         agentName: String(req.body.agentName || config.agentName || "Alex"),

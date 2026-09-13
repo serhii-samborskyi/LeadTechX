@@ -1,0 +1,3 @@
+ALTER TABLE "BusinessConfig"
+ADD COLUMN "followupTextStartTime" TEXT NOT NULL DEFAULT '09:00',
+ADD COLUMN "followupTextEndTime" TEXT NOT NULL DEFAULT '20:00';

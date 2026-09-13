@@ -155,6 +155,28 @@
             <button id="saveSettingsButton" class="primary action-button" type="button">Save agent settings</button>
           </section>
 
+          <section class="admin-view" data-view="setup">
+            <div class="admin-view-heading">
+              <h3>Timezone and follow-up hours</h3>
+              <p>Set the business timezone and the hours automated follow-up texts are allowed to send.</p>
+            </div>
+            <div class="form-grid">
+              <label>Business timezone<input id="calendarTimezone" value="America/Chicago" list="timezoneOptions" /></label>
+              <label>Follow-up texts start<input id="followupTextStartTime" type="time" /></label>
+              <label>Follow-up texts stop<input id="followupTextEndTime" type="time" /></label>
+            </div>
+            <datalist id="timezoneOptions">
+              <option value="America/New_York"></option>
+              <option value="America/Chicago"></option>
+              <option value="America/Denver"></option>
+              <option value="America/Los_Angeles"></option>
+              <option value="America/Phoenix"></option>
+              <option value="America/Anchorage"></option>
+              <option value="Pacific/Honolulu"></option>
+            </datalist>
+            <button id="saveFollowupHoursButton" class="primary action-button" type="button">Save follow-up hours</button>
+          </section>
+
           <section class="admin-view" data-view="content">
             <div class="admin-view-heading">
               <h3>Questions to ask</h3>
@@ -300,7 +322,6 @@
               <label>Booking mode<select id="appointmentMode"><option value="instant">Book immediately</option><option value="request">Pending request</option></select></label>
               <label>Slot duration (minutes)<input id="slotDuration" type="number" min="5" step="5" /></label>
               <label>Buffer (minutes)<input id="bufferMinutes" type="number" min="0" step="5" /></label>
-              <label>Timezone<input id="calendarTimezone" value="America/Chicago" /></label>
               <label>Service filter<select id="calendarServiceFilter"><option value="">First available service</option></select></label>
               <label>Professional filter<select id="calendarProfessionalFilter"><option value="">Any professional</option></select></label>
             </div>
