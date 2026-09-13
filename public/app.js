@@ -122,6 +122,7 @@ const el = {
   qualificationMaxAttempts: document.querySelector("#qualificationMaxAttempts"),
   qualificationRetryDelayMinutes: document.querySelector("#qualificationRetryDelayMinutes"),
   leadWebhookDedupeWindowHours: document.querySelector("#leadWebhookDedupeWindowHours"),
+  bookingFollowupSection: document.querySelector(".booking-followup-section"),
   bookingFollowupEnabled: document.querySelector("#bookingFollowupEnabled"),
   bookingFollowupMatchWindowHours: document.querySelector("#bookingFollowupMatchWindowHours"),
   bookingFollowupNotClickedDelayMinutes: document.querySelector("#bookingFollowupNotClickedDelayMinutes"),
@@ -596,6 +597,11 @@ async function loadPhoneStatus() {
 async function saveSettings() {
   await saveBusinessConfig();
   setStatus("Settings saved");
+}
+
+function updateBookingFollowupUi() {
+  if (!el.bookingFollowupSection || !el.bookingFollowupEnabled) return;
+  el.bookingFollowupSection.classList.toggle("is-disabled", !el.bookingFollowupEnabled.checked);
 }
 
 function adminIdentity() {
@@ -1524,6 +1530,7 @@ function applyAdminData(data) {
     el.bookingFollowupFinalTemplate.value =
       data.config.bookingFollowupFinalTemplate || "Just checking in from {{business_name}}. You can still book here: {{booking_link}}";
   }
+  updateBookingFollowupUi();
   el.reviewRequestsEnabled.checked = Boolean(data.config.reviewRequestsEnabled);
   el.reviewLink.value = data.config.reviewLink || "";
   el.managerNotificationPhone.value = data.config.managerNotificationPhone || "";
@@ -3696,6 +3703,7 @@ el.bookedAppointments.addEventListener("click", (event) => {
   if (cancelButton) runAdmin(() => cancelAppointment(cancelButton));
 });
 el.refreshCrmButton.addEventListener("click", () => runAdmin(loadCrm));
+el.bookingFollowupEnabled?.addEventListener("change", updateBookingFollowupUi);
 el.saveBookingFollowupButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.copyCrmWebhookButton.addEventListener("click", () => runAdmin(copyLeadWebhook));
 el.rotateCrmWebhookButton.addEventListener("click", () => runAdmin(rotateLeadWebhook));

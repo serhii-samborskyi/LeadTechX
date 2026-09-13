@@ -436,22 +436,79 @@
               </div>
               <button id="refreshCrmButton" type="button">Refresh leads</button>
             </div>
-            <div class="crm-webhook-card booking-followup-card">
-              <div>
-                <h4>Booking follow-up sequence</h4>
-                <p>Texts for customers who received a booking link but have not completed the booking yet.</p>
+            <div class="booking-followup-section">
+              <div class="booking-flow-header">
+                <div>
+                  <h4>Booking follow-up sequence</h4>
+                  <p>Texts for customers who received a booking link but have not completed the booking yet.</p>
+                </div>
+                <label class="booking-flow-toggle">
+                  <input id="bookingFollowupEnabled" type="checkbox" />
+                  <span>Sequence enabled</span>
+                </label>
               </div>
-              <label class="check-label"><input id="bookingFollowupEnabled" type="checkbox" /> Enable booking follow-up</label>
-              <div class="form-grid booking-followup-grid">
-                <label>Match booking window (hours)<input id="bookingFollowupMatchWindowHours" type="number" min="1" step="1" /></label>
-                <label>Not clicked delay (minutes)<input id="bookingFollowupNotClickedDelayMinutes" type="number" min="1" step="1" /></label>
-                <label>Clicked, not booked delay (minutes)<input id="bookingFollowupClickedDelayMinutes" type="number" min="1" step="1" /></label>
-                <label>Final reminder delay (minutes)<input id="bookingFollowupFinalDelayMinutes" type="number" min="1" step="1" /></label>
-                <label class="wide-field">Not clicked message<textarea id="bookingFollowupNotClickedTemplate" rows="3"></textarea></label>
-                <label class="wide-field">Clicked, not booked message<textarea id="bookingFollowupClickedTemplate" rows="3"></textarea></label>
-                <label class="wide-field">Final reminder message<textarea id="bookingFollowupFinalTemplate" rows="3"></textarea></label>
+              <div class="booking-flow-canvas" aria-label="Booking follow-up flow">
+                <div class="booking-flow-node booking-flow-trigger">
+                  <span class="booking-node-eyebrow">Trigger</span>
+                  <strong>Booking link sent</strong>
+                  <p>Agent sends the tracked Vagaro booking link to the caller.</p>
+                  <div class="booking-flow-chip">Tracked per lead</div>
+                </div>
+                <div class="booking-flow-line" aria-hidden="true"></div>
+                <div class="booking-flow-branch">
+                  <div class="booking-flow-branch-label">Customer action</div>
+                  <div class="booking-flow-node">
+                    <div class="booking-node-head">
+                      <span class="booking-node-eyebrow">If not clicked</span>
+                      <label class="booking-delay-control">Wait
+                        <input id="bookingFollowupNotClickedDelayMinutes" type="number" min="1" step="1" />
+                        min
+                      </label>
+                    </div>
+                    <label class="booking-message-editor">Message
+                      <textarea id="bookingFollowupNotClickedTemplate" rows="4"></textarea>
+                    </label>
+                  </div>
+                  <div class="booking-flow-node">
+                    <div class="booking-node-head">
+                      <span class="booking-node-eyebrow">If clicked, not booked</span>
+                      <label class="booking-delay-control">Wait
+                        <input id="bookingFollowupClickedDelayMinutes" type="number" min="1" step="1" />
+                        min
+                      </label>
+                    </div>
+                    <label class="booking-message-editor">Message
+                      <textarea id="bookingFollowupClickedTemplate" rows="4"></textarea>
+                    </label>
+                  </div>
+                </div>
+                <div class="booking-flow-line" aria-hidden="true"></div>
+                <div class="booking-flow-node booking-flow-final">
+                  <div class="booking-node-head">
+                    <span class="booking-node-eyebrow">Final reminder</span>
+                    <label class="booking-delay-control">Wait
+                      <input id="bookingFollowupFinalDelayMinutes" type="number" min="1" step="1" />
+                      min
+                    </label>
+                  </div>
+                  <label class="booking-message-editor">Message
+                    <textarea id="bookingFollowupFinalTemplate" rows="5"></textarea>
+                  </label>
+                </div>
+                <div class="booking-flow-line" aria-hidden="true"></div>
+                <div class="booking-flow-node booking-flow-stop">
+                  <span class="booking-node-eyebrow">Stop rules</span>
+                  <div class="booking-stop-list">
+                    <span>Customer replies: mark lead as Needs reply.</span>
+                    <span>Vagaro webhook matches: mark as Booked.</span>
+                  </div>
+                  <label class="booking-window-control">Match bookings for
+                    <input id="bookingFollowupMatchWindowHours" type="number" min="1" step="1" />
+                    hours after link send
+                  </label>
+                </div>
               </div>
-              <div class="crm-webhook-controls">
+              <div class="booking-flow-actions">
                 <button id="saveBookingFollowupButton" class="primary" type="button">Save sequence</button>
                 <small>Variables: {{business_name}}, {{customer_name}}, {{customer_phone}}, {{booking_link}}, {{service}}, {{professional}}, {{requested_time}}</small>
               </div>
