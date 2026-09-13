@@ -2587,8 +2587,65 @@ function keywordMatch(text, words) {
   return words.some((word) => normalized.includes(word));
 }
 
+function callerTranscriptText(transcript) {
+  const lines = String(transcript || "").split(/\n+/);
+  const callerLines = lines
+    .filter((line) => /^\s*\[Caller\]/i.test(line))
+    .map((line) => line.replace(/^\s*\[Caller\]\s*/i, "").trim())
+    .filter(Boolean);
+  return callerLines.join(" ");
+}
+
+function cleanCallerNameCandidate(value) {
+  const stopWords = new Set([
+    "calling",
+    "speaking",
+    "from",
+    "with",
+    "about",
+    "because",
+    "for",
+    "to",
+    "and",
+    "book",
+    "booking",
+    "schedule",
+    "appointment",
+    "consultation",
+  ]);
+  const words = String(value || "")
+    .replace(/[^\p{L}' -]/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const nameWords = [];
+  for (const word of words) {
+    if (stopWords.has(word.toLowerCase())) break;
+    nameWords.push(word);
+    if (nameWords.length >= 3) break;
+  }
+  return usableCallerName(nameWords.join(" "));
+}
+
+function extractCallerNameFromTranscript(transcript) {
+  const text = callerTranscriptText(transcript);
+  if (!text) return null;
+  const patterns = [
+    /\bmy name is\s+([a-z][a-z' -]{1,80})/i,
+    /\bthis is\s+([a-z][a-z' -]{1,80})/i,
+    /\bit's\s+([a-z][a-z' -]{1,80})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const name = cleanCallerNameCandidate(match?.[1] || "");
+    if (name) return name;
+  }
+  return null;
+}
+
 function extractLeadFieldsFromTranscript(transcript, fallback = {}) {
   const text = String(transcript || "");
+  const name = usableCallerName(fallback.name) || extractCallerNameFromTranscript(text) || null;
   const phone = fallback.phone || text.match(/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/)?.[0] || null;
   const email = fallback.email || text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || null;
   const appointmentIntent = keywordMatch(text, ["appointment", "book", "schedule", "reservation", "consultation", "callback"]);
@@ -2614,6 +2671,7 @@ function extractLeadFieldsFromTranscript(transcript, fallback = {}) {
           ? "follow_up"
           : "conversation";
   return {
+    name,
     phone,
     email,
     urgency,
@@ -2648,7 +2706,7 @@ function fallbackCallCrmInsight(voiceCall, fallback = {}) {
   const fields = extractLeadFieldsFromTranscript(voiceCall?.transcript, fallback);
   return {
     summary: shortCallSummary(voiceCall || {}),
-    callerName: fallback.name || null,
+    callerName: fields.name || usableCallerName(fallback.name) || null,
     callerPhone: fields.phone || fallback.phone || voiceCall?.fromNumber || null,
     callerEmail: fields.email || fallback.email || null,
     need: fallback.need || null,
@@ -3618,9 +3676,11 @@ async function finalizeBusinessCall(voiceCall) {
   const lead = await ensureCallLead({ voiceCall, profile: voiceCall.businessProfile, source: "incoming_call" });
   if (lead) {
     const previous = lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {};
+    const unknownName = !usableCallerName(lead.name);
     await prisma.lead.update({
       where: { id: lead.id },
       data: {
+        name: unknownName && fields.name ? fields.name : undefined,
         status: leadStatusFromCallInsight(lead.status, fallbackInsight),
         phone: lead.phone || fields.phone || voiceCall.fromNumber || null,
         email: lead.email || fields.email || null,
@@ -3672,7 +3732,7 @@ async function enrichBusinessCallCrm(voiceCallId) {
     insight = { ...fallback, enrichmentError: error.message };
   }
 
-  const unknownName = !voiceCall.lead.name || /^caller\s+\+?\d+/i.test(voiceCall.lead.name) || voiceCall.lead.name === "Unknown caller";
+  const unknownName = !usableCallerName(voiceCall.lead.name);
   const nextFields = {
     ...existingFields,
     postCallAi: {
@@ -3748,11 +3808,12 @@ async function ensureCallLead({ voiceCall, profile, source = "incoming_call" }) 
   if (!voiceCall || !profile) return null;
   const existing = await prisma.lead.findUnique({ where: { voiceCallId: voiceCall.id } }).catch(() => null);
   const extracted = extractLeadFieldsFromTranscript(voiceCall.transcript, { phone: voiceCall.fromNumber || existing?.phone });
+  const existingName = usableCallerName(existing?.name);
   const data = {
     businessName: profile.businessName,
     website: profile.website,
     businessProfileId: profile.id,
-    name: existing?.name || (voiceCall.fromNumber ? `Caller ${voiceCall.fromNumber}` : "Unknown caller"),
+    name: existingName || extracted.name || (voiceCall.fromNumber ? `Caller ${voiceCall.fromNumber}` : "Unknown caller"),
     phone: existing?.phone || voiceCall.fromNumber || null,
     source,
     status: leadStatusFromExtractedFields(existing?.status, extracted),
@@ -6301,7 +6362,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
   const { connection, service, professional, link } = await externalBookingLinkContext({ profile, args });
   const toPhone = normalizeE164Phone(args.phone) || lead?.phone || null;
   if (!toPhone) throw new Error("A caller phone number is required before sending a booking link");
-  const customerName = String(args.name || args.customerName || lead?.name || "Customer").trim() || "Customer";
+  const customerName = usableCallerName(args.name || args.customerName || lead?.name) || "Customer";
   const clickToken = issueToken().token;
   const trackedUrl = bookingLinkSendTrackingUrl({ settings, token: clickToken });
   const serviceText = service?.name || args.serviceName || "";
@@ -6421,12 +6482,14 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
     throw error;
   }
   if (lead?.id) {
+    const contactPatch = leadContactPatch({ lead, args, config, fallbackPhone: toPhone });
     await prisma.lead.update({
       where: { id: lead.id },
       data: {
+        ...contactPatch,
         status: "appointment",
         phone: lead.phone || toPhone,
-        email: lead.email || appointment.email || null,
+        ...(intakeCollectsEmail(config) ? { email: lead.email || appointment.email || null } : {}),
         extractedFields: {
           ...(lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {}),
           latestBookingLink: {
@@ -7787,6 +7850,61 @@ function fieldKey(value) {
   return normalized || `field_${Date.now()}`;
 }
 
+function intakeFieldMatches(config, keys = [], types = []) {
+  const keySet = new Set(keys.map((key) => fieldKey(key)));
+  const typeSet = new Set(types.map((type) => String(type || "").trim().toLowerCase()).filter(Boolean));
+  return (config?.intakeFields || []).some((field) => {
+    const key = fieldKey(field.fieldKey || field.label);
+    const type = String(field.fieldType || "").trim().toLowerCase();
+    return keySet.has(key) || typeSet.has(type);
+  });
+}
+
+function intakeCollectsEmail(config) {
+  return intakeFieldMatches(config, ["email", "email_address", "customer_email"], ["email"]);
+}
+
+function usableCallerName(value) {
+  const name = String(value || "").trim().replace(/\s+/g, " ");
+  if (!name) return "";
+  if (/^(unknown|unknown caller|customer|caller)$/i.test(name)) return "";
+  if (/^caller\s+\+?\d+/i.test(name)) return "";
+  if (/^\+?\d[\d\s().-]{6,}$/.test(name)) return "";
+  return name.slice(0, 160);
+}
+
+function leadNameShouldUpdate(currentName, nextName) {
+  const cleanNext = usableCallerName(nextName);
+  if (!cleanNext) return false;
+  return !usableCallerName(currentName);
+}
+
+function cleanOptionalEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return "";
+  return email.slice(0, 254);
+}
+
+function leadContactPatch({ lead = null, args = {}, config = null, fallbackPhone = null }) {
+  const patch = {};
+  const name = usableCallerName(args.name || args.customerName || args.customer_name || args.fullName);
+  if (leadNameShouldUpdate(lead?.name, name)) patch.name = name;
+  const phone = normalizeE164Phone(args.phone) || normalizeE164Phone(fallbackPhone) || "";
+  if (phone && !lead?.phone) patch.phone = phone;
+  const email = intakeCollectsEmail(config) ? cleanOptionalEmail(args.email) : "";
+  if (email && !lead?.email) patch.email = email;
+  const need = String(args.need || args.reason || args.serviceName || args.service || "").trim();
+  if (need && !lead?.need) patch.need = need.slice(0, 500);
+  return patch;
+}
+
+async function updateLeadContactFromTool({ lead = null, args = {}, config = null, fallbackPhone = null }) {
+  if (!lead?.id) return lead;
+  const patch = leadContactPatch({ lead, args, config, fallbackPhone });
+  if (!Object.keys(patch).length) return lead;
+  return prisma.lead.update({ where: { id: lead.id }, data: patch }).catch(() => lead);
+}
+
 async function ensureBusinessConfig(profile) {
   const existing = await prisma.businessConfig.findUnique({
     where: { businessProfileId: profile.id },
@@ -7886,6 +8004,7 @@ function runtimeBusinessInstructions(config) {
   const externalBooking = config.calendarProvider === "vagaro";
   const localNow = DateTime.now().setZone(config.timezone || "America/Chicago");
   const currentLocalDate = (localNow.isValid ? localNow : DateTime.now().setZone("America/Chicago")).toISODate();
+  const collectsEmail = intakeCollectsEmail(config);
   return `
 Business-managed receptionist configuration:
 - Appointment mode: ${
@@ -7899,6 +8018,7 @@ Business-managed receptionist configuration:
 - Current local date: ${currentLocalDate}. Never search availability or schedule appointments before this date. If the caller asks for a past date, ask for a future date.
 - Default appointment duration: ${config.slotDurationMinutes} minutes.
 - Information to collect before an appointment: ${JSON.stringify(intake)}
+- Only ask for fields listed in Information to collect before an appointment. This per-business intake list is the final source of truth for contact collection. ${collectsEmail ? "Email is configured only if it is listed there." : "Email is not configured, so do not ask callers for email."}
 - Knowledge base: ${JSON.stringify(knowledge)}
 - Prices: ${JSON.stringify(prices)}
 - Call transfer targets: ${transferTargets.length ? JSON.stringify(transferTargets) : "none"}
@@ -7917,6 +8037,8 @@ Phone-speed rules:
 - After get_available_slots returns, offer only the best matching slot or at most two options. Do not read a long list.
 - If get_available_slots returns one or more slots, never say you cannot see live availability. Use the returned slot labels, service names, and professional names.
 - If get_available_slots returns no slots but includes available services, ask the caller to pick a service and mention two or three examples.
+- When a caller gives their name, pass it as name in the next relevant tool call so the CRM lead uses their real name instead of the caller phone label.
+- The inbound caller number already counts as the phone number. Do not ask for phone again unless the caller wants a different callback number.
 - If the caller asks to book and has given a time, collect only missing required intake fields, then ${externalBooking ? "call send_booking_link and tell them the link lets them confirm in Vagaro." : "call schedule_appointment."}
 - Do not repeat the same confirmation question after the caller already answered it.
 - If the caller asks for a person, department, manager, or topic you cannot answer from the configured knowledge, ${transferTargets.length ? "offer the best matching call transfer target. Only call transfer_call after the caller agrees to be transferred. After calling transfer_call, do not call end_call." : "record a transfer_message for human follow-up."} If no transfer target fits, record a transfer_message instead.
@@ -7973,6 +8095,8 @@ function toolDeclarations(config) {
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
   const externalBooking = config.calendarProvider === "vagaro";
+  const collectsEmail = intakeCollectsEmail(config);
+  const optionalEmailProperty = collectsEmail ? { email: { type: "STRING", description: "Customer email if configured and known." } } : {};
   for (const field of config.intakeFields) {
     appointmentProperties[field.fieldKey] = {
       type: "STRING",
@@ -8014,7 +8138,7 @@ function toolDeclarations(config) {
               properties: {
                 name: { type: "STRING", description: "Customer name if known." },
                 phone: { type: "STRING", description: "Customer phone. If omitted, the inbound caller number is used." },
-                email: { type: "STRING" },
+                ...optionalEmailProperty,
                 serviceName: { type: "STRING" },
                 serviceId: { type: "STRING" },
                 professionalName: { type: "STRING" },
@@ -8062,7 +8186,7 @@ function toolDeclarations(config) {
         properties: {
           name: { type: "STRING" },
           phone: { type: "STRING" },
-          email: { type: "STRING" },
+          ...optionalEmailProperty,
           need: { type: "STRING" },
         },
         required: ["name"],
@@ -8076,7 +8200,7 @@ function toolDeclarations(config) {
         properties: {
           name: { type: "STRING" },
           phone: { type: "STRING" },
-          email: { type: "STRING" },
+          ...optionalEmailProperty,
           message: { type: "STRING" },
           urgency: { type: "STRING" },
         },
@@ -8121,7 +8245,7 @@ function toolDeclarations(config) {
                 feedback: { type: "STRING", description: "What the customer said about the service." },
                 name: { type: "STRING" },
                 phone: { type: "STRING" },
-                email: { type: "STRING" },
+                ...optionalEmailProperty,
               },
               required: ["sentiment"],
             },
@@ -8135,7 +8259,7 @@ function toolDeclarations(config) {
               properties: {
                 name: { type: "STRING" },
                 phone: { type: "STRING" },
-                email: { type: "STRING" },
+                ...optionalEmailProperty,
                 feedback: { type: "STRING" },
                 rating: { type: "INTEGER" },
               },
@@ -8151,7 +8275,7 @@ function toolDeclarations(config) {
               properties: {
                 name: { type: "STRING" },
                 phone: { type: "STRING" },
-                email: { type: "STRING" },
+                ...optionalEmailProperty,
                 complaint: { type: "STRING" },
                 requestedResolution: { type: "STRING" },
                 urgency: { type: "STRING" },
@@ -8298,15 +8422,16 @@ async function runToolCall(profile, config, functionCall, context = {}) {
     const linkArgs = {
       ...args,
       phone: normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null,
-      email: args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null,
+      email: intakeCollectsEmail(config) && args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null,
       name: args.name || args.customer_name || args.customerName || contextLead?.name || "Customer",
     };
+    const lead = await updateLeadContactFromTool({ lead: contextLead, args: linkArgs, config, fallbackPhone: context.fromNumber });
     return sendExternalBookingLink({
       settings,
       profile,
       config,
       args: linkArgs,
-      lead: contextLead,
+      lead,
       voiceCallId: context.voiceCallId || null,
       source: context.channel === "phone" ? "phone_agent_booking_link" : "browser_agent_booking_link",
     });
@@ -8318,16 +8443,17 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       const linkArgs = {
         ...args,
         phone: normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null,
-        email: args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null,
+        email: intakeCollectsEmail(config) && args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null,
         name: args.name || args.customer_name || args.customerName || contextLead?.name || "Customer",
         requestedTime: args.start || args.requestedTime || "",
       };
+      const lead = await updateLeadContactFromTool({ lead: contextLead, args: linkArgs, config, fallbackPhone: context.fromNumber });
       return sendExternalBookingLink({
         settings,
         profile,
         config,
         args: linkArgs,
-        lead: contextLead,
+        lead,
         voiceCallId: context.voiceCallId || null,
         source: context.channel === "phone" ? "phone_agent_schedule_link_guard" : "browser_agent_schedule_link_guard",
       });
@@ -8336,7 +8462,7 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       config.intakeFields.map((field) => [field.fieldKey, args[field.fieldKey] ?? null]),
     );
     const appointmentPhone = normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null;
-    const appointmentEmail = args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null;
+    const appointmentEmail = intakeCollectsEmail(config) && args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null;
     const appointmentName = args.name || args.customer_name || args.customerName || contextLead?.name || "unknown";
     if (appointmentPhone) intakeData.phone = intakeData.phone || appointmentPhone;
     if (appointmentEmail) intakeData.email = intakeData.email || appointmentEmail;
@@ -8367,12 +8493,19 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       source: context.channel === "phone" ? "phone_agent_booking" : "browser_agent_booking",
     });
     if (contextLead?.id) {
+      const contactPatch = leadContactPatch({
+        lead: contextLead,
+        args: { ...args, name: appointmentName, phone: appointmentPhone, email: appointmentEmail },
+        config,
+        fallbackPhone: appointmentPhone,
+      });
       await prisma.lead.update({
         where: { id: contextLead.id },
         data: {
+          ...contactPatch,
           status: "appointment",
           phone: contextLead.phone || appointmentPhone || null,
-          email: contextLead.email || appointmentEmail || null,
+          ...(intakeCollectsEmail(config) ? { email: contextLead.email || appointmentEmail || null } : {}),
           need: contextLead.need || args.reason || null,
           extractedFields: {
             ...(contextLead.extractedFields && typeof contextLead.extractedFields === "object" ? contextLead.extractedFields : {}),
@@ -8428,22 +8561,29 @@ async function runToolCall(profile, config, functionCall, context = {}) {
   }
 
   if (functionCall.name === "capture_lead") {
+    const capturedPhone = normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null;
+    const capturedEmail = intakeCollectsEmail(config) ? cleanOptionalEmail(args.email) : "";
+    const capturedName =
+      usableCallerName(args.name) ||
+      usableCallerName(contextLead?.name) ||
+      (capturedPhone ? `Caller ${capturedPhone}` : "unknown");
+    const capturedNeed = args.need ? String(args.need).trim().slice(0, 500) : "";
     if (context.qualificationLeadId) {
       const lead = await prisma.lead.update({
         where: { id: context.qualificationLeadId },
         data: {
-          name: args.name === undefined ? undefined : String(args.name || "unknown"),
-          phone: args.phone ? String(args.phone) : undefined,
-          email: args.email ? String(args.email) : undefined,
-          need: args.need ? String(args.need) : undefined,
+          name: usableCallerName(args.name) || undefined,
+          phone: capturedPhone || undefined,
+          email: capturedEmail || undefined,
+          need: capturedNeed || undefined,
           source: "outbound_qualification",
           extractedFields: {
             ...(context.leadExtractedFields && typeof context.leadExtractedFields === "object" ? context.leadExtractedFields : {}),
             captureLeadTool: {
-              name: args.name ? String(args.name) : null,
-              phone: args.phone ? String(args.phone) : null,
-              email: args.email ? String(args.email) : null,
-              need: args.need ? String(args.need) : null,
+              name: usableCallerName(args.name) || null,
+              phone: capturedPhone,
+              email: capturedEmail || null,
+              need: capturedNeed || null,
               capturedAt: new Date().toISOString(),
             },
           },
@@ -8455,25 +8595,28 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       businessName: profile.businessName,
       website: profile.website,
       businessProfileId: profile.id,
-      name: String(args.name || "unknown"),
-      phone: args.phone ? String(args.phone) : context.fromNumber || null,
-      email: args.email ? String(args.email) : null,
-      need: args.need ? String(args.need) : null,
+      name: capturedName,
+      phone: capturedPhone,
+      ...(capturedEmail ? { email: capturedEmail } : {}),
+      need: capturedNeed || null,
       status: "new",
       source: context.voiceCallId ? "call_capture" : "agent",
       extractedFields: {
-        name: String(args.name || "unknown"),
-        phone: args.phone ? String(args.phone) : context.fromNumber || null,
-        email: args.email ? String(args.email) : null,
-        need: args.need ? String(args.need) : null,
+        name: capturedName,
+        phone: capturedPhone,
+        email: capturedEmail || null,
+        need: capturedNeed || null,
         capturedAt: new Date().toISOString(),
       },
     };
     const lead = context.voiceCallId
       ? await prisma.lead.upsert({
           where: { voiceCallId: context.voiceCallId },
-          create: { ...data, voiceCallId: context.voiceCallId },
-          update: data,
+          create: { ...data, email: capturedEmail || null, voiceCallId: context.voiceCallId },
+          update: {
+            ...data,
+            ...(capturedEmail ? { email: capturedEmail } : {}),
+          },
         })
       : await prisma.lead.create({ data });
     return { ok: true, leadId: lead.id };
@@ -14093,6 +14236,22 @@ app.put("/api/business-admin/crm/:id", async (req, res) => {
       include: { voiceCall: true },
     });
     res.json({ lead });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete("/api/business-admin/crm/:id", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    const existing = await prisma.lead.findFirst({
+      where: { AND: [{ id: Number(req.params.id) }, leadWhereForProfile(profile)] },
+      select: { id: true, name: true, phone: true },
+    });
+    if (!existing) throw new Error("CRM lead was not found for this business");
+    await prisma.lead.delete({ where: { id: existing.id } });
+    res.json({ ok: true, lead: existing });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }

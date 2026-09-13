@@ -2285,6 +2285,7 @@ function renderCrm(leads) {
       <button data-action="send-review" type="button">Send review</button>
       <button data-action="send-missed-followup" type="button">Send follow-up</button>
       <button data-action="escalate-complaint" type="button">Escalate complaint</button>
+      <button class="danger-button" data-action="delete-crm" type="button">Remove lead</button>
     `;
     editor.querySelector(".crm-row-name").value = lead.name || "";
     editor.querySelector(".crm-row-phone").value = lead.phone || "";
@@ -2674,6 +2675,20 @@ async function saveCrmLead(card) {
     }),
   });
   await loadCrm();
+}
+
+async function deleteCrmLead(card) {
+  const name = card.querySelector(".crm-row-name")?.value.trim() || "this lead";
+  const confirmed = window.confirm(`Remove ${name} from CRM? This is mainly for testing and cannot be undone.`);
+  if (!confirmed) return;
+  setAdminStatus("Removing lead");
+  await apiJson(`/api/business-admin/crm/${card.dataset.id}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  await loadCrm();
+  setAdminStatus("Lead removed");
 }
 
 async function startQualificationCall(card) {
@@ -3888,6 +3903,11 @@ el.crmList.addEventListener("click", (event) => {
   const saveButton = event.target.closest("button[data-action='save-crm']");
   if (saveButton) {
     runAdmin(() => saveCrmLead(saveButton.closest(".crm-card")));
+    return;
+  }
+  const deleteButton = event.target.closest("button[data-action='delete-crm']");
+  if (deleteButton) {
+    runAdmin(() => deleteCrmLead(deleteButton.closest(".crm-card")));
     return;
   }
   const qualifyButton = event.target.closest("button[data-action='qualify-crm']");
