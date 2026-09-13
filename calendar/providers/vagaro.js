@@ -3,6 +3,22 @@ import { DateTime } from "luxon";
 const PROVIDER = "vagaro";
 const DEFAULT_REGION = "us02";
 const DEFAULT_TIMEOUT_MS = 4500;
+const MAX_BROAD_SERVICE_SEARCH = 8;
+const GENERIC_SERVICE_WORDS = new Set([
+  "appointment",
+  "availability",
+  "available",
+  "booking",
+  "consult",
+  "consultation",
+  "earliest",
+  "general",
+  "open",
+  "opening",
+  "service",
+  "spot",
+  "time",
+]);
 
 function bookingStatusToType(status) {
   const normalized = String(status || "").toLowerCase();
@@ -49,6 +65,32 @@ function includesText(haystack, needle) {
   return right && left.includes(right);
 }
 
+function compactWords(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function isGenericServiceRequest(value) {
+  const words = compactWords(value);
+  if (!words.length) return true;
+  const genericCount = words.filter((word) => GENERIC_SERVICE_WORDS.has(word)).length;
+  return genericCount > 0 && genericCount === words.length;
+}
+
+function serviceMatchesName(serviceName, requestName) {
+  if (includesText(serviceName, requestName) || includesText(requestName, serviceName)) return true;
+  const serviceWords = compactWords(serviceName);
+  const requestWords = compactWords(requestName).filter(
+    (word) => !["appointment", "availability", "available", "booking", "earliest", "general", "open", "opening", "service", "spot", "time"].includes(word),
+  );
+  return requestWords.some((requestWord) =>
+    serviceWords.some((serviceWord) => serviceWord.includes(requestWord) || requestWord.includes(serviceWord)),
+  );
+}
+
 function safeTimezone(value) {
   const zone = String(value || "").trim() || "America/Chicago";
   return DateTime.now().setZone(zone).isValid ? zone : "America/Chicago";
@@ -85,16 +127,57 @@ async function activeConnection(prisma, profile) {
   });
 }
 
-function findService(connection, args = {}) {
+function findServiceByRequest(connection, args = {}) {
   const requested = externalId(args.serviceId || args.serviceExternalId);
   if (requested) {
     return connection.services.find((service) => String(service.id) === requested || service.externalId === requested) || null;
   }
   const name = String(args.serviceName || args.service || args.reason || "").trim();
   if (name) {
-    return connection.services.find((service) => includesText(service.name, name) || includesText(name, service.name)) || null;
+    return connection.services.find((service) => serviceMatchesName(service.name, name)) || null;
   }
   return connection.services[0] || null;
+}
+
+function serviceCandidates(connection, args = {}) {
+  const services = Array.isArray(connection?.services) ? connection.services.filter((service) => service.active !== false && service.externalId) : [];
+  const requested = externalId(args.serviceId || args.serviceExternalId);
+  if (requested) {
+    const service = findServiceByRequest(connection, args);
+    return {
+      services: service ? [service] : [],
+      selectedService: service,
+      warning: service ? "" : "The requested Vagaro service was not found.",
+      broadSearch: false,
+    };
+  }
+
+  const name = String(args.serviceName || args.service || args.reason || "").trim();
+  if (name) {
+    const matches = services.filter((service) => serviceMatchesName(service.name, name));
+    if (matches.length) {
+      return {
+        services: matches.slice(0, MAX_BROAD_SERVICE_SEARCH),
+        selectedService: matches[0],
+        warning: matches.length > 1 ? `Found multiple services matching "${name}". Showing earliest available options.` : "",
+        broadSearch: matches.length > 1,
+      };
+    }
+  }
+
+  const broadServices = services.slice(0, MAX_BROAD_SERVICE_SEARCH);
+  return {
+    services: broadServices,
+    selectedService: broadServices.length === 1 ? broadServices[0] : null,
+    warning: name && !isGenericServiceRequest(name)
+      ? `I could not find an exact Vagaro service named "${name}". Showing earliest availability across available services.`
+      : "Showing earliest availability across available services.",
+    broadSearch: true,
+  };
+}
+
+function isServiceSelectionWarning(message) {
+  return /^(found multiple services|i could not find an exact vagaro service|showing earliest availability)/i.test(String(message || ""));
 }
 
 function findProfessional(connection, args = {}) {
@@ -161,6 +244,7 @@ async function localAppointments({ prisma, profile, fromDate, days, timezone }) 
 
 function normalizeAvailabilityResponse(data, { service, professional, timezone }) {
   const zone = safeTimezone(timezone);
+  const now = DateTime.now().setZone(zone);
   const slots = [];
   const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
   for (const row of rows) {
@@ -175,6 +259,7 @@ function normalizeAvailabilityResponse(data, { service, professional, timezone }
     for (const time of row.timeSlot || []) {
       const start = DateTime.fromISO(`${appointmentDate}T${time}`, { zone });
       if (!start.isValid) continue;
+      if (start.toMillis() < now.toMillis()) continue;
       const end = start.plus({ minutes: duration });
       slots.push({
         start: start.toISO(),
@@ -262,58 +347,97 @@ export async function listSlots(args) {
       warning: "Vagaro is not connected.",
     };
   }
-  const service = findService(connection, args);
+  const serviceSelection = serviceCandidates(connection, args);
   const professional = findProfessional(connection, args);
   let slots = [];
-  let warning = "";
-  try {
-    const live = await liveAvailability({
-      connection,
-      service,
-      professional,
-      fromDate: args.fromDate,
-      days: args.days,
-      timezone,
-      resolveBookingAccessToken: args.resolveBookingAccessToken,
-      requestBookingProvider: args.requestBookingProvider,
+  const warnings = [serviceSelection.warning].filter(Boolean);
+  if (!serviceSelection.services.length) {
+    warnings.push("No active Vagaro services are imported.");
+  } else {
+    const searches = serviceSelection.services.map(async (service) => {
+      let serviceSlots = [];
+      let warning = "";
+      try {
+        const live = await liveAvailability({
+          connection,
+          service,
+          professional,
+          fromDate: args.fromDate,
+          days: args.days,
+          timezone,
+          resolveBookingAccessToken: args.resolveBookingAccessToken,
+          requestBookingProvider: args.requestBookingProvider,
+        });
+        serviceSlots = live.slots;
+        warning = live.errors?.length ? live.errors[0] : "";
+        if (!serviceSlots.length && professional) {
+          const fallback = await liveAvailability({
+            connection,
+            service,
+            professional: null,
+            fromDate: args.fromDate,
+            days: args.days,
+            timezone,
+            resolveBookingAccessToken: args.resolveBookingAccessToken,
+            requestBookingProvider: args.requestBookingProvider,
+          });
+          serviceSlots = fallback.slots;
+          warning = serviceSlots.length
+            ? `${professional.displayName} is not available for ${service.name} in this range. Showing other available professionals.`
+            : fallback.errors?.[0] || warning;
+        }
+      } catch (error) {
+        warning = error.message;
+      }
+      return { service, slots: serviceSlots, warning };
     });
-    slots = live.slots;
-    warning = live.errors?.length ? live.errors[0] : "";
-    if (!slots.length && professional) {
-      const fallback = await liveAvailability({
-        connection,
-        service,
-        professional: null,
-        fromDate: args.fromDate,
-        days: args.days,
-        timezone,
-        resolveBookingAccessToken: args.resolveBookingAccessToken,
-        requestBookingProvider: args.requestBookingProvider,
-      });
-      slots = fallback.slots;
-      warning = slots.length
-        ? `${professional.displayName} is not available in this range. Showing other available professionals.`
-        : fallback.errors?.[0] || warning;
+    const results = await Promise.allSettled(searches);
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        slots.push(...result.value.slots);
+        if (result.value.warning) warnings.push(result.value.warning);
+      } else {
+        warnings.push(result.reason?.message || "Vagaro availability failed");
+      }
     }
-  } catch (error) {
-    warning = error.message;
   }
+  slots.sort((left, right) => new Date(left.start) - new Date(right.start));
+  const firstUsefulWarning =
+    (slots.length
+      ? warnings.find((message) => message && isServiceSelectionWarning(message))
+      : warnings.find((message) => message && !isServiceSelectionWarning(message))) ||
+    warnings.find(Boolean) ||
+    "";
   return {
     provider: PROVIDER,
     workflowMode: connection.workflowMode,
     slots: slots.slice(0, 120),
     appointments,
     timezone,
-    durationMinutes: Math.max(5, Number(service?.durationMinutes || args.durationMinutes || config.slotDurationMinutes || 30)),
-    selectedService: service
-      ? { id: service.id, externalId: service.externalId, name: service.name, durationMinutes: service.durationMinutes }
+    durationMinutes: Math.max(
+      5,
+      Number(serviceSelection.selectedService?.durationMinutes || args.durationMinutes || config.slotDurationMinutes || 30),
+    ),
+    selectedService: serviceSelection.selectedService
+      ? {
+          id: serviceSelection.selectedService.id,
+          externalId: serviceSelection.selectedService.externalId,
+          name: serviceSelection.selectedService.name,
+          durationMinutes: serviceSelection.selectedService.durationMinutes,
+        }
       : null,
+    selectedServices: serviceSelection.services.map((item) => ({
+      id: item.id,
+      externalId: item.externalId,
+      name: item.name,
+      durationMinutes: item.durationMinutes,
+    })),
     selectedProfessional: professional
       ? { id: professional.id, externalId: professional.externalId, name: professional.displayName }
       : null,
     services: connection.services.map((item) => ({ id: item.id, externalId: item.externalId, name: item.name, durationMinutes: item.durationMinutes })),
     professionals: connection.professionals.map((item) => ({ id: item.id, externalId: item.externalId, name: item.displayName })),
-    warning,
+    warning: firstUsefulWarning,
   };
 }
 

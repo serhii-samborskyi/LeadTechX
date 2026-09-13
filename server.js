@@ -7913,7 +7913,10 @@ ${toolWaitNoticeInstruction()}
 Phone-speed rules:
 - Keep every spoken phone reply short: one sentence by default, two only when necessary, and under about 8 seconds of speech.
 - If the caller asks for availability and gives a day or time, call get_available_slots immediately. Do not ask for name, phone, email, or appointment reason before checking availability.
+- If the caller asks broadly for earliest availability, available professionals, a consultation, or any open spot without a precise service, call get_available_slots with the earliest future date and omit serviceName unless the caller named a clear configured service.
 - After get_available_slots returns, offer only the best matching slot or at most two options. Do not read a long list.
+- If get_available_slots returns one or more slots, never say you cannot see live availability. Use the returned slot labels, service names, and professional names.
+- If get_available_slots returns no slots but includes available services, ask the caller to pick a service and mention two or three examples.
 - If the caller asks to book and has given a time, collect only missing required intake fields, then ${externalBooking ? "call send_booking_link and tell them the link lets them confirm in Vagaro." : "call schedule_appointment."}
 - Do not repeat the same confirmation question after the caller already answered it.
 - If the caller asks for a person, department, manager, or topic you cannot answer from the configured knowledge, ${transferTargets.length ? "offer the best matching call transfer target. Only call transfer_call after the caller agrees to be transferred. After calling transfer_call, do not call end_call." : "record a transfer_message for human follow-up."} If no transfer target fits, record a transfer_message instead.
@@ -7989,7 +7992,11 @@ function toolDeclarations(config) {
           fromDate: { type: "STRING", description: "Start date in YYYY-MM-DD format. Must be today or a future date in the calendar timezone." },
           days: { type: "INTEGER", description: "Number of days to search, up to 30." },
           durationMinutes: { type: "INTEGER" },
-          serviceName: { type: "STRING", description: "Service the caller wants, for example haircut, facial, lash fill." },
+          serviceName: {
+            type: "STRING",
+            description:
+              "Service the caller clearly wants, for example haircut, facial, lash fill. Omit for broad questions like earliest availability, consultation, or any open professional.",
+          },
           serviceId: { type: "STRING", description: "External or local service id if known." },
           professionalName: { type: "STRING", description: "Preferred professional/staff member name if caller asked for one." },
           professionalId: { type: "STRING", description: "External or local professional id if known." },
@@ -8278,7 +8285,10 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       provider: availability.provider || config.calendarProvider,
       workflowMode: availability.workflowMode || null,
       selectedService: availability.selectedService || null,
+      selectedServices: (availability.selectedServices || []).slice(0, context.channel === "phone" ? 8 : 30),
       selectedProfessional: availability.selectedProfessional || null,
+      availableServices: (availability.services || []).slice(0, context.channel === "phone" ? 8 : 30),
+      availableProfessionals: (availability.professionals || []).slice(0, context.channel === "phone" ? 10 : 50),
       warning: availability.warning || "",
     };
   }
