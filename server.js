@@ -5462,9 +5462,12 @@ function bookingFollowupConfig(config = {}) {
   };
 }
 
-function bookingFollowupCustomerWhere(send, { includeSelf = true, followup = null } = {}) {
+function bookingFollowupCustomerWhere(send, { includeSelf = true, followup = null, includeOrphanPhoneMatches = true } = {}) {
   const phone = normalizeE164Phone(send?.phone || send?.lead?.phone || "");
-  const customerFilters = [send?.leadId ? { leadId: send.leadId } : null, phone ? { phone } : null].filter(Boolean);
+  const customerFilters = [
+    send?.leadId ? { leadId: send.leadId } : null,
+    phone ? { phone, ...(includeOrphanPhoneMatches || !send?.leadId ? {} : { leadId: { not: null } }) } : null,
+  ].filter(Boolean);
   if (!send?.businessProfileId || !customerFilters.length) return null;
   const where = {
     businessProfileId: send.businessProfileId,
@@ -5478,7 +5481,7 @@ function bookingFollowupCustomerWhere(send, { includeSelf = true, followup = nul
 }
 
 async function bookingFollowupCustomerAttemptCount(send, followup) {
-  const where = bookingFollowupCustomerWhere(send, { followup });
+  const where = bookingFollowupCustomerWhere(send, { followup, includeOrphanPhoneMatches: false });
   if (!where) return Number(send?.followupAttempts || 0);
   const result = await prisma.bookingLinkSend.aggregate({
     where,
@@ -13021,6 +13024,204 @@ function leadWhereForProfile(profile) {
   };
 }
 
+function crmPhoneValues(...values) {
+  const phones = new Set();
+  for (const value of values) {
+    const raw = String(value || "").trim();
+    const normalized = normalizeE164Phone(raw);
+    if (raw) phones.add(raw);
+    if (normalized) phones.add(normalized);
+  }
+  return Array.from(phones);
+}
+
+function idInFilter(field, values) {
+  const ids = Array.from(new Set((values || []).map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0)));
+  return ids.length ? { [field]: { in: ids } } : null;
+}
+
+function valueInFilter(field, values) {
+  const items = Array.from(new Set((values || []).map((value) => String(value || "").trim()).filter(Boolean)));
+  return items.length ? { [field]: { in: items } } : null;
+}
+
+function scopedOrWhere(scope, filters) {
+  const or = (filters || []).filter(Boolean);
+  return or.length ? { ...scope, OR: or } : null;
+}
+
+async function cleanupLeadPhoneRecords({ profile, lead }) {
+  const initialPhones = crmPhoneValues(lead.phone);
+  const baseLeadFilters = [{ id: lead.id }];
+  if (initialPhones.length) baseLeadFilters.push({ phone: { in: initialPhones } });
+  return prisma.$transaction(async (tx) => {
+    const leads = await tx.lead.findMany({
+      where: { AND: [leadWhereForProfile(profile), { OR: baseLeadFilters }] },
+      select: { id: true, phone: true, voiceCallId: true },
+    });
+    const leadIds = Array.from(new Set([lead.id, ...leads.map((item) => item.id)]));
+    const phoneValues = crmPhoneValues(...initialPhones, ...leads.map((item) => item.phone));
+    const leadFilter = idInFilter("leadId", leadIds);
+    const phoneFilter = valueInFilter("phone", phoneValues);
+    const fromPhoneFilter = valueInFilter("fromPhone", phoneValues);
+    const toPhoneFilter = valueInFilter("toPhone", phoneValues);
+    const deliveryPhoneFilter = valueInFilter("toPhone", phoneValues);
+    const toNumberFilter = valueInFilter("toNumber", phoneValues);
+    const fromNumberFilter = valueInFilter("fromNumber", phoneValues);
+    const appointmentPhoneFilter = valueInFilter("phone", phoneValues);
+    const voiceCallIds = new Set(leads.map((item) => item.voiceCallId).filter(Boolean));
+    const bookingLinkIds = new Set();
+    const bookingAppointmentIds = new Set();
+    const internalAppointmentIds = new Set();
+    const feedbackIds = new Set();
+
+    const directCallWhere = scopedOrWhere(
+      { businessProfileId: profile.id },
+      [fromNumberFilter, toNumberFilter, idInFilter("id", Array.from(voiceCallIds))],
+    );
+    if (directCallWhere) {
+      const calls = await tx.voiceCall.findMany({ where: directCallWhere, select: { id: true } });
+      calls.forEach((item) => voiceCallIds.add(item.id));
+    }
+    const voiceCallFilter = idInFilter("voiceCallId", Array.from(voiceCallIds));
+
+    const sendWhere = scopedOrWhere({ businessProfileId: profile.id }, [leadFilter, phoneFilter, voiceCallFilter]);
+    let bookingSendIds = [];
+    if (sendWhere) {
+      const sends = await tx.bookingLinkSend.findMany({
+        where: sendWhere,
+        select: {
+          id: true,
+          bookingLinkId: true,
+          bookingAppointmentId: true,
+          matchedAppointmentId: true,
+          voiceCallId: true,
+        },
+      });
+      bookingSendIds = sends.map((item) => item.id);
+      sends.forEach((item) => {
+        if (item.bookingLinkId) bookingLinkIds.add(item.bookingLinkId);
+        if (item.bookingAppointmentId) bookingAppointmentIds.add(item.bookingAppointmentId);
+        if (item.matchedAppointmentId) bookingAppointmentIds.add(item.matchedAppointmentId);
+        if (item.voiceCallId) voiceCallIds.add(item.voiceCallId);
+      });
+    }
+
+    const clickWhere = scopedOrWhere(
+      { businessProfileId: profile.id },
+      [leadFilter, phoneFilter, idInFilter("bookingLinkSendId", bookingSendIds)],
+    );
+    let bookingClickIds = [];
+    if (clickWhere) {
+      const clicks = await tx.bookingLinkClick.findMany({ where: clickWhere, select: { id: true, bookingLinkId: true } });
+      bookingClickIds = clicks.map((item) => item.id);
+      clicks.forEach((item) => {
+        if (item.bookingLinkId) bookingLinkIds.add(item.bookingLinkId);
+      });
+    }
+
+    const bookingAppointmentWhere = scopedOrWhere(
+      { businessProfileId: profile.id },
+      [leadFilter, appointmentPhoneFilter, idInFilter("id", Array.from(bookingAppointmentIds))],
+    );
+    if (bookingAppointmentWhere) {
+      const appointments = await tx.bookingAppointment.findMany({ where: bookingAppointmentWhere, select: { id: true } });
+      appointments.forEach((item) => bookingAppointmentIds.add(item.id));
+    }
+
+    const internalAppointmentWhere = scopedOrWhere(
+      { businessName: profile.businessName, website: profile.website },
+      [appointmentPhoneFilter],
+    );
+    if (internalAppointmentWhere) {
+      const appointments = await tx.appointment.findMany({ where: internalAppointmentWhere, select: { id: true } });
+      appointments.forEach((item) => internalAppointmentIds.add(item.id));
+    }
+
+    const feedbackWhere = scopedOrWhere(
+      { businessProfileId: profile.id },
+      [
+        leadFilter,
+        phoneFilter,
+        idInFilter("voiceCallId", Array.from(voiceCallIds)),
+        idInFilter("appointmentId", Array.from(internalAppointmentIds)),
+      ],
+    );
+    if (feedbackWhere) {
+      const feedback = await tx.customerFeedback.findMany({ where: feedbackWhere, select: { id: true, voiceCallId: true } });
+      feedback.forEach((item) => {
+        feedbackIds.add(item.id);
+        if (item.voiceCallId) voiceCallIds.add(item.voiceCallId);
+      });
+    }
+
+    const deliveryWhere = scopedOrWhere(
+      { businessProfileId: profile.id },
+      [
+        leadFilter,
+        deliveryPhoneFilter,
+        idInFilter("voiceCallId", Array.from(voiceCallIds)),
+        idInFilter("appointmentId", Array.from(internalAppointmentIds)),
+        idInFilter("customerFeedbackId", Array.from(feedbackIds)),
+      ],
+    );
+    const inboundWhere = scopedOrWhere(
+      { businessProfileId: profile.id },
+      [
+        leadFilter,
+        fromPhoneFilter,
+        toPhoneFilter,
+        idInFilter("voiceCallId", Array.from(voiceCallIds)),
+        idInFilter("appointmentId", Array.from(internalAppointmentIds)),
+      ],
+    );
+    const transferWhere = scopedOrWhere(
+      { businessName: profile.businessName, website: profile.website },
+      [phoneFilter],
+    );
+
+    const counts = {};
+    const store = (key, result) => {
+      counts[key] = Number(result?.count || 0);
+    };
+    if (bookingClickIds.length) store("bookingLinkClicks", await tx.bookingLinkClick.deleteMany({ where: { id: { in: bookingClickIds } } }));
+    if (bookingSendIds.length) store("bookingLinkSends", await tx.bookingLinkSend.deleteMany({ where: { id: { in: bookingSendIds } } }));
+    if (bookingAppointmentIds.size) {
+      store("bookingAppointments", await tx.bookingAppointment.deleteMany({ where: { id: { in: Array.from(bookingAppointmentIds) } } }));
+    }
+    if (deliveryWhere) store("messageDeliveries", await tx.messageDelivery.deleteMany({ where: deliveryWhere }));
+    if (inboundWhere) store("inboundMessages", await tx.messageInbound.deleteMany({ where: inboundWhere }));
+    if (feedbackIds.size) store("feedback", await tx.customerFeedback.deleteMany({ where: { id: { in: Array.from(feedbackIds) } } }));
+    store("leadWebhookEvents", await tx.leadWebhookEvent.deleteMany({ where: { businessProfileId: profile.id, leadId: { in: leadIds } } }));
+    store("qualificationCalls", await tx.outboundQualificationCall.deleteMany({
+      where: { OR: [idInFilter("leadId", leadIds), idInFilter("voiceCallId", Array.from(voiceCallIds))].filter(Boolean) },
+    }));
+    if (transferWhere) store("transferMessages", await tx.transferMessage.deleteMany({ where: transferWhere }));
+    if (internalAppointmentIds.size) store("appointments", await tx.appointment.deleteMany({ where: { id: { in: Array.from(internalAppointmentIds) } } }));
+    store("leads", await tx.lead.deleteMany({ where: { id: { in: leadIds } } }));
+    if (voiceCallIds.size) {
+      store("voiceCalls", await tx.voiceCall.deleteMany({ where: { id: { in: Array.from(voiceCallIds) }, businessProfileId: profile.id } }));
+    }
+
+    for (const bookingLinkId of bookingLinkIds) {
+      const aggregate = await tx.bookingLinkClick.aggregate({
+        where: { bookingLinkId },
+        _count: { _all: true },
+        _max: { createdAt: true },
+      });
+      await tx.bookingLink.update({
+        where: { id: bookingLinkId },
+        data: {
+          clickCount: aggregate._count._all,
+          lastClickedAt: aggregate._max.createdAt || null,
+        },
+      }).catch(() => null);
+    }
+
+    return { phoneValues, leadIds, counts };
+  });
+}
+
 function issueLeadWebhookToken() {
   return `lead_${crypto.randomBytes(24).toString("base64url")}`;
 }
@@ -14498,8 +14699,8 @@ app.delete("/api/business-admin/crm/:id", async (req, res) => {
       select: { id: true, name: true, phone: true },
     });
     if (!existing) throw new Error("CRM lead was not found for this business");
-    await prisma.lead.delete({ where: { id: existing.id } });
-    res.json({ ok: true, lead: existing });
+    const cleanup = await cleanupLeadPhoneRecords({ profile, lead: existing });
+    res.json({ ok: true, lead: existing, cleanup });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }

@@ -2787,16 +2787,19 @@ async function saveCrmLead(card) {
 
 async function deleteCrmLead(card) {
   const name = card.querySelector(".crm-row-name")?.value.trim() || "this lead";
-  const confirmed = window.confirm(`Remove ${name} from CRM? This is mainly for testing and cannot be undone.`);
+  const phone = card.querySelector(".crm-row-phone")?.value.trim();
+  const detail = phone ? ` and all CRM/test records for ${phone}` : "";
+  const confirmed = window.confirm(`Remove ${name}${detail}? This cannot be undone.`);
   if (!confirmed) return;
   setAdminStatus("Removing lead");
-  await apiJson(`/api/business-admin/crm/${card.dataset.id}`, {
+  const result = await apiJson(`/api/business-admin/crm/${card.dataset.id}`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(adminIdentity()),
   });
   await loadCrm();
-  setAdminStatus("Lead removed");
+  const removed = Object.values(result.cleanup?.counts || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+  setAdminStatus(removed ? `Lead records removed (${removed})` : "Lead removed");
 }
 
 async function startQualificationCall(card) {
