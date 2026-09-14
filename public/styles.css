@@ -2917,6 +2917,7 @@ dd {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
 }
 
 .booking-node-eyebrow {
@@ -2994,8 +2995,9 @@ dd {
 }
 
 .booking-delay-control {
-  grid-template-columns: auto 78px auto;
+  grid-template-columns: auto minmax(70px, 78px) auto;
   align-items: center;
+  min-width: 0;
   white-space: nowrap;
 }
 
@@ -3006,6 +3008,8 @@ dd {
 
 .booking-delay-control input,
 .booking-window-control input {
+  width: 100%;
+  min-width: 0;
   min-height: 38px;
   padding: 7px 9px;
   font-size: 0.95rem;
