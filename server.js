@@ -5440,12 +5440,14 @@ function bookingLinkSendTrackingUrl({ settings, req = null, token }) {
 }
 
 function bookingFollowupConfig(config = {}) {
+  const maxMessages = Number(config.bookingFollowupMaxMessages ?? 2);
   return {
     enabled: config.bookingFollowupEnabled !== false,
     matchWindowHours: Math.max(1, Number(config.bookingFollowupMatchWindowHours ?? 48)),
     notClickedDelayMinutes: Math.max(1, Number(config.bookingFollowupNotClickedDelayMinutes ?? 30)),
     clickedDelayMinutes: Math.max(1, Number(config.bookingFollowupClickedDelayMinutes ?? 120)),
     finalDelayMinutes: Math.max(1, Number(config.bookingFollowupFinalDelayMinutes ?? 1440)),
+    maxMessages: Math.max(0, Math.round(Number.isFinite(maxMessages) ? maxMessages : 2)),
     notClickedTemplate: String(
       config.bookingFollowupNotClickedTemplate ||
         "Hi {{customer_name}}, here is the booking link for {{business_name}}: {{booking_link}}",
@@ -5458,6 +5460,55 @@ function bookingFollowupConfig(config = {}) {
       config.bookingFollowupFinalTemplate || "Just checking in from {{business_name}}. You can still book here: {{booking_link}}",
     ),
   };
+}
+
+function bookingFollowupCustomerWhere(send, { includeSelf = true, followup = null } = {}) {
+  const phone = normalizeE164Phone(send?.phone || send?.lead?.phone || "");
+  const customerFilters = [send?.leadId ? { leadId: send.leadId } : null, phone ? { phone } : null].filter(Boolean);
+  if (!send?.businessProfileId || !customerFilters.length) return null;
+  const where = {
+    businessProfileId: send.businessProfileId,
+    OR: customerFilters,
+  };
+  if (!includeSelf && send?.id) where.id = { not: send.id };
+  if (followup?.matchWindowHours) {
+    where.sentAt = { gte: new Date(Date.now() - followup.matchWindowHours * 60 * 60 * 1000) };
+  }
+  return where;
+}
+
+async function bookingFollowupCustomerAttemptCount(send, followup) {
+  const where = bookingFollowupCustomerWhere(send, { followup });
+  if (!where) return Number(send?.followupAttempts || 0);
+  const result = await prisma.bookingLinkSend.aggregate({
+    where,
+    _sum: { followupAttempts: true },
+  });
+  return Number(result?._sum?.followupAttempts || 0);
+}
+
+function bookingFollowupLimitReached(send, followup, customerAttemptCount = null) {
+  const maxMessages = Number(followup?.maxMessages ?? 2);
+  if (maxMessages <= 0) return true;
+  if (Number(send?.followupAttempts || 0) >= maxMessages) return true;
+  return customerAttemptCount !== null && Number(customerAttemptCount || 0) >= maxMessages;
+}
+
+async function stopOtherActiveBookingFollowupsForCustomer(send) {
+  const where = bookingFollowupCustomerWhere(send, { includeSelf: false });
+  if (!where) return { count: 0 };
+  return prisma.bookingLinkSend.updateMany({
+    where: {
+      ...where,
+      bookedAt: null,
+      followupState: "active",
+      status: { in: ["sent", "clicked"] },
+    },
+    data: {
+      followupState: "stopped",
+      nextFollowupAt: null,
+    },
+  });
 }
 
 function datePlusMinutes(baseDate, minutes) {
@@ -6433,6 +6484,14 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
   const requestedTime = String(args.requestedTime || args.start || "").trim();
   const followup = bookingFollowupConfig(config);
   const now = new Date();
+  const customerFollowupIdentity = {
+    businessProfileId: profile.id,
+    leadId: lead?.id || null,
+    phone: toPhone,
+  };
+  await stopOtherActiveBookingFollowupsForCustomer(customerFollowupIdentity);
+  const priorFollowupCount = await bookingFollowupCustomerAttemptCount(customerFollowupIdentity, followup);
+  const followupEnabled = followup.enabled && followup.maxMessages > priorFollowupCount;
   const message = [
     `${profile.businessName} booking link: ${trackedUrl}`,
     serviceText ? `Service: ${serviceText}` : "",
@@ -6487,8 +6546,8 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
       destinationUrl: link.url,
       trackedUrl,
       sentAt: now,
-      followupState: followup.enabled ? "active" : "stopped",
-      nextFollowupAt: followup.enabled ? nextAllowedFollowupTextAt(datePlusMinutes(now, followup.notClickedDelayMinutes), config) : null,
+      followupState: followupEnabled ? "active" : "stopped",
+      nextFollowupAt: followupEnabled ? nextAllowedFollowupTextAt(datePlusMinutes(now, followup.notClickedDelayMinutes), config) : null,
       metadata: {
         provider: connection.provider,
         bookingAppointmentId: appointment.id,
@@ -7565,10 +7624,27 @@ async function processBookingFollowupQueue() {
       }
       const config = profile.config || (await ensureBusinessConfig(profile));
       const followup = bookingFollowupConfig(config);
-      if (!followup.enabled || send.status === "booked" || send.bookedAt) {
+      if (!followup.enabled || followup.maxMessages <= 0 || send.status === "booked" || send.bookedAt) {
         await prisma.bookingLinkSend.update({
           where: { id: send.id },
           data: { followupState: send.bookedAt ? "completed" : "stopped", nextFollowupAt: null },
+        });
+        continue;
+      }
+      const customerFollowupCount = await bookingFollowupCustomerAttemptCount(send, followup);
+      if (bookingFollowupLimitReached(send, followup, customerFollowupCount)) {
+        await prisma.bookingLinkSend.update({
+          where: { id: send.id },
+          data: {
+            followupState: "completed",
+            nextFollowupAt: null,
+            metadata: {
+              ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+              followupStoppedReason: "max_followup_limit_reached",
+              followupMaxMessages: followup.maxMessages,
+              followupCustomerAttemptCount: customerFollowupCount,
+            },
+          },
         });
         continue;
       }
@@ -7671,7 +7747,11 @@ async function processBookingFollowupQueue() {
             trackedUrl,
           },
         });
-        const nextFollowupAt = bookingFollowupNextAt(send, config, step, new Date());
+        const followupAttemptsAfterSend = Number(send.followupAttempts || 0) + 1;
+        const customerFollowupCountAfterSend = customerFollowupCount + 1;
+        const hasRemainingFollowups =
+          followupAttemptsAfterSend < followup.maxMessages && customerFollowupCountAfterSend < followup.maxMessages;
+        const nextFollowupAt = hasRemainingFollowups ? bookingFollowupNextAt(send, config, step, new Date()) : null;
         await prisma.bookingLinkSend.update({
           where: { id: send.id },
           data: {
@@ -7685,6 +7765,8 @@ async function processBookingFollowupQueue() {
               lastFollowupStep: step,
               lastFollowupDeliveryId: delivery.delivery.id,
               lastFollowupProvider: delivery.provider,
+              followupMaxMessages: followup.maxMessages,
+              followupCustomerAttemptCount: customerFollowupCountAfterSend,
             },
           },
         });
@@ -12098,8 +12180,21 @@ app.get("/book/t/:token", async (req, res) => {
       .findUnique({ where: { businessProfileId: send.businessProfileId } })
       .catch(() => null);
     const followup = bookingFollowupConfig(config || {});
+    const customerFollowupCount = await bookingFollowupCustomerAttemptCount(send, followup);
+    const followupLimitReached = bookingFollowupLimitReached(send, followup, customerFollowupCount);
     const shouldKeepFollowing =
-      followup.enabled && !send.bookedAt && send.followupState === "active" && !["booked", "stopped", "failed"].includes(send.status);
+      followup.enabled &&
+      !followupLimitReached &&
+      !send.bookedAt &&
+      send.followupState === "active" &&
+      !["booked", "stopped", "failed"].includes(send.status);
+    const nextFollowupState = shouldKeepFollowing
+      ? send.followupState
+      : send.followupState === "active" && followup.enabled && followup.maxMessages > 0
+        ? "completed"
+        : send.followupState === "active"
+          ? "stopped"
+          : send.followupState;
     await prisma.bookingLinkSend.update({
       where: { id: send.id },
       data: {
@@ -12107,16 +12202,25 @@ app.get("/book/t/:token", async (req, res) => {
         firstClickedAt: send.firstClickedAt || now,
         lastClickedAt: now,
         clickCount: { increment: 1 },
+        followupState: nextFollowupState,
         nextFollowupAt: shouldKeepFollowing
           ? nextAllowedFollowupTextAt(datePlusMinutes(now, followup.clickedDelayMinutes), config || {})
-          : send.nextFollowupAt,
+          : null,
         metadata: {
           ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
           lastClickAt: now.toISOString(),
           lastClickReferrer: String(req.get("referer") || ""),
+          ...(followupLimitReached
+            ? {
+                followupStoppedReason: "max_followup_limit_reached",
+                followupMaxMessages: followup.maxMessages,
+                followupCustomerAttemptCount: customerFollowupCount,
+              }
+            : {}),
         },
       },
     });
+    await stopOtherActiveBookingFollowupsForCustomer(send);
     await prisma.bookingLink.update({
       where: { id: send.bookingLinkId },
       data: { clickCount: { increment: 1 }, lastClickedAt: now },
@@ -12336,6 +12440,10 @@ app.put("/api/business-admin/config", async (req, res) => {
           1,
           Number(req.body.bookingFollowupMatchWindowHours ?? config.bookingFollowupMatchWindowHours ?? 48),
         ),
+        bookingFollowupMaxMessages: (() => {
+          const parsed = Number(req.body.bookingFollowupMaxMessages ?? config.bookingFollowupMaxMessages ?? 2);
+          return Math.max(0, Math.round(Number.isFinite(parsed) ? parsed : 2));
+        })(),
         bookingFollowupNotClickedDelayMinutes: Math.max(
           1,
           Number(req.body.bookingFollowupNotClickedDelayMinutes ?? config.bookingFollowupNotClickedDelayMinutes ?? 30),

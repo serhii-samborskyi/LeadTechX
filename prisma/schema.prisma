@@ -117,6 +117,7 @@ model BusinessConfig {
   bookingFollowupNotClickedDelayMinutes Int                      @default(30)
   bookingFollowupClickedDelayMinutes    Int                      @default(120)
   bookingFollowupFinalDelayMinutes      Int                      @default(1440)
+  bookingFollowupMaxMessages            Int                      @default(2)
   bookingFollowupNotClickedTemplate     String                   @default("Hi {{customer_name}}, here is the booking link for {{business_name}}: {{booking_link}}")
   bookingFollowupClickedTemplate        String                   @default("Hi {{customer_name}}, were you able to find a time that works? You can book here: {{booking_link}}")
   bookingFollowupFinalTemplate          String                   @default("Just checking in from {{business_name}}. You can still book here: {{booking_link}}")

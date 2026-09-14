@@ -148,6 +148,7 @@ const el = {
   bookingFollowupSection: document.querySelector(".booking-followup-section"),
   bookingFollowupEnabled: document.querySelector("#bookingFollowupEnabled"),
   bookingFollowupMatchWindowHours: document.querySelector("#bookingFollowupMatchWindowHours"),
+  bookingFollowupMaxMessages: document.querySelector("#bookingFollowupMaxMessages"),
   bookingFollowupNotClickedDelayMinutes: document.querySelector("#bookingFollowupNotClickedDelayMinutes"),
   bookingFollowupClickedDelayMinutes: document.querySelector("#bookingFollowupClickedDelayMinutes"),
   bookingFollowupFinalDelayMinutes: document.querySelector("#bookingFollowupFinalDelayMinutes"),
@@ -1576,6 +1577,7 @@ function applyAdminData(data) {
   el.leadWebhookDedupeWindowHours.value = data.config.leadWebhookDedupeWindowHours ?? 24;
   if (el.bookingFollowupEnabled) el.bookingFollowupEnabled.checked = data.config.bookingFollowupEnabled !== false;
   if (el.bookingFollowupMatchWindowHours) el.bookingFollowupMatchWindowHours.value = data.config.bookingFollowupMatchWindowHours ?? 48;
+  if (el.bookingFollowupMaxMessages) el.bookingFollowupMaxMessages.value = data.config.bookingFollowupMaxMessages ?? 2;
   if (el.bookingFollowupNotClickedDelayMinutes) {
     el.bookingFollowupNotClickedDelayMinutes.value = data.config.bookingFollowupNotClickedDelayMinutes ?? 30;
   }
@@ -1695,6 +1697,7 @@ async function saveBusinessConfig() {
     leadWebhookDedupeWindowHours: Number(el.leadWebhookDedupeWindowHours.value || 0),
     bookingFollowupEnabled: el.bookingFollowupEnabled ? el.bookingFollowupEnabled.checked : true,
     bookingFollowupMatchWindowHours: Number(el.bookingFollowupMatchWindowHours?.value || 48),
+    bookingFollowupMaxMessages: Number(el.bookingFollowupMaxMessages?.value ?? 2),
     bookingFollowupNotClickedDelayMinutes: Number(el.bookingFollowupNotClickedDelayMinutes?.value || 30),
     bookingFollowupClickedDelayMinutes: Number(el.bookingFollowupClickedDelayMinutes?.value || 120),
     bookingFollowupFinalDelayMinutes: Number(el.bookingFollowupFinalDelayMinutes?.value || 1440),
