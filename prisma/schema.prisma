@@ -136,6 +136,12 @@ model BusinessConfig {
   timezone                              String                   @default("America/Chicago")
   followupTextStartTime                 String                   @default("09:00")
   followupTextEndTime                   String                   @default("20:00")
+  spamProtectionEnabled                 Boolean                  @default(true)
+  spamBlockUnknownCallers               Boolean                  @default(false)
+  spamMaxCallsPerPhonePerHour           Int                      @default(5)
+  spamShortCallThresholdSeconds         Int                      @default(15)
+  spamMaxShortCallsPerPhonePerDay       Int                      @default(3)
+  spamBlockedNumbers                    String                   @default("")
   calendarProvider                      String                   @default("internal")
   providerConfig                        Json?
   voiceName                             String                   @default("Puck")

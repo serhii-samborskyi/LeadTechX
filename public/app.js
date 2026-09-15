@@ -210,6 +210,13 @@ const el = {
   followupTextStartTime: document.querySelector("#followupTextStartTime"),
   followupTextEndTime: document.querySelector("#followupTextEndTime"),
   saveFollowupHoursButton: document.querySelector("#saveFollowupHoursButton"),
+  spamProtectionEnabled: document.querySelector("#spamProtectionEnabled"),
+  spamBlockUnknownCallers: document.querySelector("#spamBlockUnknownCallers"),
+  spamMaxCallsPerPhonePerHour: document.querySelector("#spamMaxCallsPerPhonePerHour"),
+  spamShortCallThresholdSeconds: document.querySelector("#spamShortCallThresholdSeconds"),
+  spamMaxShortCallsPerPhonePerDay: document.querySelector("#spamMaxShortCallsPerPhonePerDay"),
+  spamBlockedNumbers: document.querySelector("#spamBlockedNumbers"),
+  saveSpamSettingsButton: document.querySelector("#saveSpamSettingsButton"),
   calendarServiceFilter: document.querySelector("#calendarServiceFilter"),
   calendarProfessionalFilter: document.querySelector("#calendarProfessionalFilter"),
   availabilityRules: document.querySelector("#availabilityRules"),
@@ -1616,6 +1623,12 @@ function applyAdminData(data) {
   el.calendarTimezone.value = data.config.timezone;
   if (el.followupTextStartTime) el.followupTextStartTime.value = data.config.followupTextStartTime || "09:00";
   if (el.followupTextEndTime) el.followupTextEndTime.value = data.config.followupTextEndTime || "20:00";
+  if (el.spamProtectionEnabled) el.spamProtectionEnabled.checked = data.config.spamProtectionEnabled !== false;
+  if (el.spamBlockUnknownCallers) el.spamBlockUnknownCallers.checked = Boolean(data.config.spamBlockUnknownCallers);
+  if (el.spamMaxCallsPerPhonePerHour) el.spamMaxCallsPerPhonePerHour.value = data.config.spamMaxCallsPerPhonePerHour ?? 5;
+  if (el.spamShortCallThresholdSeconds) el.spamShortCallThresholdSeconds.value = data.config.spamShortCallThresholdSeconds ?? 15;
+  if (el.spamMaxShortCallsPerPhonePerDay) el.spamMaxShortCallsPerPhonePerDay.value = data.config.spamMaxShortCallsPerPhonePerDay ?? 3;
+  if (el.spamBlockedNumbers) el.spamBlockedNumbers.value = data.config.spamBlockedNumbers || "";
   if (state.crmDateRange !== "custom") setCrmDateRange(state.crmDateRange, false);
   if (el.calendarProvider) el.calendarProvider.value = data.config.calendarProvider || "internal";
   renderIntakeFields(data.config.intakeFields);
@@ -1719,6 +1732,12 @@ async function saveBusinessConfig() {
     timezone: el.calendarTimezone.value.trim() || "America/Chicago",
     followupTextStartTime: el.followupTextStartTime?.value || "09:00",
     followupTextEndTime: el.followupTextEndTime?.value || "20:00",
+    spamProtectionEnabled: el.spamProtectionEnabled ? el.spamProtectionEnabled.checked : true,
+    spamBlockUnknownCallers: el.spamBlockUnknownCallers ? el.spamBlockUnknownCallers.checked : false,
+    spamMaxCallsPerPhonePerHour: Number(el.spamMaxCallsPerPhonePerHour?.value || 0),
+    spamShortCallThresholdSeconds: Number(el.spamShortCallThresholdSeconds?.value || 0),
+    spamMaxShortCallsPerPhonePerDay: Number(el.spamMaxShortCallsPerPhonePerDay?.value || 0),
+    spamBlockedNumbers: el.spamBlockedNumbers?.value || "",
     voiceName: el.voiceName.value,
     language: el.language.value,
     agentName: el.agentName.value.trim() || "Alex",
@@ -3881,6 +3900,7 @@ el.importPricesButton.addEventListener("click", () => {
 
 el.saveInstructionsButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.saveFollowupHoursButton?.addEventListener("click", () => runAdmin(saveBusinessConfig));
+el.saveSpamSettingsButton?.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.addReviewLinkButton.addEventListener("click", () => runAdmin(addReviewLink));
 el.reviewLinkList.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");

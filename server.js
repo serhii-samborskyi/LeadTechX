@@ -3949,6 +3949,101 @@ function phoneFromBlueBubblesChatGuid(value) {
   return normalizeE164Phone(candidate);
 }
 
+function cleanSpamInteger(value, fallback, min = 0, max = 100000) {
+  const parsed = Number(value);
+  const normalized = Number.isFinite(parsed) ? Math.round(parsed) : fallback;
+  return Math.min(max, Math.max(min, normalized));
+}
+
+function spamProtectionSettings(config = {}) {
+  return {
+    enabled: config.spamProtectionEnabled !== false,
+    blockUnknownCallers: Boolean(config.spamBlockUnknownCallers),
+    maxCallsPerPhonePerHour: cleanSpamInteger(config.spamMaxCallsPerPhonePerHour, 5, 0, 500),
+    shortCallThresholdSeconds: cleanSpamInteger(config.spamShortCallThresholdSeconds, 15, 0, 3600),
+    maxShortCallsPerPhonePerDay: cleanSpamInteger(config.spamMaxShortCallsPerPhonePerDay, 3, 0, 500),
+    blockedNumbers: String(config.spamBlockedNumbers || ""),
+  };
+}
+
+function callerLooksUnknown(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return true;
+  if (["anonymous", "private", "restricted", "unknown", "unavailable"].some((word) => raw.includes(word))) return true;
+  return !/^\+?\d[\d\s().-]{6,}$/.test(raw);
+}
+
+function spamBlockedPhoneSet(value) {
+  return new Set(
+    String(value || "")
+      .split(/[\n,]+/)
+      .map((entry) => normalizeE164Phone(entry) || String(entry || "").trim())
+      .filter(Boolean),
+  );
+}
+
+async function evaluateIncomingCallSpam({ profile, config, fromNumber }) {
+  const settings = spamProtectionSettings(config);
+  const reasons = [];
+  const normalizedPhone = normalizeE164Phone(fromNumber);
+  const phoneCandidates = Array.from(new Set([normalizedPhone, String(fromNumber || "").trim()].filter(Boolean)));
+  if (!settings.enabled || !profile?.id) return { action: "allow", reasons, settings };
+
+  if (settings.blockUnknownCallers && callerLooksUnknown(fromNumber)) {
+    reasons.push("unknown_caller");
+  }
+
+  const blockedNumbers = spamBlockedPhoneSet(settings.blockedNumbers);
+  if (normalizedPhone && blockedNumbers.has(normalizedPhone)) reasons.push("blocked_number");
+  if (!normalizedPhone && blockedNumbers.has(String(fromNumber || "").trim())) reasons.push("blocked_number");
+
+  if (phoneCandidates.length && settings.maxCallsPerPhonePerHour > 0) {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const hourlyCallCount = await prisma.voiceCall.count({
+      where: {
+        businessProfileId: profile.id,
+        fromNumber: { in: phoneCandidates },
+        callMode: "business",
+        startedAt: { gte: oneHourAgo },
+      },
+    });
+    if (hourlyCallCount > settings.maxCallsPerPhonePerHour) reasons.push("too_many_calls_per_hour");
+  }
+
+  if (phoneCandidates.length && settings.shortCallThresholdSeconds > 0 && settings.maxShortCallsPerPhonePerDay > 0) {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recentCalls = await prisma.voiceCall.findMany({
+      where: {
+        businessProfileId: profile.id,
+        fromNumber: { in: phoneCandidates },
+        callMode: "business",
+        endedAt: { gte: oneDayAgo },
+      },
+      select: { startedAt: true, answeredAt: true, endedAt: true, status: true, hangupCause: true },
+      orderBy: { endedAt: "desc" },
+      take: Math.max(settings.maxShortCallsPerPhonePerDay + 5, 20),
+    });
+    const shortCallCount = recentCalls.filter((call) => {
+      if (call.status === "blocked" || call.hangupCause === "spam_protection") return false;
+      const seconds = callDurationSeconds(call);
+      return seconds > 0 && seconds <= settings.shortCallThresholdSeconds;
+    }).length;
+    if (shortCallCount >= settings.maxShortCallsPerPhonePerDay) reasons.push("too_many_short_calls");
+  }
+
+  return {
+    action: reasons.length ? "block" : "allow",
+    reasons,
+    settings: {
+      enabled: settings.enabled,
+      blockUnknownCallers: settings.blockUnknownCallers,
+      maxCallsPerPhonePerHour: settings.maxCallsPerPhonePerHour,
+      shortCallThresholdSeconds: settings.shortCallThresholdSeconds,
+      maxShortCallsPerPhonePerDay: settings.maxShortCallsPerPhonePerDay,
+    },
+  };
+}
+
 function blueBubblesAttemptLog(attempt = {}) {
   return {
     index: Number.isFinite(Number(attempt.index)) ? Number(attempt.index) : 0,
@@ -10402,6 +10497,40 @@ app.post("/webhooks/telnyx", async (req, res) => {
         },
         update: { status: "initiated", callMode: isOnboarding ? "onboarding" : "business" },
       });
+      if (inboundBusiness) {
+        const inboundConfig = await ensureBusinessConfig(inboundBusiness);
+        const spamDecision = await evaluateIncomingCallSpam({
+          profile: inboundBusiness,
+          config: inboundConfig,
+          fromNumber: payload.from,
+        });
+        if (spamDecision.action === "block") {
+          await prisma.voiceCall.update({
+            where: { id: voiceCall.id },
+            data: {
+              status: "blocked",
+              hangupCause: "spam_protection",
+              healthFlags: {
+                ...((voiceCall.healthFlags && typeof voiceCall.healthFlags === "object" && !Array.isArray(voiceCall.healthFlags)
+                  ? voiceCall.healthFlags
+                  : {}) || {}),
+                spamProtection: spamDecision,
+              },
+            },
+          });
+          await logVoiceCallEvent(payload.call_control_id, "spam.blocked", {
+            from: payload.from,
+            to: payload.to,
+            businessProfileId: inboundBusiness.id,
+            ...spamDecision,
+          });
+          await telnyxRequest(`/calls/${encodeURIComponent(payload.call_control_id)}/actions/hangup`, {
+            method: "POST",
+            body: JSON.stringify({ command_id: crypto.randomUUID() }),
+          });
+          return res.json({ ok: true, action: "spam_blocked", reasons: spamDecision.reasons });
+        }
+      }
       if (isOnboarding) {
         const settings = await getSettings();
         await prisma.onboardingSession.upsert({
@@ -12493,6 +12622,29 @@ app.put("/api/business-admin/config", async (req, res) => {
         timezone: normalizeTimezone(req.body.timezone || config.timezone || "America/Chicago"),
         followupTextStartTime: normalizeClockTime(req.body.followupTextStartTime ?? config.followupTextStartTime, "09:00"),
         followupTextEndTime: normalizeClockTime(req.body.followupTextEndTime ?? config.followupTextEndTime, "20:00"),
+        spamProtectionEnabled:
+          req.body.spamProtectionEnabled === undefined ? config.spamProtectionEnabled !== false : Boolean(req.body.spamProtectionEnabled),
+        spamBlockUnknownCallers:
+          req.body.spamBlockUnknownCallers === undefined ? Boolean(config.spamBlockUnknownCallers) : Boolean(req.body.spamBlockUnknownCallers),
+        spamMaxCallsPerPhonePerHour: cleanSpamInteger(
+          req.body.spamMaxCallsPerPhonePerHour ?? config.spamMaxCallsPerPhonePerHour,
+          5,
+          0,
+          500,
+        ),
+        spamShortCallThresholdSeconds: cleanSpamInteger(
+          req.body.spamShortCallThresholdSeconds ?? config.spamShortCallThresholdSeconds,
+          15,
+          0,
+          3600,
+        ),
+        spamMaxShortCallsPerPhonePerDay: cleanSpamInteger(
+          req.body.spamMaxShortCallsPerPhonePerDay ?? config.spamMaxShortCallsPerPhonePerDay,
+          3,
+          0,
+          500,
+        ),
+        spamBlockedNumbers: String(req.body.spamBlockedNumbers ?? config.spamBlockedNumbers ?? "").slice(0, 5000),
         voiceName: String(req.body.voiceName || config.voiceName || "Puck"),
         language: String(req.body.language || config.language || "English"),
         agentName: String(req.body.agentName || config.agentName || "Alex"),

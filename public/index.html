@@ -175,6 +175,22 @@
             <button id="saveFollowupHoursButton" class="primary action-button" type="button">Save follow-up hours</button>
           </section>
 
+          <section class="admin-view" data-view="setup">
+            <div class="admin-view-heading">
+              <h3>Spam protection</h3>
+              <p>Block repeat spam callers before the receptionist answers, so obvious abuse does not start an AI call session. Use 0 to disable a numeric rule.</p>
+            </div>
+            <div class="form-grid">
+              <label class="check-label"><input id="spamProtectionEnabled" type="checkbox" /> Enable spam protection</label>
+              <label class="check-label"><input id="spamBlockUnknownCallers" type="checkbox" /> Block private or unknown callers</label>
+              <label>Max calls per number per hour<input id="spamMaxCallsPerPhonePerHour" type="number" min="0" step="1" /></label>
+              <label>Short-call threshold seconds<input id="spamShortCallThresholdSeconds" type="number" min="0" step="1" /></label>
+              <label>Max short calls per number per day<input id="spamMaxShortCallsPerPhonePerDay" type="number" min="0" step="1" /></label>
+              <label class="wide-field">Blocked numbers<textarea id="spamBlockedNumbers" rows="4" placeholder="+15551234567&#10;+15557654321"></textarea></label>
+            </div>
+            <button id="saveSpamSettingsButton" class="primary action-button" type="button">Save spam settings</button>
+          </section>
+
           <section class="admin-view" data-view="content">
             <div class="admin-view-heading">
               <h3>Questions to ask</h3>
