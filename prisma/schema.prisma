@@ -138,6 +138,7 @@ model BusinessConfig {
   followupTextEndTime                   String                   @default("20:00")
   spamProtectionEnabled                 Boolean                  @default(true)
   spamBlockUnknownCallers               Boolean                  @default(false)
+  spamBlockTollFreeCallers              Boolean                  @default(false)
   spamMaxCallsPerPhonePerHour           Int                      @default(5)
   spamShortCallThresholdSeconds         Int                      @default(15)
   spamMaxShortCallsPerPhonePerDay       Int                      @default(3)

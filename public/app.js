@@ -212,6 +212,7 @@ const el = {
   saveFollowupHoursButton: document.querySelector("#saveFollowupHoursButton"),
   spamProtectionEnabled: document.querySelector("#spamProtectionEnabled"),
   spamBlockUnknownCallers: document.querySelector("#spamBlockUnknownCallers"),
+  spamBlockTollFreeCallers: document.querySelector("#spamBlockTollFreeCallers"),
   spamMaxCallsPerPhonePerHour: document.querySelector("#spamMaxCallsPerPhonePerHour"),
   spamShortCallThresholdSeconds: document.querySelector("#spamShortCallThresholdSeconds"),
   spamMaxShortCallsPerPhonePerDay: document.querySelector("#spamMaxShortCallsPerPhonePerDay"),
@@ -1625,6 +1626,7 @@ function applyAdminData(data) {
   if (el.followupTextEndTime) el.followupTextEndTime.value = data.config.followupTextEndTime || "20:00";
   if (el.spamProtectionEnabled) el.spamProtectionEnabled.checked = data.config.spamProtectionEnabled !== false;
   if (el.spamBlockUnknownCallers) el.spamBlockUnknownCallers.checked = Boolean(data.config.spamBlockUnknownCallers);
+  if (el.spamBlockTollFreeCallers) el.spamBlockTollFreeCallers.checked = Boolean(data.config.spamBlockTollFreeCallers);
   if (el.spamMaxCallsPerPhonePerHour) el.spamMaxCallsPerPhonePerHour.value = data.config.spamMaxCallsPerPhonePerHour ?? 5;
   if (el.spamShortCallThresholdSeconds) el.spamShortCallThresholdSeconds.value = data.config.spamShortCallThresholdSeconds ?? 15;
   if (el.spamMaxShortCallsPerPhonePerDay) el.spamMaxShortCallsPerPhonePerDay.value = data.config.spamMaxShortCallsPerPhonePerDay ?? 3;
@@ -1734,6 +1736,7 @@ async function saveBusinessConfig() {
     followupTextEndTime: el.followupTextEndTime?.value || "20:00",
     spamProtectionEnabled: el.spamProtectionEnabled ? el.spamProtectionEnabled.checked : true,
     spamBlockUnknownCallers: el.spamBlockUnknownCallers ? el.spamBlockUnknownCallers.checked : false,
+    spamBlockTollFreeCallers: el.spamBlockTollFreeCallers ? el.spamBlockTollFreeCallers.checked : false,
     spamMaxCallsPerPhonePerHour: Number(el.spamMaxCallsPerPhonePerHour?.value || 0),
     spamShortCallThresholdSeconds: Number(el.spamShortCallThresholdSeconds?.value || 0),
     spamMaxShortCallsPerPhonePerDay: Number(el.spamMaxShortCallsPerPhonePerDay?.value || 0),

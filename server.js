@@ -3955,10 +3955,13 @@ function cleanSpamInteger(value, fallback, min = 0, max = 100000) {
   return Math.min(max, Math.max(min, normalized));
 }
 
+const NANP_TOLL_FREE_PREFIXES = new Set(["800", "888", "877", "866", "855", "844", "833"]);
+
 function spamProtectionSettings(config = {}) {
   return {
     enabled: config.spamProtectionEnabled !== false,
     blockUnknownCallers: Boolean(config.spamBlockUnknownCallers),
+    blockTollFreeCallers: Boolean(config.spamBlockTollFreeCallers),
     maxCallsPerPhonePerHour: cleanSpamInteger(config.spamMaxCallsPerPhonePerHour, 5, 0, 500),
     shortCallThresholdSeconds: cleanSpamInteger(config.spamShortCallThresholdSeconds, 15, 0, 3600),
     maxShortCallsPerPhonePerDay: cleanSpamInteger(config.spamMaxShortCallsPerPhonePerDay, 3, 0, 500),
@@ -3971,6 +3974,12 @@ function callerLooksUnknown(value) {
   if (!raw) return true;
   if (["anonymous", "private", "restricted", "unknown", "unavailable"].some((word) => raw.includes(word))) return true;
   return !/^\+?\d[\d\s().-]{6,}$/.test(raw);
+}
+
+function callerIsNanpTollFree(value) {
+  const digits = normalizeE164Phone(value).replace(/\D/g, "");
+  const nationalNumber = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits.length === 10 ? digits : "";
+  return nationalNumber.length === 10 && NANP_TOLL_FREE_PREFIXES.has(nationalNumber.slice(0, 3));
 }
 
 function spamBlockedPhoneSet(value) {
@@ -3991,6 +4000,9 @@ async function evaluateIncomingCallSpam({ profile, config, fromNumber }) {
 
   if (settings.blockUnknownCallers && callerLooksUnknown(fromNumber)) {
     reasons.push("unknown_caller");
+  }
+  if (settings.blockTollFreeCallers && callerIsNanpTollFree(fromNumber)) {
+    reasons.push("toll_free_caller");
   }
 
   const blockedNumbers = spamBlockedPhoneSet(settings.blockedNumbers);
@@ -4037,6 +4049,7 @@ async function evaluateIncomingCallSpam({ profile, config, fromNumber }) {
     settings: {
       enabled: settings.enabled,
       blockUnknownCallers: settings.blockUnknownCallers,
+      blockTollFreeCallers: settings.blockTollFreeCallers,
       maxCallsPerPhonePerHour: settings.maxCallsPerPhonePerHour,
       shortCallThresholdSeconds: settings.shortCallThresholdSeconds,
       maxShortCallsPerPhonePerDay: settings.maxShortCallsPerPhonePerDay,
@@ -12626,6 +12639,10 @@ app.put("/api/business-admin/config", async (req, res) => {
           req.body.spamProtectionEnabled === undefined ? config.spamProtectionEnabled !== false : Boolean(req.body.spamProtectionEnabled),
         spamBlockUnknownCallers:
           req.body.spamBlockUnknownCallers === undefined ? Boolean(config.spamBlockUnknownCallers) : Boolean(req.body.spamBlockUnknownCallers),
+        spamBlockTollFreeCallers:
+          req.body.spamBlockTollFreeCallers === undefined
+            ? Boolean(config.spamBlockTollFreeCallers)
+            : Boolean(req.body.spamBlockTollFreeCallers),
         spamMaxCallsPerPhonePerHour: cleanSpamInteger(
           req.body.spamMaxCallsPerPhonePerHour ?? config.spamMaxCallsPerPhonePerHour,
           5,
