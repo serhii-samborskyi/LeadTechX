@@ -6679,13 +6679,14 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
   await stopOtherActiveBookingFollowupsForCustomer(customerFollowupIdentity);
   const priorFollowupCount = await bookingFollowupCustomerAttemptCount(customerFollowupIdentity, followup);
   const followupEnabled = followup.enabled && followup.maxMessages > priorFollowupCount;
-  const message = [
-    `${profile.businessName} booking link: ${trackedUrl}`,
+  const introMessage = [
+    `${profile.businessName} booking info:`,
     serviceText ? `Service: ${serviceText}` : "",
     professionalText ? `Professional: ${professionalText}` : "",
     requestedTime ? `Requested time: ${requestedTime}` : "",
-    "Use the link to choose and confirm your appointment.",
+    "The booking link is coming in the next text.",
   ].filter(Boolean).join("\n");
+  const linkMessage = trackedUrl;
   const appointment = await prisma.bookingAppointment.create({
     data: {
       businessProfileId: profile.id,
@@ -6762,17 +6763,28 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
     professional: professionalText,
     requestedTime,
   };
-  let delivery = null;
+  let introDelivery = null;
+  let linkDelivery = null;
   try {
-    delivery = await deliverBusinessMessage({
+    introDelivery = await deliverBusinessMessage({
       settings,
       profile,
       toPhone,
-      message,
+      message: introMessage,
       purpose: "booking_link",
       leadId: lead?.id || null,
       voiceCallId,
-      metadata: deliveryMetadata,
+      metadata: { ...deliveryMetadata, messagePart: "intro" },
+    });
+    linkDelivery = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone,
+      message: linkMessage,
+      purpose: "booking_link",
+      leadId: lead?.id || null,
+      voiceCallId,
+      metadata: { ...deliveryMetadata, messagePart: "link" },
     });
     await prisma.bookingLinkSend.update({
       where: { id: send.id },
@@ -6780,15 +6792,27 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
         status: "sent",
         metadata: {
           ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
-          messageDeliveryId: delivery.delivery.id,
-          deliveryProvider: delivery.provider,
+          introMessageDeliveryId: introDelivery.delivery.id,
+          linkMessageDeliveryId: linkDelivery.delivery.id,
+          messageDeliveryId: linkDelivery.delivery.id,
+          deliveryProvider: linkDelivery.provider,
         },
       },
     });
   } catch (error) {
     await prisma.bookingLinkSend.update({
       where: { id: send.id },
-      data: { status: "failed", followupState: "stopped", nextFollowupAt: null, metadata: { ...deliveryMetadata, error: error.message } },
+      data: {
+        status: "failed",
+        followupState: "stopped",
+        nextFollowupAt: null,
+        metadata: {
+          ...deliveryMetadata,
+          introMessageDeliveryId: introDelivery?.delivery?.id || null,
+          linkMessageDeliveryId: linkDelivery?.delivery?.id || null,
+          error: error.message,
+        },
+      },
     });
     throw error;
   }
