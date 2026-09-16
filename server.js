@@ -405,6 +405,33 @@ function issueToken() {
   return { token, tokenHash: sessionTokenHash(token) };
 }
 
+const BOOKING_SHORT_CODE_PATTERN = /^BK[A-Z0-9]{4,12}$/;
+const BOOKING_SHORT_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+function randomBookingShortCode() {
+  let suffix = "";
+  for (let index = 0; index < 6; index += 1) {
+    suffix += BOOKING_SHORT_CODE_ALPHABET[crypto.randomInt(BOOKING_SHORT_CODE_ALPHABET.length)];
+  }
+  return `BK${suffix}`;
+}
+
+async function bookingShortCodeExists(shortCode) {
+  const [link, send] = await Promise.all([
+    prisma.bookingLink.findUnique({ where: { shortCode }, select: { id: true } }),
+    prisma.bookingLinkSend.findUnique({ where: { shortCode }, select: { id: true } }),
+  ]);
+  return Boolean(link || send);
+}
+
+async function generateBookingShortCode() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const shortCode = randomBookingShortCode();
+    if (!(await bookingShortCodeExists(shortCode))) return shortCode;
+  }
+  throw new Error("Could not generate a unique booking short link");
+}
+
 function setSessionCookie(req, res, token) {
   const secure = req.secure || req.headers["x-forwarded-proto"] === "https";
   res.setHeader(
@@ -5537,12 +5564,19 @@ function bookingBaseUrl(settings, req = null) {
   return "http://localhost:3000";
 }
 
+function bookingShortTrackingUrl({ settings, req = null, shortCode }) {
+  const url = new URL(`/${encodeURIComponent(shortCode)}`, bookingBaseUrl(settings, req));
+  return url.toString();
+}
+
 function bookingLinkTrackingUrl({ settings, req = null, link }) {
+  if (link.shortCode) return bookingShortTrackingUrl({ settings, req, shortCode: link.shortCode });
   const url = new URL(`/book/${encodeURIComponent(link.clickToken)}`, bookingBaseUrl(settings, req));
   return url.toString();
 }
 
-function bookingLinkSendTrackingUrl({ settings, req = null, token }) {
+function bookingLinkSendTrackingUrl({ settings, req = null, token, shortCode = "" }) {
+  if (shortCode) return bookingShortTrackingUrl({ settings, req, shortCode });
   const url = new URL(`/book/t/${encodeURIComponent(token)}`, bookingBaseUrl(settings, req));
   return url.toString();
 }
@@ -5804,22 +5838,40 @@ async function bookingDataForProfile(profile, settings = null, req = null) {
     url.searchParams.set("token", decryptOptional(activeConnection.webhookSecretEncrypted));
     webhookUrl = url.toString();
   }
+  const linksWithShortCodes = [];
+  for (const link of links) linksWithShortCodes.push(await ensureBookingLinkShortCode(link));
   return {
     connections: connections.map(safeBookingConnection),
     activeConnection: safeBookingConnection(activeConnection),
     services,
     professionals,
-    links: links.map((link) => ({ ...link, trackingUrl: bookingLinkTrackingUrl({ settings: activeSettings, req, link }) })),
+    links: linksWithShortCodes.map((link) => ({ ...link, trackingUrl: bookingLinkTrackingUrl({ settings: activeSettings, req, link }) })),
     webhookEvents,
     webhookUrl,
     baseWebhookUrl,
   };
 }
 
+async function ensureBookingLinkShortCode(link) {
+  if (link?.shortCode) return link;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      return await prisma.bookingLink.update({
+        where: { id: link.id },
+        data: { shortCode: await generateBookingShortCode() },
+      });
+    } catch (error) {
+      if (error.code !== "P2002") throw error;
+    }
+  }
+  throw new Error("Could not assign a short code to the booking link");
+}
+
 async function ensureBookingLinkForConnection(connection, { label = "", url = "", serviceId = null, professionalId = null, sortOrder = 0 } = {}) {
   const safeUrl = String(url || "").trim();
   if (!/^https?:\/\//i.test(safeUrl)) throw new Error("Booking link URL must start with http:// or https://");
   const clickToken = issueToken().token;
+  const shortCode = await generateBookingShortCode();
   return prisma.bookingLink.create({
     data: {
       businessProfileId: connection.businessProfileId,
@@ -5835,6 +5887,7 @@ async function ensureBookingLinkForConnection(connection, { label = "", url = ""
         : null,
       sortOrder: Number(sortOrder || 0),
       clickToken,
+      shortCode,
     },
   });
 }
@@ -5849,10 +5902,12 @@ async function ensureGeneralBookingLinkForConnection(connection, { label = "", u
   });
   const linkLabel = String(label || existingLink?.label || "Book online").trim() || "Book online";
   const link = existingLink
-    ? await prisma.bookingLink.update({
-        where: { id: existingLink.id },
-        data: { label: linkLabel, url: safeUrl, active: true, sortOrder: Number(sortOrder || existingLink.sortOrder || 0) },
-      })
+    ? await ensureBookingLinkShortCode(
+        await prisma.bookingLink.update({
+          where: { id: existingLink.id },
+          data: { label: linkLabel, url: safeUrl, active: true, sortOrder: Number(sortOrder || existingLink.sortOrder || 0) },
+        }),
+      )
     : await ensureBookingLinkForConnection(connection, { label: linkLabel, url: safeUrl, sortOrder });
   await prisma.bookingLink.updateMany({
     where: {
@@ -6589,7 +6644,8 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
   if (!toPhone) throw new Error("A caller phone number is required before sending a booking link");
   const customerName = usableCallerName(args.name || args.customerName || lead?.name) || "Customer";
   const clickToken = issueToken().token;
-  const trackedUrl = bookingLinkSendTrackingUrl({ settings, token: clickToken });
+  const shortCode = await generateBookingShortCode();
+  const trackedUrl = bookingLinkSendTrackingUrl({ settings, token: clickToken, shortCode });
   const serviceText = service?.name || args.serviceName || "";
   const professionalText = professional?.displayName || args.professionalName || "";
   const requestedTime = String(args.requestedTime || args.start || "").trim();
@@ -6634,6 +6690,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
         requestedTime,
         linkId: link.id,
         clickToken,
+        shortCode,
         directUrl: link.url,
         trackedUrl,
       },
@@ -6656,6 +6713,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
       requestedTime: requestedTime || null,
       destinationUrl: link.url,
       trackedUrl,
+      shortCode,
       sentAt: now,
       followupState: followupEnabled ? "active" : "stopped",
       nextFollowupAt: followupEnabled ? nextAllowedFollowupTextAt(datePlusMinutes(now, followup.notClickedDelayMinutes), config) : null,
@@ -7825,7 +7883,7 @@ async function processBookingFollowupQueue() {
         });
         continue;
       }
-      const trackedUrl = send.trackedUrl || bookingLinkSendTrackingUrl({ settings, token: send.clickToken });
+      const trackedUrl = send.trackedUrl || bookingLinkSendTrackingUrl({ settings, token: send.clickToken, shortCode: send.shortCode || "" });
       const message = templateText(bookingFollowupTemplate(config, step), {
         business_name: profile.businessName,
         customer_name: send.customerName || send.lead?.name || "there",
@@ -12313,98 +12371,122 @@ app.delete("/api/business-admin/booking-links/:id", async (req, res) => {
   }
 });
 
+async function redirectBookingLinkSend(req, res, send) {
+  if (!send || !send.bookingLink || !send.bookingLink.active) return res.status(404).send("Booking link is unavailable");
+  const now = new Date();
+  const config = await prisma.businessConfig
+    .findUnique({ where: { businessProfileId: send.businessProfileId } })
+    .catch(() => null);
+  const followup = bookingFollowupConfig(config || {});
+  const customerFollowupCount = await bookingFollowupCustomerAttemptCount(send, followup);
+  const followupLimitReached = bookingFollowupLimitReached(send, followup, customerFollowupCount);
+  const shouldKeepFollowing =
+    followup.enabled &&
+    !followupLimitReached &&
+    !send.bookedAt &&
+    send.followupState === "active" &&
+    !["booked", "stopped", "failed"].includes(send.status);
+  const nextFollowupState = shouldKeepFollowing
+    ? send.followupState
+    : send.followupState === "active" && followup.enabled && followup.maxMessages > 0
+      ? "completed"
+      : send.followupState === "active"
+        ? "stopped"
+        : send.followupState;
+  await prisma.bookingLinkSend.update({
+    where: { id: send.id },
+    data: {
+      status: send.status === "booked" ? "booked" : "clicked",
+      firstClickedAt: send.firstClickedAt || now,
+      lastClickedAt: now,
+      clickCount: { increment: 1 },
+      followupState: nextFollowupState,
+      nextFollowupAt: shouldKeepFollowing
+        ? nextAllowedFollowupTextAt(datePlusMinutes(now, followup.clickedDelayMinutes), config || {})
+        : null,
+      metadata: {
+        ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+        lastClickAt: now.toISOString(),
+        lastClickReferrer: String(req.get("referer") || ""),
+        ...(followupLimitReached
+          ? {
+              followupStoppedReason: "max_followup_limit_reached",
+              followupMaxMessages: followup.maxMessages,
+              followupCustomerAttemptCount: customerFollowupCount,
+            }
+          : {}),
+      },
+    },
+  });
+  await stopOtherActiveBookingFollowupsForCustomer(send);
+  await prisma.bookingLink.update({
+    where: { id: send.bookingLinkId },
+    data: { clickCount: { increment: 1 }, lastClickedAt: now },
+  });
+  await prisma.bookingLinkClick.create({
+    data: {
+      businessProfileId: send.businessProfileId,
+      bookingLinkId: send.bookingLinkId,
+      bookingLinkSendId: send.id,
+      leadId: send.leadId,
+      phone: send.phone,
+      clickToken: send.clickToken,
+      sourceUrl: req.originalUrl,
+      referrer: String(req.get("referer") || ""),
+      ipAddress: adRequestIp(req),
+      userAgent: String(req.get("user-agent") || ""),
+      queryParams: jsonSafe(req.query || {}),
+    },
+  });
+  if (send.leadId) {
+    await prisma.lead.update({
+      where: { id: send.leadId },
+      data: {
+        extractedFields: {
+          ...(send.lead?.extractedFields && typeof send.lead.extractedFields === "object" ? send.lead.extractedFields : {}),
+          latestBookingLink: {
+            ...((send.lead?.extractedFields?.latestBookingLink &&
+              typeof send.lead.extractedFields.latestBookingLink === "object" &&
+              send.lead.extractedFields.latestBookingLink) ||
+              {}),
+            bookingLinkSendId: send.id,
+            clickedAt: now.toISOString(),
+            clickCount: Number(send.clickCount || 0) + 1,
+          },
+        },
+      },
+    });
+  }
+  return res.redirect(bookingDestinationUrl(send) || send.bookingLink.url);
+}
+
+async function redirectBookingLink(req, res, link) {
+  if (!link || !link.active) return res.status(404).send("Booking link is unavailable");
+  await prisma.bookingLink.update({
+    where: { id: link.id },
+    data: { clickCount: { increment: 1 }, lastClickedAt: new Date() },
+  });
+  await prisma.bookingLinkClick.create({
+    data: {
+      businessProfileId: link.businessProfileId,
+      bookingLinkId: link.id,
+      sourceUrl: req.originalUrl,
+      referrer: String(req.get("referer") || ""),
+      ipAddress: adRequestIp(req),
+      userAgent: String(req.get("user-agent") || ""),
+      queryParams: jsonSafe(req.query || {}),
+    },
+  });
+  return res.redirect(link.url);
+}
+
 app.get("/book/t/:token", async (req, res) => {
   try {
     const send = await prisma.bookingLinkSend.findUnique({
       where: { clickToken: req.params.token },
       include: { bookingLink: true, lead: true },
     });
-    if (!send || !send.bookingLink || !send.bookingLink.active) return res.status(404).send("Booking link is unavailable");
-    const now = new Date();
-    const config = await prisma.businessConfig
-      .findUnique({ where: { businessProfileId: send.businessProfileId } })
-      .catch(() => null);
-    const followup = bookingFollowupConfig(config || {});
-    const customerFollowupCount = await bookingFollowupCustomerAttemptCount(send, followup);
-    const followupLimitReached = bookingFollowupLimitReached(send, followup, customerFollowupCount);
-    const shouldKeepFollowing =
-      followup.enabled &&
-      !followupLimitReached &&
-      !send.bookedAt &&
-      send.followupState === "active" &&
-      !["booked", "stopped", "failed"].includes(send.status);
-    const nextFollowupState = shouldKeepFollowing
-      ? send.followupState
-      : send.followupState === "active" && followup.enabled && followup.maxMessages > 0
-        ? "completed"
-        : send.followupState === "active"
-          ? "stopped"
-          : send.followupState;
-    await prisma.bookingLinkSend.update({
-      where: { id: send.id },
-      data: {
-        status: send.status === "booked" ? "booked" : "clicked",
-        firstClickedAt: send.firstClickedAt || now,
-        lastClickedAt: now,
-        clickCount: { increment: 1 },
-        followupState: nextFollowupState,
-        nextFollowupAt: shouldKeepFollowing
-          ? nextAllowedFollowupTextAt(datePlusMinutes(now, followup.clickedDelayMinutes), config || {})
-          : null,
-        metadata: {
-          ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
-          lastClickAt: now.toISOString(),
-          lastClickReferrer: String(req.get("referer") || ""),
-          ...(followupLimitReached
-            ? {
-                followupStoppedReason: "max_followup_limit_reached",
-                followupMaxMessages: followup.maxMessages,
-                followupCustomerAttemptCount: customerFollowupCount,
-              }
-            : {}),
-        },
-      },
-    });
-    await stopOtherActiveBookingFollowupsForCustomer(send);
-    await prisma.bookingLink.update({
-      where: { id: send.bookingLinkId },
-      data: { clickCount: { increment: 1 }, lastClickedAt: now },
-    });
-    await prisma.bookingLinkClick.create({
-      data: {
-        businessProfileId: send.businessProfileId,
-        bookingLinkId: send.bookingLinkId,
-        bookingLinkSendId: send.id,
-        leadId: send.leadId,
-        phone: send.phone,
-        clickToken: send.clickToken,
-        sourceUrl: req.originalUrl,
-        referrer: String(req.get("referer") || ""),
-        ipAddress: adRequestIp(req),
-        userAgent: String(req.get("user-agent") || ""),
-        queryParams: jsonSafe(req.query || {}),
-      },
-    });
-    if (send.leadId) {
-      await prisma.lead.update({
-        where: { id: send.leadId },
-        data: {
-          extractedFields: {
-            ...(send.lead?.extractedFields && typeof send.lead.extractedFields === "object" ? send.lead.extractedFields : {}),
-            latestBookingLink: {
-              ...((send.lead?.extractedFields?.latestBookingLink &&
-                typeof send.lead.extractedFields.latestBookingLink === "object" &&
-                send.lead.extractedFields.latestBookingLink) ||
-                {}),
-              bookingLinkSendId: send.id,
-              clickedAt: now.toISOString(),
-              clickCount: Number(send.clickCount || 0) + 1,
-            },
-          },
-        },
-      });
-    }
-    res.redirect(bookingDestinationUrl(send) || send.bookingLink.url);
+    return redirectBookingLinkSend(req, res, send);
   } catch (error) {
     res.status(400).send(error.message);
   }
@@ -12416,23 +12498,26 @@ app.get("/book/:token", async (req, res) => {
       where: { clickToken: req.params.token },
       include: { businessProfile: true },
     });
-    if (!link || !link.active) return res.status(404).send("Booking link is unavailable");
-    await prisma.bookingLink.update({
-      where: { id: link.id },
-      data: { clickCount: { increment: 1 }, lastClickedAt: new Date() },
+    return redirectBookingLink(req, res, link);
+  } catch (error) {
+    res.status(400).send(error.message);
+  }
+});
+
+app.get("/:shortCode", async (req, res, next) => {
+  const shortCode = String(req.params.shortCode || "").trim().toUpperCase();
+  if (!BOOKING_SHORT_CODE_PATTERN.test(shortCode)) return next();
+  try {
+    const send = await prisma.bookingLinkSend.findUnique({
+      where: { shortCode },
+      include: { bookingLink: true, lead: true },
     });
-    await prisma.bookingLinkClick.create({
-      data: {
-        businessProfileId: link.businessProfileId,
-        bookingLinkId: link.id,
-        sourceUrl: req.originalUrl,
-        referrer: String(req.get("referer") || ""),
-        ipAddress: adRequestIp(req),
-        userAgent: String(req.get("user-agent") || ""),
-        queryParams: jsonSafe(req.query || {}),
-      },
+    if (send) return redirectBookingLinkSend(req, res, send);
+    const link = await prisma.bookingLink.findUnique({
+      where: { shortCode },
+      include: { businessProfile: true },
     });
-    res.redirect(link.url);
+    return redirectBookingLink(req, res, link);
   } catch (error) {
     res.status(400).send(error.message);
   }

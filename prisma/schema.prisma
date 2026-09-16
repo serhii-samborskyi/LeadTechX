@@ -436,6 +436,7 @@ model BookingLink {
   active                 Boolean              @default(true)
   sortOrder              Int                  @default(0)
   clickToken             String               @unique
+  shortCode              String?              @unique
   clickCount             Int                  @default(0)
   lastClickedAt          DateTime?
   createdAt              DateTime             @default(now())
@@ -462,6 +463,7 @@ model BookingLinkSend {
   matchedAppointmentId Int?
   matchedAppointment   BookingAppointment? @relation("BookingLinkSendMatchedAppointment", fields: [matchedAppointmentId], references: [id], onDelete: SetNull)
   clickToken           String              @unique
+  shortCode            String?             @unique
   status               String              @default("queued")
   customerName         String?
   phone                String?
