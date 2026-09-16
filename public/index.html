@@ -314,8 +314,21 @@
                 <input id="bookingLinkUrl" type="url" placeholder="https://..." />
                 <button id="addBookingLinkButton" type="button">Save general link</button>
               </div>
-              <div class="inline-editor booking-link-editor">
+              <div class="inline-editor booking-link-editor tracking-domain-editor">
                 <input id="bookingTrackingBaseUrl" placeholder="Tracking domain, e.g. https://book.customer.com" />
+                <details class="info-popover">
+                  <summary aria-label="Tracking domain DNS instructions" title="Tracking domain DNS instructions"><i data-lucide="info"></i></summary>
+                  <div class="info-popover-panel">
+                    <strong>DNS record to add</strong>
+                    <p>Create this record in the customer's DNS before using the domain in texts.</p>
+                    <dl>
+                      <div><dt>Type</dt><dd>CNAME</dd></div>
+                      <div><dt>Name</dt><dd>book</dd></div>
+                      <div><dt>Target</dt><dd>ai.ringport.app</dd></div>
+                    </dl>
+                    <p>Then enter <code>https://book.customer.com</code> here. Use a subdomain, not the root domain.</p>
+                  </div>
+                </details>
                 <button id="saveTrackingDomainButton" type="button">Save tracking domain</button>
               </div>
               <small>Point this subdomain to RingPort with a CNAME before using it in customer texts.</small>
