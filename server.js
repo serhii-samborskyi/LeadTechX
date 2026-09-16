@@ -5564,20 +5564,38 @@ function bookingBaseUrl(settings, req = null) {
   return "http://localhost:3000";
 }
 
-function bookingShortTrackingUrl({ settings, req = null, shortCode }) {
-  const url = new URL(`/${encodeURIComponent(shortCode)}`, bookingBaseUrl(settings, req));
+function normalizeBookingTrackingBaseUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const parsed = new URL(withProtocol);
+    if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) return "";
+    return parsed.origin.replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function bookingTrackingBaseUrl({ settings, req = null, config = null } = {}) {
+  const customBaseUrl = normalizeBookingTrackingBaseUrl(config?.bookingTrackingBaseUrl);
+  return customBaseUrl || bookingBaseUrl(settings, req);
+}
+
+function bookingShortTrackingUrl({ settings, req = null, config = null, shortCode }) {
+  const url = new URL(`/${encodeURIComponent(shortCode)}`, bookingTrackingBaseUrl({ settings, req, config }));
   return url.toString();
 }
 
-function bookingLinkTrackingUrl({ settings, req = null, link }) {
-  if (link.shortCode) return bookingShortTrackingUrl({ settings, req, shortCode: link.shortCode });
-  const url = new URL(`/book/${encodeURIComponent(link.clickToken)}`, bookingBaseUrl(settings, req));
+function bookingLinkTrackingUrl({ settings, req = null, config = null, link }) {
+  if (link.shortCode) return bookingShortTrackingUrl({ settings, req, config, shortCode: link.shortCode });
+  const url = new URL(`/book/${encodeURIComponent(link.clickToken)}`, bookingTrackingBaseUrl({ settings, req, config }));
   return url.toString();
 }
 
-function bookingLinkSendTrackingUrl({ settings, req = null, token, shortCode = "" }) {
-  if (shortCode) return bookingShortTrackingUrl({ settings, req, shortCode });
-  const url = new URL(`/book/t/${encodeURIComponent(token)}`, bookingBaseUrl(settings, req));
+function bookingLinkSendTrackingUrl({ settings, req = null, config = null, token, shortCode = "" }) {
+  if (shortCode) return bookingShortTrackingUrl({ settings, req, config, shortCode });
+  const url = new URL(`/book/t/${encodeURIComponent(token)}`, bookingTrackingBaseUrl({ settings, req, config }));
   return url.toString();
 }
 
@@ -5802,6 +5820,7 @@ function maybeVagaroPublicServiceBookingUrl(connection, publicServiceId, sourceV
 
 async function bookingDataForProfile(profile, settings = null, req = null) {
   const activeSettings = settings || (await getSettings());
+  const config = await ensureBusinessConfig(profile);
   const connections = await prisma.bookingConnection.findMany({
     where: { businessProfileId: profile.id },
     orderBy: [{ provider: "asc" }],
@@ -5845,10 +5864,11 @@ async function bookingDataForProfile(profile, settings = null, req = null) {
     activeConnection: safeBookingConnection(activeConnection),
     services,
     professionals,
-    links: linksWithShortCodes.map((link) => ({ ...link, trackingUrl: bookingLinkTrackingUrl({ settings: activeSettings, req, link }) })),
+    links: linksWithShortCodes.map((link) => ({ ...link, trackingUrl: bookingLinkTrackingUrl({ settings: activeSettings, req, config, link }) })),
     webhookEvents,
     webhookUrl,
     baseWebhookUrl,
+    trackingBaseUrl: normalizeBookingTrackingBaseUrl(config.bookingTrackingBaseUrl),
   };
 }
 
@@ -6645,7 +6665,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
   const customerName = usableCallerName(args.name || args.customerName || lead?.name) || "Customer";
   const clickToken = issueToken().token;
   const shortCode = await generateBookingShortCode();
-  const trackedUrl = bookingLinkSendTrackingUrl({ settings, token: clickToken, shortCode });
+  const trackedUrl = bookingLinkSendTrackingUrl({ settings, config, token: clickToken, shortCode });
   const serviceText = service?.name || args.serviceName || "";
   const professionalText = professional?.displayName || args.professionalName || "";
   const requestedTime = String(args.requestedTime || args.start || "").trim();
@@ -7883,7 +7903,8 @@ async function processBookingFollowupQueue() {
         });
         continue;
       }
-      const trackedUrl = send.trackedUrl || bookingLinkSendTrackingUrl({ settings, token: send.clickToken, shortCode: send.shortCode || "" });
+      const trackedUrl =
+        send.trackedUrl || bookingLinkSendTrackingUrl({ settings, config, token: send.clickToken, shortCode: send.shortCode || "" });
       const message = templateText(bookingFollowupTemplate(config, step), {
         business_name: profile.businessName,
         customer_name: send.customerName || send.lead?.name || "there",
@@ -12644,6 +12665,11 @@ app.put("/api/business-admin/config", async (req, res) => {
     if (nextReviewRequestsEnabled && !entitlements.features.smartReviewsEnabled) {
       throw planGateError(`${planFeatureLabel("smartReviewsEnabled")} is not included in this plan. ${featurePlanHint(entitlements)}`);
     }
+    const rawBookingTrackingBaseUrl = req.body.bookingTrackingBaseUrl ?? config.bookingTrackingBaseUrl ?? "";
+    const bookingTrackingBaseUrl = normalizeBookingTrackingBaseUrl(rawBookingTrackingBaseUrl);
+    if (String(rawBookingTrackingBaseUrl || "").trim() && !bookingTrackingBaseUrl) {
+      throw new Error("Tracking domain must be a valid http(s) URL or hostname");
+    }
     await prisma.businessConfig.update({
       where: { id: config.id },
       data: {
@@ -12720,6 +12746,7 @@ app.put("/api/business-admin/config", async (req, res) => {
         timezone: normalizeTimezone(req.body.timezone || config.timezone || "America/Chicago"),
         followupTextStartTime: normalizeClockTime(req.body.followupTextStartTime ?? config.followupTextStartTime, "09:00"),
         followupTextEndTime: normalizeClockTime(req.body.followupTextEndTime ?? config.followupTextEndTime, "20:00"),
+        bookingTrackingBaseUrl,
         spamProtectionEnabled:
           req.body.spamProtectionEnabled === undefined ? config.spamProtectionEnabled !== false : Boolean(req.body.spamProtectionEnabled),
         spamBlockUnknownCallers:

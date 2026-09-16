@@ -195,6 +195,8 @@ const el = {
   vagaroStatus: document.querySelector("#vagaroStatus"),
   bookingLinkLabel: document.querySelector("#bookingLinkLabel"),
   bookingLinkUrl: document.querySelector("#bookingLinkUrl"),
+  bookingTrackingBaseUrl: document.querySelector("#bookingTrackingBaseUrl"),
+  saveTrackingDomainButton: document.querySelector("#saveTrackingDomainButton"),
   bookingLinkService: document.querySelector("#bookingLinkService"),
   bookingLinkProfessional: document.querySelector("#bookingLinkProfessional"),
   bookingLinkSort: document.querySelector("#bookingLinkSort"),
@@ -1331,6 +1333,9 @@ function renderBooking(data = {}) {
   const generalLink = links[0] || null;
   if (el.bookingLinkLabel && document.activeElement !== el.bookingLinkLabel) el.bookingLinkLabel.value = generalLink?.label || "Book online";
   if (el.bookingLinkUrl && document.activeElement !== el.bookingLinkUrl) el.bookingLinkUrl.value = generalLink?.url || connection.bookingUrl || "";
+  if (el.bookingTrackingBaseUrl && document.activeElement !== el.bookingTrackingBaseUrl) {
+    el.bookingTrackingBaseUrl.value = data.trackingBaseUrl || state.admin?.bookingTrackingBaseUrl || "";
+  }
   setSelectOptions(el.calendarServiceFilter, [["", "First available service"], ...services.map((service) => [service.id, bookingServiceLabel(service)])], el.calendarServiceFilter?.value);
   setSelectOptions(
     el.calendarProfessionalFilter,
@@ -1624,6 +1629,9 @@ function applyAdminData(data) {
   el.calendarTimezone.value = data.config.timezone;
   if (el.followupTextStartTime) el.followupTextStartTime.value = data.config.followupTextStartTime || "09:00";
   if (el.followupTextEndTime) el.followupTextEndTime.value = data.config.followupTextEndTime || "20:00";
+  if (el.bookingTrackingBaseUrl && document.activeElement !== el.bookingTrackingBaseUrl) {
+    el.bookingTrackingBaseUrl.value = data.config.bookingTrackingBaseUrl || "";
+  }
   if (el.spamProtectionEnabled) el.spamProtectionEnabled.checked = data.config.spamProtectionEnabled !== false;
   if (el.spamBlockUnknownCallers) el.spamBlockUnknownCallers.checked = Boolean(data.config.spamBlockUnknownCallers);
   if (el.spamBlockTollFreeCallers) el.spamBlockTollFreeCallers.checked = Boolean(data.config.spamBlockTollFreeCallers);
@@ -1734,6 +1742,7 @@ async function saveBusinessConfig() {
     timezone: el.calendarTimezone.value.trim() || "America/Chicago",
     followupTextStartTime: el.followupTextStartTime?.value || "09:00",
     followupTextEndTime: el.followupTextEndTime?.value || "20:00",
+    bookingTrackingBaseUrl: el.bookingTrackingBaseUrl?.value || "",
     spamProtectionEnabled: el.spamProtectionEnabled ? el.spamProtectionEnabled.checked : true,
     spamBlockUnknownCallers: el.spamBlockUnknownCallers ? el.spamBlockUnknownCallers.checked : false,
     spamBlockTollFreeCallers: el.spamBlockTollFreeCallers ? el.spamBlockTollFreeCallers.checked : false,
@@ -3928,6 +3937,12 @@ el.saveVagaroSettingsButton.addEventListener("click", () => runAdmin(saveVagaroS
 el.syncVagaroButton.addEventListener("click", () => runAdmin(syncVagaro));
 el.copyVagaroWebhookButton.addEventListener("click", () => runAdmin(copyVagaroWebhook));
 el.addBookingLinkButton.addEventListener("click", () => runAdmin(addBookingLink));
+el.saveTrackingDomainButton?.addEventListener("click", () =>
+  runAdmin(async () => {
+    await saveBusinessConfig();
+    await loadBooking();
+  }),
+);
 el.bookingServiceList.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action='save-vagaro-service-link']");
   if (!button) return;

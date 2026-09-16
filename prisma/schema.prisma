@@ -143,6 +143,7 @@ model BusinessConfig {
   spamShortCallThresholdSeconds         Int                      @default(15)
   spamMaxShortCallsPerPhonePerDay       Int                      @default(3)
   spamBlockedNumbers                    String                   @default("")
+  bookingTrackingBaseUrl                String                   @default("")
   calendarProvider                      String                   @default("internal")
   providerConfig                        Json?
   voiceName                             String                   @default("Puck")
