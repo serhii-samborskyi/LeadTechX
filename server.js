@@ -3836,19 +3836,31 @@ async function ensureCallLead({ voiceCall, profile, source = "incoming_call" }) 
   const existing = await prisma.lead.findUnique({ where: { voiceCallId: voiceCall.id } }).catch(() => null);
   const extracted = extractLeadFieldsFromTranscript(voiceCall.transcript, { phone: voiceCall.fromNumber || existing?.phone });
   const existingName = usableCallerName(existing?.name);
+  const extractedName = usableCallerName(extracted.name);
+  const phone = normalizeE164Phone(existing?.phone) || normalizeE164Phone(extracted.phone) || normalizeE164Phone(voiceCall.fromNumber) || null;
+  const knownLead =
+    phone && !existingName && !extractedName
+      ? await knownCallerLeadByPhone(profile, phone, { excludeLeadId: existing?.id || null, excludeVoiceCallId: voiceCall.id })
+      : null;
+  const knownName = usableCallerName(knownLead?.name);
+  const previousKnownLead = knownLeadMemory(knownLead);
   const data = {
     businessName: profile.businessName,
     website: profile.website,
     businessProfileId: profile.id,
-    name: existingName || extracted.name || (voiceCall.fromNumber ? `Caller ${voiceCall.fromNumber}` : "Unknown caller"),
-    phone: existing?.phone || voiceCall.fromNumber || null,
+    name: existingName || extractedName || knownName || (phone ? `Caller ${phone}` : "Unknown caller"),
+    phone,
+    email: existing?.email || extracted.email || knownLead?.email || null,
     source,
     status: leadStatusFromExtractedFields(existing?.status, extracted),
     summary: shortCallSummary(voiceCall),
     transcript: voiceCall.transcript || existing?.transcript || null,
     extractedFields: {
       ...(existing?.extractedFields && typeof existing.extractedFields === "object" ? existing.extractedFields : {}),
-      callTranscript: extracted,
+      callTranscript: {
+        ...extracted,
+        ...(previousKnownLead ? { previousKnownLead } : {}),
+      },
     },
   };
   return prisma.lead.upsert({
@@ -3856,6 +3868,37 @@ async function ensureCallLead({ voiceCall, profile, source = "incoming_call" }) 
     create: { ...data, voiceCallId: voiceCall.id },
     update: data,
   });
+}
+
+async function currentCallLeadForContext(profile, context = {}) {
+  if (!context.voiceCallId || !profile) return null;
+  let lead = await prisma.lead.findUnique({ where: { voiceCallId: context.voiceCallId } }).catch(() => null);
+  if (!lead) {
+    const voiceCall = await prisma.voiceCall.findUnique({ where: { id: context.voiceCallId } }).catch(() => null);
+    if (voiceCall) lead = await ensureCallLead({ voiceCall, profile });
+  }
+  if (!lead?.id || usableCallerName(lead.name)) return lead;
+  const phone = normalizeE164Phone(lead.phone) || normalizeE164Phone(context.fromNumber);
+  if (!phone) return lead;
+  const knownLead = await knownCallerLeadByPhone(profile, phone, {
+    excludeLeadId: lead.id,
+    excludeVoiceCallId: context.voiceCallId,
+  });
+  const knownName = usableCallerName(knownLead?.name);
+  if (!knownName) return lead;
+  const previousKnownLead = knownLeadMemory(knownLead);
+  const existingFields = lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {};
+  return prisma.lead.update({
+    where: { id: lead.id },
+    data: {
+      name: knownName,
+      email: lead.email || knownLead.email || null,
+      extractedFields: {
+        ...existingFields,
+        previousKnownLead,
+      },
+    },
+  }).catch(() => lead);
 }
 
 async function appendVoiceCallTranscript({ callId, callControlId, speaker, text, profile }) {
@@ -6952,15 +6995,55 @@ function friendlyKnownName(value) {
   return name;
 }
 
+function knownLeadMemory(lead) {
+  if (!lead?.id) return null;
+  return {
+    leadId: lead.id,
+    name: usableCallerName(lead.name) || lead.name || null,
+    phone: lead.phone || null,
+    email: lead.email || null,
+    need: lead.need || null,
+    status: lead.status || null,
+    updatedAt: lead.updatedAt instanceof Date ? lead.updatedAt.toISOString() : lead.updatedAt || null,
+  };
+}
+
+async function knownCallerLeadByPhone(profile, callerPhone, options = {}) {
+  const phone = normalizeE164Phone(callerPhone);
+  if (!profile?.id || !phone) return null;
+  const excludeLeadId = Number(options.excludeLeadId || 0);
+  const excludeVoiceCallId = Number(options.excludeVoiceCallId || 0);
+  const filters = [leadWhereForProfile(profile), { phone }];
+  if (excludeLeadId) filters.push({ id: { not: excludeLeadId } });
+  if (excludeVoiceCallId) filters.push({ OR: [{ voiceCallId: null }, { voiceCallId: { not: excludeVoiceCallId } }] });
+  const leads = await prisma.lead.findMany({
+    where: { AND: filters },
+    orderBy: [{ updatedAt: "desc" }],
+    take: 50,
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      email: true,
+      need: true,
+      status: true,
+      summary: true,
+      updatedAt: true,
+    },
+  });
+  return leads.find((lead) => usableCallerName(lead.name)) || null;
+}
+
 async function callerHistoryPrompt(profile, callerPhone) {
   const phone = normalizeE164Phone(callerPhone);
   if (!profile?.id || !phone) return "";
-  const [leads, calls, appointments, feedback] = await Promise.all([
+  const [leads, knownLead, calls, appointments, feedback] = await Promise.all([
     prisma.lead.findMany({
       where: { AND: [leadWhereForProfile(profile), { phone }] },
       orderBy: { updatedAt: "desc" },
-      take: 3,
+      take: 10,
     }),
+    knownCallerLeadByPhone(profile, phone),
     prisma.voiceCall.findMany({
       where: { businessProfileId: profile.id, fromNumber: phone, callMode: "business" },
       orderBy: { startedAt: "desc" },
@@ -6978,16 +7061,21 @@ async function callerHistoryPrompt(profile, callerPhone) {
       take: 2,
     }),
   ]);
-  const knownName = friendlyKnownName(leads.find((lead) => friendlyKnownName(lead.name))?.name || appointments.find((item) => friendlyKnownName(item.customerName))?.customerName);
+  const namedLead = leads.find((lead) => friendlyKnownName(lead.name)) || knownLead;
+  const knownName = friendlyKnownName(namedLead?.name || appointments.find((item) => friendlyKnownName(item.customerName))?.customerName);
   const latestLead = leads[0];
+  const memoryLead = namedLead || latestLead;
   const latestAppointment = appointments[0];
   const latestFeedback = feedback[0];
   const parts = [
     `Caller phone: ${phone}.`,
-    knownName ? `Known caller name: ${knownName}. Greet them by first name naturally if it fits.` : "",
+    knownName ? `Known caller name: ${knownName}. Treat this as a returning caller and greet them by first name naturally unless they correct it.` : "",
+    namedLead?.id && latestLead?.id && namedLead.id !== latestLead.id
+      ? `Matched previous named CRM lead: ${namedLead.name}${namedLead.need ? `, need: ${namedLead.need}` : ""}.`
+      : "",
     latestLead?.summary ? `Latest CRM summary: ${latestLead.summary}` : "",
-    latestLead?.need ? `Known need: ${latestLead.need}` : "",
-    latestLead?.status ? `CRM status: ${latestLead.status}` : "",
+    memoryLead?.need ? `Known need: ${memoryLead.need}` : "",
+    memoryLead?.status ? `CRM status: ${memoryLead.status}` : "",
     latestAppointment
       ? `Latest appointment: ${appointmentConfirmationLabel(latestAppointment)} ${latestAppointment.status} ${formatAppointmentTime(latestAppointment)} for ${latestAppointment.reason || "unspecified reason"}.`
       : "",
@@ -8842,9 +8930,7 @@ function qualificationToolDeclarations(config) {
 
 async function runToolCall(profile, config, functionCall, context = {}) {
   const args = functionCall.args || {};
-  const contextLead = context.voiceCallId
-    ? await prisma.lead.findUnique({ where: { voiceCallId: context.voiceCallId } }).catch(() => null)
-    : null;
+  const contextLead = await currentCallLeadForContext(profile, context);
   if (functionCall.name === "get_available_slots") {
     const availability = await listCalendarSlots({
       prisma,
@@ -17085,7 +17171,7 @@ Live session identity and language:
 - Introduce yourself as ${identity.agentName}.
 - Follow the platform-wide language rules above.
 - Caller history available for this phone number: ${callerHistory || "No previous history found."}
-- If caller history includes a known name, you may greet them by first name naturally, but do not pretend to remember facts not listed here.
+- If caller history includes a known name, greet them by first name naturally and treat this as a returning caller, but do not pretend to remember facts not listed here.
 - Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, or asks to disconnect.`;
       const setup = {
         setup: {
