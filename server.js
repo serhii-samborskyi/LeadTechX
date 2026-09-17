@@ -6765,37 +6765,61 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
   };
   let introDelivery = null;
   let linkDelivery = null;
+  let introDeliveryError = null;
+  let firstLinkDeliveryError = null;
   try {
-    introDelivery = await deliverBusinessMessage({
-      settings,
-      profile,
-      toPhone,
-      message: introMessage,
-      purpose: "booking_link",
-      leadId: lead?.id || null,
-      voiceCallId,
-      metadata: { ...deliveryMetadata, messagePart: "intro" },
-    });
-    linkDelivery = await deliverBusinessMessage({
-      settings,
-      profile,
-      toPhone,
-      message: linkMessage,
-      purpose: "booking_link",
-      leadId: lead?.id || null,
-      voiceCallId,
-      metadata: { ...deliveryMetadata, messagePart: "link" },
-    });
+    try {
+      introDelivery = await deliverBusinessMessage({
+        settings,
+        profile,
+        toPhone,
+        message: introMessage,
+        purpose: "booking_link",
+        leadId: lead?.id || null,
+        voiceCallId,
+        metadata: { ...deliveryMetadata, messagePart: "intro" },
+      });
+    } catch (error) {
+      introDeliveryError = error;
+    }
+    await sleep(1200);
+    try {
+      linkDelivery = await deliverBusinessMessage({
+        settings,
+        profile,
+        toPhone,
+        message: linkMessage,
+        purpose: "booking_link",
+        leadId: lead?.id || null,
+        voiceCallId,
+        metadata: { ...deliveryMetadata, messagePart: "link" },
+      });
+    } catch (error) {
+      firstLinkDeliveryError = error;
+      await sleep(2500);
+      linkDelivery = await deliverBusinessMessage({
+        settings,
+        profile,
+        toPhone,
+        message: linkMessage,
+        purpose: "booking_link",
+        leadId: lead?.id || null,
+        voiceCallId,
+        metadata: { ...deliveryMetadata, messagePart: "link", retry: true, retryReason: error.message },
+      });
+    }
     await prisma.bookingLinkSend.update({
       where: { id: send.id },
       data: {
         status: "sent",
         metadata: {
           ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
-          introMessageDeliveryId: introDelivery.delivery.id,
+          introMessageDeliveryId: introDelivery?.delivery?.id || null,
           linkMessageDeliveryId: linkDelivery.delivery.id,
           messageDeliveryId: linkDelivery.delivery.id,
           deliveryProvider: linkDelivery.provider,
+          ...(introDeliveryError ? { introMessageError: introDeliveryError.message } : {}),
+          ...(firstLinkDeliveryError ? { firstLinkMessageError: firstLinkDeliveryError.message } : {}),
         },
       },
     });
@@ -6810,6 +6834,8 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
           ...deliveryMetadata,
           introMessageDeliveryId: introDelivery?.delivery?.id || null,
           linkMessageDeliveryId: linkDelivery?.delivery?.id || null,
+          ...(introDeliveryError ? { introMessageError: introDeliveryError.message } : {}),
+          ...(firstLinkDeliveryError ? { firstLinkMessageError: firstLinkDeliveryError.message } : {}),
           error: error.message,
         },
       },
@@ -6855,7 +6881,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
     trackedUrl,
     service: serviceText,
     professional: professionalText,
-    deliveryProvider: delivery.provider,
+    deliveryProvider: linkDelivery.provider,
     message: "Booking link sent. Customer must confirm the appointment through the external booking system.",
   };
 }
