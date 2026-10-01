@@ -59,6 +59,11 @@ function apiBusinessId(connection) {
   return apiLocation ? value : "";
 }
 
+function connectionMode(connection) {
+  const settings = connection?.settings && typeof connection.settings === "object" ? connection.settings : {};
+  return settings.vagaroMode === "simple" ? "simple" : "api";
+}
+
 function includesText(haystack, needle) {
   const left = String(haystack || "").toLowerCase();
   const right = String(needle || "").toLowerCase().trim();
@@ -349,6 +354,43 @@ export async function listSlots(args) {
   }
   const serviceSelection = serviceCandidates(connection, args);
   const professional = findProfessional(connection, args);
+  if (connectionMode(connection) === "simple") {
+    return {
+      provider: PROVIDER,
+      workflowMode: connection.workflowMode,
+      realtimeAvailability: false,
+      slots: [],
+      appointments,
+      timezone,
+      durationMinutes: Math.max(
+        5,
+        Number(serviceSelection.selectedService?.durationMinutes || args.durationMinutes || config.slotDurationMinutes || 30),
+      ),
+      selectedService: serviceSelection.selectedService
+        ? {
+            id: serviceSelection.selectedService.id,
+            externalId: serviceSelection.selectedService.externalId,
+            name: serviceSelection.selectedService.name,
+            durationMinutes: serviceSelection.selectedService.durationMinutes,
+          }
+        : null,
+      selectedServices: serviceSelection.services.map((item) => ({
+        id: item.id,
+        externalId: item.externalId,
+        name: item.name,
+        durationMinutes: item.durationMinutes,
+      })),
+      selectedProfessional: null,
+      services: connection.services.map((item) => ({
+        id: item.id,
+        externalId: item.externalId,
+        name: item.name,
+        durationMinutes: item.durationMinutes,
+      })),
+      professionals: [],
+      warning: "Live availability is not available in Vagaro Simple mode. Offer to send the Vagaro booking link so the customer can view current openings.",
+    };
+  }
   let slots = [];
   const warnings = [serviceSelection.warning].filter(Boolean);
   if (!serviceSelection.services.length) {

@@ -18,6 +18,10 @@
         <label>Password<input id="loginPassword" type="password" autocomplete="current-password" required /></label>
         <p class="form-error" id="loginError"></p>
         <button class="primary" type="submit"><i data-lucide="log-in"></i> Sign in</button>
+        <div class="auth-signup-cta">
+          <span>New to RingPort?</span>
+          <a href="/fastagent/"><i data-lucide="sparkles"></i> Build a one-click agent</a>
+        </div>
       </form>
     </section>
     <main class="shell auth-content" id="appShell" hidden>
@@ -282,25 +286,33 @@
               </div>
               <div id="vagaroSettingsPanel" class="vagaro-settings-panel" hidden>
                 <div class="form-grid booking-provider-grid">
-                  <label>API client ID<input id="vagaroClientId" autocomplete="off" /></label>
-                  <label>API client secret<input id="vagaroClientSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /></label>
+                  <label>Vagaro mode<select id="vagaroMode"><option value="simple">Simple — business link only</option><option value="api">API — live availability</option></select></label>
                   <label>Vagaro business link<input id="vagaroBusinessUrl" type="url" placeholder="https://www.vagaro.com/shinehairspa" /></label>
                 </div>
-                <details class="booking-provider-advanced" id="vagaroAdvancedSettings">
-                  <summary>Advanced API settings</summary>
+                <small id="vagaroSimpleModeHelp">Simple mode imports the public service list and sends customers to Vagaro to view live availability and book.</small>
+                <div id="vagaroApiSettings">
                   <div class="form-grid booking-provider-grid">
-                    <label>API region<input id="vagaroRegion" autocomplete="off" placeholder="us04" /></label>
-                    <label>Access token scope<input id="vagaroTokenScope" autocomplete="off" placeholder="read access" /></label>
-                    <label>API business location ID<input id="vagaroApiBusinessId" autocomplete="off" placeholder="Encrypted businessId from Vagaro API" /></label>
+                    <label>API client ID<input id="vagaroClientId" autocomplete="off" /></label>
+                    <label>API client secret<input id="vagaroClientSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /></label>
                   </div>
-                  <small>The API business location ID is the encrypted businessId returned by Vagaro's Locations API. Public numeric page IDs will not work.</small>
-                </details>
-                <div class="crm-webhook-controls booking-provider-actions">
-                  <input id="vagaroWebhookUrl" readonly placeholder="Save Vagaro settings to generate webhook URL" />
-                  <button id="copyVagaroWebhookButton" type="button">Copy webhook</button>
+                  <details class="booking-provider-advanced" id="vagaroAdvancedSettings">
+                    <summary>Advanced API settings</summary>
+                    <div class="form-grid booking-provider-grid">
+                      <label>API region<input id="vagaroRegion" autocomplete="off" placeholder="us04" /></label>
+                      <label>Access token scope<input id="vagaroTokenScope" autocomplete="off" placeholder="read access" /></label>
+                      <label>API business location ID<input id="vagaroApiBusinessId" autocomplete="off" placeholder="Encrypted businessId from Vagaro API" /></label>
+                    </div>
+                    <small>The API business location ID is the encrypted businessId returned by Vagaro's Locations API. Public numeric page IDs will not work.</small>
+                  </details>
+                  <div class="crm-webhook-controls booking-provider-actions">
+                    <input id="vagaroWebhookUrl" readonly placeholder="Save Vagaro settings to generate webhook URL" />
+                    <button id="copyVagaroWebhookButton" type="button">Copy webhook</button>
+                  </div>
+                  <small>Copy the webhook URL into Vagaro's webhook settings after saving.</small>
+                </div>
+                <div class="booking-provider-sync-row">
                   <button id="syncVagaroButton" type="button">Sync now</button>
                 </div>
-                <small>Copy the webhook URL into Vagaro's webhook settings after saving.</small>
               </div>
               <small id="vagaroStatus">Vagaro is not connected.</small>
             </div>

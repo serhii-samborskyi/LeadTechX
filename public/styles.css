@@ -968,6 +968,45 @@ body {
   gap: 7px;
 }
 
+.auth-signup-cta {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+  text-align: center;
+}
+
+.auth-signup-cta span {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.auth-signup-cta a {
+  display: inline-flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  color: var(--accent-dark);
+  font-weight: 800;
+  text-decoration: none;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.auth-signup-cta a:hover,
+.auth-signup-cta a:focus-visible {
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  transform: translateY(-1px);
+}
+
+.auth-signup-cta svg {
+  width: 18px;
+  height: 18px;
+}
+
 .form-error {
   min-height: 1.2em;
   color: var(--danger);
@@ -2781,6 +2820,21 @@ dd {
 
 .vagaro-settings-panel[hidden] {
   display: none;
+}
+
+#vagaroApiSettings {
+  display: grid;
+  gap: 14px;
+}
+
+#vagaroApiSettings[hidden],
+#vagaroSimpleModeHelp[hidden] {
+  display: none;
+}
+
+.booking-provider-sync-row {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .booking-provider-advanced {

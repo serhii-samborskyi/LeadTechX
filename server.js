@@ -457,6 +457,7 @@ function publicBusinessProfile(profile, config = null) {
     phone: rawData.phone || "",
     address: rawData.address || "",
     email: rawData.email || "",
+    vagaroBusinessUrl: rawData.vagaroBusinessUrl || "",
     language: profileConfig.language || "English",
     accountStatus: profile.accountStatus,
     trialEndsAt: profile.trialEndsAt,
@@ -5080,6 +5081,17 @@ function normalizedBookingProvider(value) {
   return provider === "vagaro" ? "vagaro" : "internal";
 }
 
+function normalizedVagaroMode(value, fallback = "api") {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode === "simple" || mode === "api") return mode;
+  return fallback === "simple" ? "simple" : "api";
+}
+
+function vagaroConnectionMode(connection) {
+  const settings = connection?.settings && typeof connection.settings === "object" ? connection.settings : {};
+  return normalizedVagaroMode(settings.vagaroMode, "api");
+}
+
 function safeBookingConnection(connection) {
   if (!connection) return null;
   return {
@@ -5291,6 +5303,8 @@ function vagaroPublicInfoFromHtml(html, sourceUrl = "") {
     decodeBasicHtml(firstRegex(decoded, [/<title>([^<]+)<\/title>/i])).replace(/\s*-\s*.*$/i, "").trim();
   const apiRegion = firstRegex(decoded, [/https:\/\/api\.vagaro\.com\/([a-z]{2}\d{2})\/api\/v2\//i]);
   const groupId = firstRegex(decoded, [/"GroupRouteValue"\s*:\s*"([^"]+)"/i, /"GroupId"\s*:\s*"([^"]+)"/i]);
+  const currencyCode = firstRegex(decoded, [/"CurrencyCode"\s*:\s*"([A-Z]{3})"/i]);
+  const currencySymbol = firstRegex(decoded, [/"CurrencySymbol"\s*:\s*"([^"]+)"/i]);
   const shopAddress = decodeUrlText(firstRegex(decoded, [/"ShopAddress"\s*:\s*"([^"]+)"/i]));
   return {
     sourceUrl,
@@ -5301,6 +5315,8 @@ function vagaroPublicInfoFromHtml(html, sourceUrl = "") {
     bookingUrl: canonical || parsedCanonical?.url || sourceUrl || "",
     apiRegion,
     groupId,
+    currencyCode,
+    currencySymbol,
     slug: parsedCanonical?.slug || parseVagaroBusinessUrl(sourceUrl)?.slug || "",
     publicRegion: /^[a-z]{2}\d{2}$/i.test(groupId) ? String(groupId).toLowerCase() : parsedCanonical?.region || "",
     address: shopAddress,
@@ -5314,7 +5330,11 @@ async function fetchVagaroPublicBusinessInfo(value, { timeoutMs = 10000 } = {}) 
   let response;
   try {
     response = await fetch(parsed.url, {
-      headers: { "User-Agent": "RingPort/1.0 booking integration" },
+      headers: {
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+      },
       signal: controller.signal,
     });
     const html = await response.text();
@@ -5330,6 +5350,105 @@ async function fetchVagaroPublicBusinessInfo(value, { timeoutMs = 10000 } = {}) 
       publicRegion: info.publicRegion || parsed.region,
       slug: info.slug || parsed.slug,
     };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isVagaroPublicPolicyEntry(categoryTitle, service = {}) {
+  const category = String(categoryTitle || "").trim().toLowerCase();
+  const title = String(service.ServiceTitle || service.serviceTitle || "").trim().toLowerCase();
+  if (/\b(?:policy|policies)\b/.test(category)) return true;
+  return (
+    !String(service.PriceText || "").trim() &&
+    !String(service.ServiceDesc || "").trim() &&
+    /\b(?:cancellation|cancelation|no[ -]?show)\b.*\bfee\b/.test(title)
+  );
+}
+
+function nullableFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function vagaroPublicServicesFromPayload(payload, { currency = "USD" } = {}) {
+  const categories = Array.isArray(payload?.Services) ? payload.Services : [];
+  const details = Array.isArray(payload?.ServicesData) ? payload.ServicesData : [];
+  const detailById = new Map(details.map((item) => [String(item?.ServiceID || ""), item]));
+  const services = [];
+  let policyEntriesExcluded = 0;
+  for (const category of categories) {
+    const categoryTitle = String(category?.ServiceCategoryTitle || "").trim();
+    for (const item of Array.isArray(category?.ServiceList) ? category.ServiceList : []) {
+      const publicServiceId = String(item?.ServiceID || "").trim();
+      if (!publicServiceId) continue;
+      if (isVagaroPublicPolicyEntry(categoryTitle, item)) {
+        policyEntriesExcluded += 1;
+        continue;
+      }
+      const detail = detailById.get(publicServiceId) || {};
+      const showPrice = item.IsShowPriceOnline !== false || Boolean(String(item.PriceText || "").trim());
+      services.push({
+        serviceId: publicServiceId,
+        publicServiceId,
+        serviceTitle: String(item.ServiceTitle || detail.ServiceTitle || "Vagaro service").trim(),
+        parentServiceTitle: categoryTitle || null,
+        serviceCategory: categoryTitle || null,
+        serviceDescription: String(item.ServiceDesc || detail.ServiceDesc || "").trim() || null,
+        durationMinutes: nullableFiniteNumber(detail.Duration),
+        businessCost: showPrice ? nullableFiniteNumber(item.Price ?? detail.Price) : null,
+        currency: String(currency || "USD").toUpperCase(),
+        type: item.IsPackage ? "package" : "service",
+        isActive: item.ShowOnline !== false,
+        isOnlineBookingActive: item.IsOnlineService !== false,
+        sortOrder: nullableFiniteNumber(item.ServiceOrder) || 0,
+        source: "vagaro_public_page",
+        publicPriceText: String(item.PriceText || "").trim(),
+        publicCategoryId: String(category?.ServiceCategoryID || "").trim() || null,
+        publicService: item,
+        publicServiceDetail: detail,
+      });
+    }
+  }
+  return { services, policyEntriesExcluded };
+}
+
+async function fetchVagaroPublicServices(publicInfo, { timeoutMs = 15000 } = {}) {
+  const businessId = String(publicInfo?.publicNumericBusinessId || "").trim();
+  const groupToken = [publicInfo?.groupId, publicInfo?.publicRegion, publicInfo?.apiRegion]
+    .map((value) => String(value || "").trim().toUpperCase())
+    .find((value) => /^[A-Z]{2}\d{2}$/.test(value)) || "";
+  if (!/^\d+$/.test(businessId)) throw new Error("Vagaro public business ID was not found on the business page");
+  if (!/^[A-Z]{2}\d{2}$/.test(groupToken)) throw new Error("Vagaro public region was not found on the business page");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs || 15000)));
+  try {
+    const response = await fetch("https://www.vagaro.com/websiteapi/homepage/getshopdetailcompositeservice", {
+      method: "POST",
+      headers: {
+        Accept: "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/json; charset=UTF-8",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        grouptoken: groupToken,
+        Origin: "https://www.vagaro.com",
+        Referer: publicInfo.sourceUrl || publicInfo.canonicalUrl || "https://www.vagaro.com/",
+      },
+      body: JSON.stringify({ businessID: Number(businessId), IsPackageInclude: 1 }),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`Vagaro public services ${response.status}: ${response.statusText}`);
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new Error("Vagaro returned an invalid public services response");
+    }
+    const result = vagaroPublicServicesFromPayload(payload, { currency: publicInfo.currencyCode || "USD" });
+    if (!result.services.length) throw new Error("Vagaro returned no publicly displayed services");
+    return { ...result, payload };
   } finally {
     clearTimeout(timer);
   }
@@ -6021,7 +6140,7 @@ function vagaroAppointmentStatus(action, bookingStatus) {
   return normalizedStatus || "external";
 }
 
-async function upsertVagaroService(connection, payload) {
+async function upsertVagaroService(connection, payload, db = prisma) {
   const externalId = String(payload?.serviceId || "").trim();
   if (!externalId) return null;
   const performers = Array.isArray(payload.servicePerformedBy) ? payload.servicePerformedBy : [];
@@ -6037,7 +6156,14 @@ async function upsertVagaroService(connection, payload) {
   );
   const bookingUrl = maybeVagaroPublicServiceBookingUrl(connection, publicServiceId, payload.bookingUrl);
   const raw = publicServiceId ? { ...payload, publicServiceId, publicBookingUrl: bookingUrl || payload.bookingUrl || null } : payload;
-  return prisma.bookingService.upsert({
+  const isPublicService = payload.source === "vagaro_public_page";
+  const active = isPublicService && payload.isActive !== undefined ? Boolean(payload.isActive) : true;
+  const description = String(payload.serviceDescription || payload.description || payload.serviceDesc || "").trim() || null;
+  const durationValue = nullableFiniteNumber(firstPerformer.durationMinutes || payload.durationMinutes);
+  const durationMinutes = durationValue && durationValue > 0 ? durationValue : null;
+  const rawPrice = payload.businessCost ?? firstPerformer.price;
+  const price = isPublicService ? nullableFiniteNumber(rawPrice) : Number(rawPrice ?? NaN) || null;
+  return db.bookingService.upsert({
     where: { connectionId_externalId: { connectionId: connection.id, externalId } },
     create: {
       businessProfileId: connection.businessProfileId,
@@ -6046,22 +6172,27 @@ async function upsertVagaroService(connection, payload) {
       externalId,
       name: String(payload.serviceTitle || payload.name || "Vagaro service"),
       category: payload.parentServiceTitle || payload.serviceCategory || null,
-      durationMinutes: Number(firstPerformer.durationMinutes || payload.durationMinutes || 0) || null,
-      price: Number(payload.businessCost ?? firstPerformer.price ?? NaN) || null,
+      description,
+      durationMinutes,
+      price,
       currency: payload.currency || firstPerformer.currency || null,
       type: String(payload.type || "service").toLowerCase(),
       bookingUrl: bookingUrl || null,
+      active,
+      sortOrder: Number(payload.sortOrder || payload.serviceOrder || 0),
       raw,
     },
     update: {
       name: String(payload.serviceTitle || payload.name || "Vagaro service"),
       category: payload.parentServiceTitle || payload.serviceCategory || null,
-      durationMinutes: Number(firstPerformer.durationMinutes || payload.durationMinutes || 0) || null,
-      price: Number(payload.businessCost ?? firstPerformer.price ?? NaN) || null,
+      description,
+      durationMinutes,
+      price,
       currency: payload.currency || firstPerformer.currency || null,
       type: String(payload.type || "service").toLowerCase(),
       bookingUrl: bookingUrl || undefined,
-      active: true,
+      active,
+      sortOrder: Number(payload.sortOrder || payload.serviceOrder || 0),
       raw,
     },
   });
@@ -6156,6 +6287,140 @@ async function syncVagaroServices(connection) {
   }
   await prisma.bookingConnection.update({ where: { id: connection.id }, data: { lastSyncAt: new Date() } });
   return { servicesImported: services.length, professionalsImported: providerIds.size };
+}
+
+async function syncVagaroPublicServices(connection, { publicInfo = null, publicServicesResult = null } = {}) {
+  const settings = connection?.settings && typeof connection.settings === "object" ? connection.settings : {};
+  const businessUrl = String(settings.vagaroBusinessUrl || connection?.bookingUrl || "").trim();
+  if (!businessUrl) throw new Error("Vagaro business link is required for Simple mode");
+  const refreshedPublicInfo = publicInfo || (await fetchVagaroPublicBusinessInfo(businessUrl));
+  const { services, policyEntriesExcluded } = publicServicesResult || (await fetchVagaroPublicServices(refreshedPublicInfo));
+  const syncedAt = new Date();
+  const updatedConnection = await prisma.$transaction(
+    async (tx) => {
+      await tx.bookingService.updateMany({ where: { connectionId: connection.id }, data: { active: false } });
+      await tx.bookingProfessional.updateMany({ where: { connectionId: connection.id }, data: { active: false } });
+      for (const servicePayload of services) await upsertVagaroService(connection, servicePayload, tx);
+      return tx.bookingConnection.update({
+        where: { id: connection.id },
+        data: {
+          displayName: refreshedPublicInfo.businessName || connection.displayName || "Vagaro",
+          externalBusinessId: refreshedPublicInfo.publicNumericBusinessId || connection.externalBusinessId || null,
+          externalGroupId: refreshedPublicInfo.groupId || connection.externalGroupId || null,
+          region: refreshedPublicInfo.publicRegion || connection.region || "us02",
+          lastSyncAt: syncedAt,
+          settings: {
+            ...settings,
+            vagaroMode: "simple",
+            realtimeAvailability: false,
+            directBooking: false,
+            vagaroBusinessUrl: refreshedPublicInfo.canonicalUrl || businessUrl,
+            vagaroBusinessSlug: refreshedPublicInfo.slug || settings.vagaroBusinessSlug || null,
+            vagaroPublicRegion: refreshedPublicInfo.publicRegion || settings.vagaroPublicRegion || null,
+            vagaroPublicProfile: refreshedPublicInfo,
+            vagaroPublicSyncWarning: "",
+            publicServicesLastSyncAt: syncedAt.toISOString(),
+            publicServicesExcludedPolicies: policyEntriesExcluded,
+          },
+        },
+      });
+    },
+    { maxWait: 10000, timeout: 60000 },
+  );
+  return {
+    connection: updatedConnection,
+    servicesImported: services.length,
+    professionalsImported: 0,
+    policyEntriesExcluded,
+  };
+}
+
+async function configureVagaroSimpleMode({ profile, config, businessUrl, publicInfo = null, publicServicesResult = null }) {
+  const parsedBusinessUrl = parseVagaroBusinessUrl(businessUrl);
+  const refreshedPublicInfo = publicInfo || (await fetchVagaroPublicBusinessInfo(parsedBusinessUrl.url));
+  const prefetchedPublicServices = publicServicesResult || (await fetchVagaroPublicServices(refreshedPublicInfo));
+  const canonicalBusinessUrl = refreshedPublicInfo.canonicalUrl || parsedBusinessUrl.canonicalUrl;
+  const bookingUrl = vagaroGeneralBookingUrl(refreshedPublicInfo.bookingUrl || canonicalBusinessUrl);
+  const currentConnection = await prisma.bookingConnection.findUnique({
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
+  });
+  const currentSettings = currentConnection?.settings && typeof currentConnection.settings === "object" ? currentConnection.settings : {};
+  const connectionSettings = {
+    ...currentSettings,
+    vagaroMode: "simple",
+    realtimeAvailability: false,
+    directBooking: false,
+    vagaroBusinessUrl: canonicalBusinessUrl,
+    vagaroBusinessSlug: refreshedPublicInfo.slug || parsedBusinessUrl.slug,
+    vagaroPublicRegion: refreshedPublicInfo.publicRegion || parsedBusinessUrl.region || null,
+    vagaroPublicProfile: refreshedPublicInfo,
+    vagaroPublicSyncWarning: "",
+    tokenScope: currentSettings.tokenScope || "read access",
+    apiBusinessIdSource: "",
+  };
+  let connection = await prisma.bookingConnection.upsert({
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
+    create: {
+      businessProfileId: profile.id,
+      provider: "vagaro",
+      status: "active",
+      workflowMode: "booking_link",
+      displayName: refreshedPublicInfo.businessName || "Vagaro",
+      externalBusinessId: refreshedPublicInfo.publicNumericBusinessId || null,
+      externalGroupId: refreshedPublicInfo.groupId || null,
+      region: refreshedPublicInfo.publicRegion || refreshedPublicInfo.apiRegion || parsedBusinessUrl.region || "us02",
+      bookingUrl,
+      settings: connectionSettings,
+    },
+    update: {
+      status: "active",
+      workflowMode: "booking_link",
+      displayName: refreshedPublicInfo.businessName || currentConnection?.displayName || "Vagaro",
+      externalBusinessId: refreshedPublicInfo.publicNumericBusinessId || null,
+      externalGroupId: refreshedPublicInfo.groupId || null,
+      region: refreshedPublicInfo.publicRegion || refreshedPublicInfo.apiRegion || parsedBusinessUrl.region || currentConnection?.region || "us02",
+      bookingUrl,
+      settings: connectionSettings,
+    },
+  });
+  const sync = await syncVagaroPublicServices(connection, {
+    publicInfo: refreshedPublicInfo,
+    publicServicesResult: prefetchedPublicServices,
+  });
+  connection = sync.connection;
+  await prisma.businessConfig.update({
+    where: { id: config.id },
+    data: {
+      calendarProvider: "vagaro",
+      providerConfig: { provider: "vagaro", connectionId: connection.id, workflowMode: "booking_link", vagaroMode: "simple" },
+    },
+  });
+  await ensureGeneralBookingLinkForConnection(connection, { label: "Book online", url: bookingUrl, sortOrder: 0 });
+  return {
+    connection,
+    businessUrl: canonicalBusinessUrl,
+    servicesImported: sync.servicesImported,
+    professionalsImported: 0,
+    policyEntriesExcluded: sync.policyEntriesExcluded,
+  };
+}
+
+async function disconnectVagaroSimpleMode(profile, config) {
+  const connection = await prisma.bookingConnection.findUnique({
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
+  });
+  if (!connection || vagaroConnectionMode(connection) !== "simple") return false;
+  await prisma.$transaction(async (tx) => {
+    await tx.bookingService.updateMany({ where: { connectionId: connection.id }, data: { active: false } });
+    await tx.bookingProfessional.updateMany({ where: { connectionId: connection.id }, data: { active: false } });
+    await tx.bookingLink.updateMany({ where: { connectionId: connection.id }, data: { active: false } });
+    await tx.bookingConnection.update({ where: { id: connection.id }, data: { status: "disabled" } });
+    await tx.businessConfig.update({
+      where: { id: config.id },
+      data: { calendarProvider: "internal", providerConfig: null },
+    });
+  });
+  return true;
 }
 
 async function matchBookingLinkSendToAppointment({ connection, appointment, payload = {} }) {
@@ -6666,6 +6931,60 @@ function pickBookingLink({ links = [], service = null, professional = null }) {
   const active = links.filter((link) => link.active !== false);
   if (!active.length) return null;
   return active.find((link) => !link.serviceId && !link.professionalId) || null;
+}
+
+function bookingServicePriceText(service) {
+  const raw = service?.raw && typeof service.raw === "object" ? service.raw : {};
+  const publicText = String(raw.publicPriceText || raw.PriceText || raw.priceText || "").trim();
+  if (publicText) return publicText;
+  if (service?.price === null || service?.price === undefined) return "";
+  const currency = String(service.currency || "USD").toUpperCase();
+  return `${currency} ${Number(service.price).toFixed(2)}`;
+}
+
+async function bookingServicesForAgent(profile, args = {}) {
+  const connection = await prisma.bookingConnection.findUnique({
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
+    include: { services: { where: { active: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } },
+  });
+  if (!connection || connection.status !== "active") throw new Error("Vagaro is not enabled for this business");
+  const query = String(args.query || args.serviceName || args.service || "").trim().toLowerCase();
+  const matching = query
+    ? connection.services.filter((service) =>
+        [service.name, service.category, service.description].some((value) => String(value || "").toLowerCase().includes(query)),
+      )
+    : connection.services;
+  const categoryMap = new Map();
+  for (const service of connection.services) {
+    const category = String(service.category || "Other").trim() || "Other";
+    const current = categoryMap.get(category) || { category, count: 0, examples: [] };
+    current.count += 1;
+    if (current.examples.length < 3) current.examples.push(service.name);
+    categoryMap.set(category, current);
+  }
+  const limit = query ? 30 : 80;
+  return {
+    ok: true,
+    provider: "vagaro",
+    vagaroMode: vagaroConnectionMode(connection),
+    query,
+    totalServices: connection.services.length,
+    matchingServices: matching.length,
+    categories: [...categoryMap.values()],
+    services: matching.slice(0, limit).map((service) => ({
+      id: service.id,
+      externalId: service.externalId,
+      name: service.name,
+      category: service.category || "",
+      description: query ? String(service.description || "").slice(0, 800) : "",
+      durationMinutes: service.durationMinutes,
+      price: service.price,
+      currency: service.currency,
+      priceText: bookingServicePriceText(service),
+      type: service.type,
+    })),
+    truncated: matching.length > limit,
+  };
 }
 
 async function externalBookingLinkContext({ profile, args = {} }) {
@@ -8548,13 +8867,16 @@ function runtimeBusinessInstructions(config) {
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
   const externalBooking = config.calendarProvider === "vagaro";
+  const simpleVagaro = externalBooking && config.providerConfig?.vagaroMode === "simple";
   const localNow = DateTime.now().setZone(config.timezone || "America/Chicago");
   const currentLocalDate = (localNow.isValid ? localNow : DateTime.now().setZone("America/Chicago")).toISODate();
   const collectsEmail = intakeCollectsEmail(config);
   return `
 Business-managed receptionist configuration:
 - Appointment mode: ${
-    externalBooking
+    simpleVagaro
+      ? "External Vagaro Simple mode. The public service catalog is available, but live availability is not. Offer to text the booking link so the customer can view openings and book in Vagaro."
+      : externalBooking
       ? "External Vagaro booking. Check live availability, then text the booking link. Do not say the appointment is booked until the external system confirms it."
       : config.appointmentMode === "instant"
         ? "Book available slots immediately"
@@ -8578,18 +8900,29 @@ Business-managed receptionist configuration:
 ${toolWaitNoticeInstruction()}
 Phone-speed rules:
 - Keep every spoken phone reply short: one sentence by default, two only when necessary, and under about 8 seconds of speech.
-- If the caller asks for availability and gives a day or time, call get_available_slots immediately. Do not ask for name, phone, email, or appointment reason before checking availability.
+${
+  simpleVagaro
+    ? `- If the caller asks about availability, openings, dates, or times, say you cannot see live Vagaro availability in this mode and offer to text the booking link. Never invent or imply that you checked availability.
+- Do not use get_available_slots in Vagaro Simple mode.
+- After the caller agrees to receive the link, call send_booking_link immediately.`
+    : `- If the caller asks for availability and gives a day or time, call get_available_slots immediately. Do not ask for name, phone, email, or appointment reason before checking availability.
 - If the caller asks broadly for earliest availability, available professionals, a consultation, or any open spot without a precise service, call get_available_slots with the earliest future date and omit serviceName unless the caller named a clear configured service.
 - After get_available_slots returns, offer only the best matching slot or at most two options. Do not read a long list.
 - If get_available_slots returns one or more slots, never say you cannot see live availability. Use the returned slot labels, service names, and professional names.
-- If get_available_slots returns no slots but includes available services, ask the caller to pick a service and mention two or three examples.
+- If get_available_slots returns no slots but includes available services, ask the caller to pick a service and mention two or three examples.`
+}
+${externalBooking ? "- For questions about Vagaro services, categories, prices, descriptions, or durations, use get_booking_services before answering. Include the caller's service words as the query when possible." : ""}
 - When a caller gives their name, pass it as name in the next relevant tool call so the CRM lead uses their real name instead of the caller phone label.
 - The inbound caller number already counts as the phone number. Do not ask for phone again unless the caller wants a different callback number.
-- If the caller asks to book and has given a time, collect only missing required intake fields, then ${externalBooking ? "call send_booking_link and tell them the link lets them confirm in Vagaro." : "call schedule_appointment."}
+- ${
+  simpleVagaro
+    ? "If the caller asks to book or accepts the offer to receive the booking link, call send_booking_link. Do not require a requested time or additional intake details before sending it."
+    : `If the caller asks to book and has given a time, collect only missing required intake fields, then ${externalBooking ? "call send_booking_link and tell them the link lets them confirm in Vagaro." : "call schedule_appointment."}`
+}
 - Do not repeat the same confirmation question after the caller already answered it.
 - If the caller asks for a person, department, manager, or topic you cannot answer from the configured knowledge, ${transferTargets.length ? "offer the best matching call transfer target. Only call transfer_call after the caller agrees to be transferred. After calling transfer_call, do not call end_call." : "record a transfer_message for human follow-up."} If no transfer target fits, record a transfer_message instead.
 
-Use get_available_slots before offering or scheduling a time. ${externalBooking ? "For Vagaro, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to confirm through the link." : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
+${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? "For Vagaro, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to confirm through the link." : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
 
 function cellText(value) {
@@ -8641,6 +8974,7 @@ function toolDeclarations(config) {
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
   const externalBooking = config.calendarProvider === "vagaro";
+  const simpleVagaro = externalBooking && config.providerConfig?.vagaroMode === "simple";
   const collectsEmail = intakeCollectsEmail(config);
   const optionalEmailProperty = collectsEmail ? { email: { type: "STRING", description: "Customer email if configured and known." } } : {};
   for (const field of config.intakeFields) {
@@ -8653,32 +8987,49 @@ function toolDeclarations(config) {
     if (field.required) appointmentRequired.push(field.fieldKey);
   }
   return [
-    {
-      name: "get_available_slots",
-      description: "Get currently available appointment times from the configured calendar provider.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          fromDate: { type: "STRING", description: "Start date in YYYY-MM-DD format. Must be today or a future date in the calendar timezone." },
-          days: { type: "INTEGER", description: "Number of days to search, up to 30." },
-          durationMinutes: { type: "INTEGER" },
-          serviceName: {
-            type: "STRING",
-            description:
-              "Service the caller clearly wants, for example haircut, facial, lash fill. Omit for broad questions like earliest availability, consultation, or any open professional.",
+    ...(!simpleVagaro
+      ? [
+          {
+            name: "get_available_slots",
+            description: "Get currently available appointment times from the configured calendar provider.",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                fromDate: { type: "STRING", description: "Start date in YYYY-MM-DD format. Must be today or a future date in the calendar timezone." },
+                days: { type: "INTEGER", description: "Number of days to search, up to 30." },
+                durationMinutes: { type: "INTEGER" },
+                serviceName: {
+                  type: "STRING",
+                  description:
+                    "Service the caller clearly wants, for example haircut, facial, lash fill. Omit for broad questions like earliest availability, consultation, or any open professional.",
+                },
+                serviceId: { type: "STRING", description: "External or local service id if known." },
+                professionalName: { type: "STRING", description: "Preferred professional/staff member name if caller asked for one." },
+                professionalId: { type: "STRING", description: "External or local professional id if known." },
+              },
+            },
           },
-          serviceId: { type: "STRING", description: "External or local service id if known." },
-          professionalName: { type: "STRING", description: "Preferred professional/staff member name if caller asked for one." },
-          professionalId: { type: "STRING", description: "External or local professional id if known." },
-        },
-      },
-    },
+        ]
+      : []),
     ...(externalBooking
       ? [
           {
+            name: "get_booking_services",
+            description:
+              "Look up the imported Vagaro service catalog, including categories, prices, descriptions, and durations. Pass the caller's service words in query when they ask about a specific service.",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                query: { type: "STRING", description: "Optional service name or category to search, such as haircut, facial, or hair color." },
+              },
+            },
+          },
+          {
             name: "send_booking_link",
             description:
-              "Send the external booking link by text after checking availability. Use this for Vagaro instead of directly booking the appointment.",
+              simpleVagaro
+                ? "Send the Vagaro booking link by text after the customer agrees. The customer uses it to see live availability and book."
+                : "Send the external booking link by text after checking availability. Use this for Vagaro instead of directly booking the appointment.",
             parameters: {
               type: "OBJECT",
               properties: {
@@ -8695,35 +9046,39 @@ function toolDeclarations(config) {
           },
         ]
       : []),
-    {
-      name: "schedule_appointment",
-      description:
-        externalBooking
-          ? "For Vagaro, do not directly book. This records a booking-link request and sends the external booking link."
-          : config.appointmentMode === "instant"
-          ? "Book a confirmed appointment in an available calendar slot."
-          : "Create a pending appointment request in an available calendar slot.",
-      parameters: {
-        type: "OBJECT",
-        properties: appointmentProperties,
-        required: appointmentRequired,
-      },
-    },
-    {
-      name: "verify_appointment",
-      description:
-        "Verify that an appointment or request actually exists in the business calendar database before telling the caller it was booked.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          confirmationCode: {
-            type: "STRING",
-            description: "Confirmation code returned by schedule_appointment, for example APT-000123.",
+    ...(!simpleVagaro
+      ? [
+          {
+            name: "schedule_appointment",
+            description:
+              externalBooking
+                ? "For Vagaro, do not directly book. This records a booking-link request and sends the external booking link."
+                : config.appointmentMode === "instant"
+                  ? "Book a confirmed appointment in an available calendar slot."
+                  : "Create a pending appointment request in an available calendar slot.",
+            parameters: {
+              type: "OBJECT",
+              properties: appointmentProperties,
+              required: appointmentRequired,
+            },
           },
-        },
-        required: ["confirmationCode"],
-      },
-    },
+          {
+            name: "verify_appointment",
+            description:
+              "Verify that an appointment or request actually exists in the business calendar database before telling the caller it was booked.",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                confirmationCode: {
+                  type: "STRING",
+                  description: "Confirmation code returned by schedule_appointment, for example APT-000123.",
+                },
+              },
+              required: ["confirmationCode"],
+            },
+          },
+        ]
+      : []),
     {
       name: "capture_lead",
       description: "Capture a caller's contact information and interest when they are not booking yet.",
@@ -8959,6 +9314,10 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       availableProfessionals: (availability.professionals || []).slice(0, context.channel === "phone" ? 10 : 50),
       warning: availability.warning || "",
     };
+  }
+
+  if (functionCall.name === "get_booking_services") {
+    return bookingServicesForAgent(profile, args);
   }
 
   if (functionCall.name === "send_booking_link") {
@@ -9745,6 +10104,30 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
     const address = textOrUnknown(req.body.address);
     const config = await ensureBusinessConfig(session.businessProfile);
     const language = String(req.body.language || config.language || "English").trim().slice(0, 80) || "English";
+    const currentVagaroBusinessUrl = String(existingRaw.vagaroBusinessUrl || "").trim();
+    const vagaroUrlSubmitted = Object.prototype.hasOwnProperty.call(req.body, "vagaroBusinessUrl");
+    const requestedVagaroBusinessUrl = vagaroUrlSubmitted
+      ? String(req.body.vagaroBusinessUrl || "").trim()
+      : currentVagaroBusinessUrl;
+    const vagaroUrlChanged = vagaroUrlSubmitted && requestedVagaroBusinessUrl !== currentVagaroBusinessUrl;
+    let storedVagaroBusinessUrl = requestedVagaroBusinessUrl;
+    let vagaroSync = null;
+    let vagaroDisconnected = false;
+    if (vagaroUrlChanged && requestedVagaroBusinessUrl) {
+      const simpleSetup = await configureVagaroSimpleMode({
+        profile: session.businessProfile,
+        config,
+        businessUrl: requestedVagaroBusinessUrl,
+      });
+      storedVagaroBusinessUrl = simpleSetup.businessUrl;
+      vagaroSync = {
+        servicesImported: simpleSetup.servicesImported,
+        professionalsImported: 0,
+        policyEntriesExcluded: simpleSetup.policyEntriesExcluded,
+      };
+    } else if (vagaroUrlChanged && currentVagaroBusinessUrl) {
+      vagaroDisconnected = await disconnectVagaroSimpleMode(session.businessProfile, config);
+    }
     const rawData = {
       ...existingRaw,
       businessName: session.businessProfile.businessName,
@@ -9755,6 +10138,7 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
       serviceArea,
       phone,
       address,
+      vagaroBusinessUrl: storedVagaroBusinessUrl,
     };
     const values = {
       businessName: session.businessProfile.businessName,
@@ -9777,7 +10161,7 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
       where: { businessProfileId: session.businessProfileId },
       data: { language },
     });
-    res.json({ profile: publicBusinessProfile(updated, updatedConfig) });
+    res.json({ profile: publicBusinessProfile(updated, updatedConfig), vagaroSync, vagaroDisconnected });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -12317,7 +12701,13 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
     const currentConnection = await prisma.bookingConnection.findUnique({
       where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
     });
+    const currentSettings = currentConnection?.settings && typeof currentConnection.settings === "object" ? currentConnection.settings : {};
+    const currentMode = vagaroConnectionMode(currentConnection);
+    const vagaroMode = normalizedVagaroMode(req.body.vagaroMode, currentMode);
     const businessUrlInput = String(req.body.businessUrl || req.body.bookingUrl || "").trim();
+    if (enabled && vagaroMode === "simple" && !businessUrlInput && !currentSettings.vagaroBusinessUrl) {
+      throw new Error("Vagaro business link is required for Simple mode");
+    }
     const parsedBusinessUrl = enabled && businessUrlInput ? parseVagaroBusinessUrl(businessUrlInput) : null;
     let publicBusinessInfo = null;
     let publicBusinessWarning = "";
@@ -12328,15 +12718,20 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
         publicBusinessWarning = `Could not read the Vagaro business page: ${error.message}`;
       }
     }
-    const currentSettings = currentConnection?.settings && typeof currentConnection.settings === "object" ? currentConnection.settings : {};
+    if (enabled && vagaroMode === "simple" && publicBusinessWarning) throw new Error(publicBusinessWarning);
     const currentPublicProfile = currentSettings.vagaroPublicProfile && typeof currentSettings.vagaroPublicProfile === "object" ? currentSettings.vagaroPublicProfile : {};
     const effectivePublicProfile = { ...currentPublicProfile, ...(publicBusinessInfo || {}) };
+    const prefetchedPublicServices = enabled && vagaroMode === "simple" ? await fetchVagaroPublicServices(effectivePublicProfile) : null;
     const requestedApiBusinessId = String(req.body.apiBusinessId || req.body.externalBusinessId || "").trim();
-    if (enabled && requestedApiBusinessId && isPublicVagaroBusinessId(requestedApiBusinessId, effectivePublicProfile)) {
+    if (enabled && vagaroMode === "api" && requestedApiBusinessId && isPublicVagaroBusinessId(requestedApiBusinessId, effectivePublicProfile)) {
       throw new Error("Vagaro API business location ID must be the encrypted businessId returned by Vagaro's Locations API. Public Vagaro page IDs are not accepted by the API.");
     }
     const trustedSavedBusinessId = vagaroApiBusinessId(currentConnection);
-    const externalBusinessId = String(requestedApiBusinessId || trustedSavedBusinessId || "").trim();
+    const externalBusinessId = String(
+      vagaroMode === "simple"
+        ? publicBusinessInfo?.publicNumericBusinessId || currentPublicProfile.publicNumericBusinessId || ""
+        : requestedApiBusinessId || trustedSavedBusinessId || "",
+    ).trim();
     const rawBookingUrl = String(req.body.bookingUrl || publicBusinessInfo?.bookingUrl || parsedBusinessUrl?.canonicalUrl || currentConnection?.bookingUrl || "").trim();
     const bookingUrl = enabled && rawBookingUrl ? vagaroGeneralBookingUrl(rawBookingUrl) : rawBookingUrl;
     const cancelRescheduleUrl = String(req.body.cancelRescheduleUrl || "").trim();
@@ -12346,17 +12741,28 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
     const apiClientSecretInput = String(req.body.apiClientSecret || "").trim();
     const manualAccessTokenInput = String(req.body.accessToken || "").trim();
     const tokenScope = String(req.body.tokenScope || currentSettings.tokenScope || "read access").trim() || "read access";
-    if (enabled && !apiClientId) throw new Error("Vagaro client ID is required");
-    if (enabled && !apiClientSecretInput && !currentConnection?.apiClientSecretEncrypted && !manualAccessTokenInput && !currentConnection?.accessTokenEncrypted) {
+    if (enabled && vagaroMode === "api" && !apiClientId) throw new Error("Vagaro client ID is required");
+    if (
+      enabled &&
+      vagaroMode === "api" &&
+      !apiClientSecretInput &&
+      !currentConnection?.apiClientSecretEncrypted &&
+      !manualAccessTokenInput &&
+      !currentConnection?.accessTokenEncrypted
+    ) {
       throw new Error("Vagaro client secret is required");
     }
     const secret = encryptedField(req.body.apiClientSecret);
     const token = encryptedField(req.body.accessToken);
-    const generatedWebhookSecret = enabled && !String(req.body.webhookSecret || "").trim() && !currentConnection?.webhookSecretEncrypted ? issueToken().token : "";
+    const generatedWebhookSecret =
+      enabled && vagaroMode === "api" && !String(req.body.webhookSecret || "").trim() && !currentConnection?.webhookSecretEncrypted
+        ? issueToken().token
+        : "";
     const webhookSecret = encryptedField(req.body.webhookSecret || generatedWebhookSecret);
     const baseSettings = {
       ...(currentConnection?.settings && typeof currentConnection.settings === "object" ? currentConnection.settings : {}),
-      realtimeAvailability: true,
+      vagaroMode,
+      realtimeAvailability: vagaroMode === "api",
       directBooking: false,
       vagaroBusinessUrl: businessUrlInput || publicBusinessInfo?.bookingUrl || parsedBusinessUrl?.url || currentConnection?.settings?.vagaroBusinessUrl || null,
       vagaroBusinessSlug: publicBusinessInfo?.slug || parsedBusinessUrl?.slug || currentConnection?.settings?.vagaroBusinessSlug || null,
@@ -12364,16 +12770,18 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
       vagaroPublicProfile: publicBusinessInfo || currentConnection?.settings?.vagaroPublicProfile || null,
       vagaroPublicSyncWarning: publicBusinessWarning,
       tokenScope,
-      apiBusinessIdSource: externalBusinessId ? (requestedApiBusinessId ? "manual" : currentSettings.apiBusinessIdSource || "locations") : "",
+      apiBusinessIdSource:
+        vagaroMode === "api" && externalBusinessId ? (requestedApiBusinessId ? "manual" : currentSettings.apiBusinessIdSource || "locations") : "",
     };
     const region = String(req.body.region || publicBusinessInfo?.apiRegion || parsedBusinessUrl?.region || publicBusinessInfo?.publicRegion || currentConnection?.region || "us02").trim().toLowerCase() || "us02";
-    if (enabled && !/^[a-z]{2}\d{2}$/i.test(region)) {
+    if (enabled && vagaroMode === "api" && !/^[a-z]{2}\d{2}$/i.test(region)) {
       throw new Error("Vagaro API region must look like us04. It is usually in the Vagaro business link.");
     }
     const externalGroupId = String(req.body.externalGroupId || publicBusinessInfo?.groupId || currentConnection?.externalGroupId || "").trim();
     const previousTokenScope = String(currentSettings.tokenScope || "read access").trim() || "read access";
     const shouldClearCachedToken =
       enabled &&
+      vagaroMode === "api" &&
       !manualAccessTokenInput &&
       Boolean(currentConnection) &&
       (Boolean(apiClientSecretInput) ||
@@ -12424,19 +12832,36 @@ app.put("/api/business-admin/booking/vagaro", async (req, res) => {
     });
     let sync = null;
     if (enabled) {
-      const locationSync = await syncVagaroLocations(connection, profile);
-      connection = locationSync.connection;
-      sync = { locationsImported: locationSync.locationsImported };
-      const apiBusinessId = vagaroApiBusinessId(connection);
-      if (apiBusinessId) {
-        sync = { ...sync, ...(await syncVagaroServices(connection)) };
+      if (vagaroMode === "simple") {
+        const publicSync = await syncVagaroPublicServices(connection, {
+          publicInfo: publicBusinessInfo || effectivePublicProfile,
+          publicServicesResult: prefetchedPublicServices,
+        });
+        connection = publicSync.connection;
+        sync = {
+          servicesImported: publicSync.servicesImported,
+          professionalsImported: 0,
+          policyEntriesExcluded: publicSync.policyEntriesExcluded,
+        };
+      } else {
+        if (currentConnection && currentMode === "simple") {
+          await prisma.bookingService.updateMany({ where: { connectionId: connection.id }, data: { active: false } });
+          await prisma.bookingProfessional.updateMany({ where: { connectionId: connection.id }, data: { active: false } });
+        }
+        const locationSync = await syncVagaroLocations(connection, profile);
+        connection = locationSync.connection;
+        sync = { locationsImported: locationSync.locationsImported };
+        const apiBusinessId = vagaroApiBusinessId(connection);
+        if (apiBusinessId) {
+          sync = { ...sync, ...(await syncVagaroServices(connection)) };
+        }
       }
     }
     await prisma.businessConfig.update({
       where: { id: config.id },
       data: {
         calendarProvider: enabled ? "vagaro" : "internal",
-        providerConfig: enabled ? { provider: "vagaro", connectionId: connection.id, workflowMode: "booking_link" } : null,
+        providerConfig: enabled ? { provider: "vagaro", connectionId: connection.id, workflowMode: "booking_link", vagaroMode } : null,
         timezone: enabled && connection.settings?.timezone ? connection.settings.timezone : config.timezone,
       },
     });
@@ -12458,22 +12883,35 @@ app.post("/api/business-admin/booking/vagaro/sync", async (req, res) => {
       where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
     });
     if (!connection || connection.status !== "active") throw new Error("Vagaro is not enabled for this business");
-    const locationSync = await syncVagaroLocations(connection, profile);
-    const apiBusinessId = vagaroApiBusinessId(locationSync.connection);
-    const result = apiBusinessId
-      ? { locationsImported: locationSync.locationsImported, ...(await syncVagaroServices(locationSync.connection)) }
-      : {
-          locationsImported: locationSync.locationsImported,
-          servicesImported: 0,
-          professionalsImported: 0,
-          warning:
-            locationSync.connection.settings?.locationsSyncWarning ||
-            "Vagaro did not return an API business location for these credentials. Add the API business location ID in Advanced API settings.",
-        };
-    if (locationSync.connection.bookingUrl) {
-      await ensureGeneralBookingLinkForConnection(locationSync.connection, {
+    let syncedConnection = connection;
+    let result;
+    if (vagaroConnectionMode(connection) === "simple") {
+      const publicSync = await syncVagaroPublicServices(connection);
+      syncedConnection = publicSync.connection;
+      result = {
+        servicesImported: publicSync.servicesImported,
+        professionalsImported: 0,
+        policyEntriesExcluded: publicSync.policyEntriesExcluded,
+      };
+    } else {
+      const locationSync = await syncVagaroLocations(connection, profile);
+      syncedConnection = locationSync.connection;
+      const apiBusinessId = vagaroApiBusinessId(syncedConnection);
+      result = apiBusinessId
+        ? { locationsImported: locationSync.locationsImported, ...(await syncVagaroServices(syncedConnection)) }
+        : {
+            locationsImported: locationSync.locationsImported,
+            servicesImported: 0,
+            professionalsImported: 0,
+            warning:
+              syncedConnection.settings?.locationsSyncWarning ||
+              "Vagaro did not return an API business location for these credentials. Add the API business location ID in Advanced API settings.",
+          };
+    }
+    if (syncedConnection.bookingUrl) {
+      await ensureGeneralBookingLinkForConnection(syncedConnection, {
         label: "Book online",
-        url: locationSync.connection.bookingUrl,
+        url: syncedConnection.bookingUrl,
         sortOrder: 0,
       });
     }

@@ -92,6 +92,7 @@ const el = Object.fromEntries(
     "profileArea",
     "profileServices",
     "profileLanguage",
+    "profileVagaroUrl",
     "phoneSection",
     "phoneLimit",
     "demoPhone",
@@ -548,6 +549,7 @@ function profilePayload() {
     serviceArea: el.profileArea.value,
     services: el.profileServices.value,
     language: el.profileLanguage.value,
+    vagaroBusinessUrl: el.profileVagaroUrl.value,
   };
 }
 
@@ -673,6 +675,7 @@ function renderProfileFields(profile) {
   el.profileArea.value = editableProfileValue(profile.serviceArea);
   el.profileServices.value = editableProfileValue(profile.services);
   setProfileLanguage(profile.language);
+  el.profileVagaroUrl.value = profile.vagaroBusinessUrl || "";
   state.renderingProfile = false;
   state.profileDirty = false;
   el.profileSaveButton.disabled = false;
@@ -691,7 +694,13 @@ async function saveProfile({ silent = false } = {}) {
     });
     state.profile = data.profile;
     renderProfileFields(data.profile);
-    if (!silent) el.profileMessage.textContent = "Profile saved";
+    if (!silent) {
+      el.profileMessage.textContent = data.vagaroSync
+        ? `Profile saved · ${data.vagaroSync.servicesImported || 0} Vagaro services synced${data.vagaroSync.policyEntriesExcluded ? ` · ${data.vagaroSync.policyEntriesExcluded} policy entries excluded` : ""}`
+        : data.vagaroDisconnected
+          ? "Profile saved · Vagaro disconnected"
+          : "Profile saved";
+    }
     return data.profile;
   } catch (error) {
     el.profileMessage.textContent = error.message;
