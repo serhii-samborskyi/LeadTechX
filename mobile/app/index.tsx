@@ -77,7 +77,7 @@ type EditableProfile = {
   language: string;
 };
 
-const logo = require("../assets/ringport-logo.png");
+const logo = require("../assets/ringport-icon.png");
 
 const emptyEditableProfile: EditableProfile = {
   summary: "",
@@ -988,8 +988,9 @@ const styles = StyleSheet.create({
     gap: 18,
   },
   bootLogo: {
-    width: 220,
-    height: 70,
+    width: 92,
+    height: 92,
+    borderRadius: 16,
   },
   topChrome: {
     minHeight: 44,
@@ -1031,8 +1032,9 @@ const styles = StyleSheet.create({
     gap: 18,
   },
   logo: {
-    width: 244,
-    height: 72,
+    width: 76,
+    height: 76,
+    borderRadius: 14,
   },
   headline: {
     color: "#0a211c",

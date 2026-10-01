@@ -92,6 +92,8 @@ const el = Object.fromEntries(
     "profileArea",
     "profileServices",
     "profileLanguage",
+    "profileVagaroEnabled",
+    "profileVagaroField",
     "profileVagaroUrl",
     "phoneSection",
     "phoneLimit",
@@ -549,7 +551,7 @@ function profilePayload() {
     serviceArea: el.profileArea.value,
     services: el.profileServices.value,
     language: el.profileLanguage.value,
-    vagaroBusinessUrl: el.profileVagaroUrl.value,
+    vagaroBusinessUrl: el.profileVagaroEnabled.checked ? el.profileVagaroUrl.value : "",
   };
 }
 
@@ -676,6 +678,9 @@ function renderProfileFields(profile) {
   el.profileServices.value = editableProfileValue(profile.services);
   setProfileLanguage(profile.language);
   el.profileVagaroUrl.value = profile.vagaroBusinessUrl || "";
+  el.profileVagaroEnabled.checked = Boolean(profile.vagaroBusinessUrl);
+  el.profileVagaroField.hidden = !el.profileVagaroEnabled.checked;
+  el.profileVagaroUrl.required = el.profileVagaroEnabled.checked;
   state.renderingProfile = false;
   state.profileDirty = false;
   el.profileSaveButton.disabled = false;
@@ -684,6 +689,11 @@ function renderProfileFields(profile) {
 
 async function saveProfile({ silent = false } = {}) {
   if (!state.accessToken || !state.profileDirty) return state.profile;
+  if (el.profileVagaroEnabled.checked && !el.profileVagaroUrl.value.trim()) {
+    el.profileMessage.textContent = "Enter the Vagaro business link";
+    el.profileVagaroUrl.focus();
+    throw new Error("Enter the Vagaro business link");
+  }
   el.profileSaveButton.disabled = true;
   if (!silent) el.profileMessage.textContent = "Saving profile";
   try {
@@ -1041,6 +1051,11 @@ async function initialize() {
 
 el.talkButton.addEventListener("click", startCall);
 el.stopButton.addEventListener("click", () => stopCall());
+el.profileVagaroEnabled.addEventListener("change", () => {
+  el.profileVagaroField.hidden = !el.profileVagaroEnabled.checked;
+  el.profileVagaroUrl.required = el.profileVagaroEnabled.checked;
+  if (el.profileVagaroEnabled.checked) el.profileVagaroUrl.focus();
+});
 function markProfileDirty() {
   if (state.renderingProfile) return;
   state.profileDirty = true;

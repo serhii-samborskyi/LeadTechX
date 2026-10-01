@@ -4,14 +4,15 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <title>RingPort Fast Agent</title>
-    <link rel="icon" type="image/png" href="/assets/ringport-logo.png" />
+    <link rel="icon" type="image/png" href="/assets/ringport-icon.png" />
+    <link rel="apple-touch-icon" href="/assets/ringport-icon.png" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body class="fast-body">
     <main class="fast-shell">
       <header class="fast-header">
         <div class="fast-brand">
-          <img class="brand-logo fast-logo" src="/assets/ringport-logo.png" alt="RingPort" />
+          <img class="brand-logo fast-logo" src="/assets/ringport-icon.png" alt="RingPort" />
         </div>
         <span class="fast-trial" id="trialBadge">Preparing trial</span>
       </header>
@@ -74,7 +75,14 @@
               <label><span>Service area <i data-lucide="pencil-line" aria-hidden="true"></i></span><textarea id="profileArea" rows="3" placeholder="Not found"></textarea></label>
               <label class="wide"><span>Services <i data-lucide="pencil-line" aria-hidden="true"></i></span><textarea id="profileServices" rows="4" placeholder="Not found"></textarea></label>
               <label class="wide compact"><span>Agent language <i data-lucide="pencil-line" aria-hidden="true"></i></span><select id="profileLanguage"><option selected>English</option><option>Spanish</option><option>French</option><option>German</option><option>Italian</option><option>Portuguese</option><option>Polish</option><option>Ukrainian</option><option>Russian</option><option>Arabic</option><option>Hindi</option><option>Japanese</option><option>Korean</option><option>Chinese</option></select></label>
-              <label class="wide"><span>Vagaro business link <i data-lucide="pencil-line" aria-hidden="true"></i></span><input id="profileVagaroUrl" type="text" inputmode="url" autocomplete="url" placeholder="https://www.vagaro.com/yourbusiness/services" /></label>
+              <div class="wide fast-profile-toggle">
+                <div><strong>Use Vagaro</strong><small>Import services from a Vagaro business page</small></div>
+                <label class="fast-switch">
+                  <input id="profileVagaroEnabled" type="checkbox" role="switch" aria-label="Use Vagaro" aria-controls="profileVagaroField" />
+                  <span class="fast-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <label class="wide" id="profileVagaroField" hidden><span>Vagaro business link <i data-lucide="pencil-line" aria-hidden="true"></i></span><input id="profileVagaroUrl" type="text" inputmode="url" autocomplete="url" placeholder="https://www.vagaro.com/yourbusiness/services" /></label>
             </div>
             <p class="form-message" id="profileMessage"></p>
           </form>
