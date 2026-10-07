@@ -5202,6 +5202,7 @@ function vagaroGeneralBookingUrl(value) {
     url.searchParams.delete("serviceid");
     return url.toString();
   }
+  if (url.pathname.toLowerCase().includes("/classes")) return `${parsed.canonicalUrl}/classes`;
   return `${parsed.canonicalUrl}/book-now`;
 }
 
@@ -5414,6 +5415,139 @@ function vagaroPublicServicesFromPayload(payload, { currency = "USD" } = {}) {
   return { services, policyEntriesExcluded };
 }
 
+function vagaroPublicPageUrl(publicInfo, path = "") {
+  const base = String(publicInfo?.canonicalUrl || publicInfo?.bookingUrl || publicInfo?.sourceUrl || "").trim();
+  if (!base) return "";
+  const parsed = parseVagaroBusinessUrl(base);
+  return `${parsed.canonicalUrl}${path ? `/${String(path).replace(/^\/+/, "")}` : ""}`;
+}
+
+function vagaroPublicClassesFromPayload(payload, publicInfo, { currency = "USD" } = {}) {
+  const details = Array.isArray(payload?.lstOnlineServiceDetail) ? payload.lstOnlineServiceDetail : [];
+  const detailById = new Map(details.map((item) => [String(item?.serviceID || item?.id || ""), item]));
+  const parents = Array.isArray(payload?.lstOnlineServiceParent) ? payload.lstOnlineServiceParent : [];
+  const classes = [];
+  const seenClassIds = new Set();
+  const classesUrl = vagaroPublicPageUrl(publicInfo, "classes");
+
+  const pushClass = (item, parent = {}) => {
+    const classId = String(item?.id || item?.serviceID || "").trim();
+    if (!classId || seenClassIds.has(classId)) return;
+    const detail = detailById.get(classId) || {};
+    const eventType = Number(item?.eventType ?? detail?.eventType ?? 0);
+    if (eventType && eventType !== 2) return;
+    const title = String(item?.text || item?.serviceTitle || detail?.serviceTitle || "").trim();
+    if (!title) return;
+    const showPrice = item?.isShowPriceOnline !== false && detail?.IsShowPriceOnline !== false;
+    seenClassIds.add(classId);
+    classes.push({
+      serviceId: classId,
+      serviceTitle: title,
+      parentServiceTitle: String(parent?.text || parent?.serviceTitle || "Classes").trim() || "Classes",
+      serviceCategory: String(parent?.text || parent?.serviceTitle || "Classes").trim() || "Classes",
+      serviceDescription: String(item?.serviceDesc || detail?.serviceDesc || "").trim() || null,
+      durationMinutes: nullableFiniteNumber(item?.duration || detail?.duration),
+      businessCost: showPrice ? nullableFiniteNumber(item?.price ?? detail?.price) : null,
+      currency: String(currency || "USD").toUpperCase(),
+      type: "class",
+      isActive: item?.isOnlineService !== false && detail?.isOnlineService !== false,
+      isOnlineBookingActive: item?.isOnlineService !== false && detail?.isOnlineService !== false,
+      sortOrder: nullableFiniteNumber(detail?.serviceOrder || item?.serviceOrder) || 0,
+      bookingUrl: classesUrl,
+      source: "vagaro_public_classes",
+      publicClassId: classId,
+      publicClass: item,
+      publicClassDetail: detail,
+    });
+  };
+
+  for (const parent of parents) {
+    const parentEventType = Number(parent?.eventType ?? 0);
+    if (parentEventType && parentEventType !== 2) continue;
+    for (const child of Array.isArray(parent?.children) ? parent.children : []) {
+      pushClass(child, parent);
+    }
+  }
+
+  if (!classes.length) {
+    for (const detail of details) {
+      if (Number(detail?.eventType ?? 0) === 2 && Number(detail?.serviceLevel ?? 0) > 0) {
+        pushClass(detail, { text: "Classes" });
+      }
+    }
+  }
+
+  const classIds = new Set(classes.map((item) => item.serviceId));
+  const providers = (Array.isArray(payload?.lstOnlineServiceProviderDetail) ? payload.lstOnlineServiceProviderDetail : [])
+    .map((provider) => ({
+      serviceProviderId: String(provider?.id || provider?.serviceProviderID || "").trim(),
+      serviceProvider: String(provider?.text || provider?.displayName || "").trim(),
+      source: "vagaro_public_classes",
+      publicClassProvider: provider,
+    }))
+    .filter((provider) => provider.serviceProviderId && provider.serviceProvider);
+  const mappings = (Array.isArray(payload?.lstOnlineServiceAndProviderMapping) ? payload.lstOnlineServiceAndProviderMapping : [])
+    .map((mapping) => ({
+      serviceProviderId: String(mapping?.serviceProviderID || mapping?.serviceProviderId || "").trim(),
+      serviceId: String(mapping?.serviceID || mapping?.serviceId || "").trim(),
+      price: nullableFiniteNumber(mapping?.Price ?? mapping?.price),
+      raw: mapping,
+    }))
+    .filter((mapping) => mapping.serviceProviderId && classIds.has(mapping.serviceId));
+
+  return { services: classes, providers, mappings, catalogType: "classes", raw: payload };
+}
+
+async function fetchVagaroPublicClasses(publicInfo, { timeoutMs = 15000 } = {}) {
+  const businessId = String(publicInfo?.publicNumericBusinessId || "").trim();
+  const groupToken = [publicInfo?.groupId, publicInfo?.publicRegion, publicInfo?.apiRegion]
+    .map((value) => String(value || "").trim().toUpperCase())
+    .find((value) => /^[A-Z]{2}\d{2}$/.test(value)) || "";
+  if (!/^\d+$/.test(businessId)) throw new Error("Vagaro public business ID was not found on the business page");
+  if (!/^[A-Z]{2}\d{2}$/.test(groupToken)) throw new Error("Vagaro public region was not found on the business page");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs || 15000)));
+  try {
+    const response = await fetch("https://www.vagaro.com/websiteapi/homepage/getonlinebookingtabdetail", {
+      method: "POST",
+      headers: {
+        Accept: "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/json; charset=UTF-8",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        grouptoken: groupToken,
+        Origin: "https://www.vagaro.com",
+        Referer: publicInfo.sourceUrl || publicInfo.canonicalUrl || "https://www.vagaro.com/",
+      },
+      body: JSON.stringify({
+        businessID: Number(businessId),
+        shouldIncludePakcage: false,
+        loadClasses_Service_Both: true,
+        isFromOffline: false,
+        IsNewWebsiteBuilder: false,
+        IncludededClassId: "",
+        ExcludededClassId: "",
+        IsAllowAllLocation: false,
+        Referral: false,
+      }),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`Vagaro public classes ${response.status}: ${response.statusText}`);
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new Error("Vagaro returned an invalid public classes response");
+    }
+    const result = vagaroPublicClassesFromPayload(payload, publicInfo, { currency: publicInfo.currencyCode || "USD" });
+    if (!result.services.length) throw new Error("Vagaro returned no publicly displayed classes");
+    return { ...result, payload };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchVagaroPublicServices(publicInfo, { timeoutMs = 15000 } = {}) {
   const businessId = String(publicInfo?.publicNumericBusinessId || "").trim();
   const groupToken = [publicInfo?.groupId, publicInfo?.publicRegion, publicInfo?.apiRegion]
@@ -5447,8 +5581,13 @@ async function fetchVagaroPublicServices(publicInfo, { timeoutMs = 15000 } = {})
       throw new Error("Vagaro returned an invalid public services response");
     }
     const result = vagaroPublicServicesFromPayload(payload, { currency: publicInfo.currencyCode || "USD" });
-    if (!result.services.length) throw new Error("Vagaro returned no publicly displayed services");
-    return { ...result, payload };
+    if (result.services.length) return { ...result, payload, catalogType: "services" };
+    const classResult = await fetchVagaroPublicClasses(publicInfo, { timeoutMs });
+    return {
+      ...classResult,
+      policyEntriesExcluded: result.policyEntriesExcluded,
+      servicePayload: payload,
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -6154,9 +6293,10 @@ async function upsertVagaroService(connection, payload, db = prisma) {
       payload.bookingUrl ||
       "",
   );
-  const bookingUrl = maybeVagaroPublicServiceBookingUrl(connection, publicServiceId, payload.bookingUrl);
+  const explicitBookingUrl = String(payload.bookingUrl || "").trim();
+  const bookingUrl = publicServiceId ? maybeVagaroPublicServiceBookingUrl(connection, publicServiceId, payload.bookingUrl) : explicitBookingUrl;
   const raw = publicServiceId ? { ...payload, publicServiceId, publicBookingUrl: bookingUrl || payload.bookingUrl || null } : payload;
-  const isPublicService = payload.source === "vagaro_public_page";
+  const isPublicService = payload.source === "vagaro_public_page" || payload.source === "vagaro_public_classes";
   const active = isPublicService && payload.isActive !== undefined ? Boolean(payload.isActive) : true;
   const description = String(payload.serviceDescription || payload.description || payload.serviceDesc || "").trim() || null;
   const durationValue = nullableFiniteNumber(firstPerformer.durationMinutes || payload.durationMinutes);
@@ -6198,13 +6338,13 @@ async function upsertVagaroService(connection, payload, db = prisma) {
   });
 }
 
-async function upsertVagaroProfessional(connection, payload) {
+async function upsertVagaroProfessional(connection, payload, db = prisma) {
   const externalId = String(payload?.serviceProviderId || "").trim();
   if (!externalId) return null;
   const firstName = String(payload.employeeFirstName || payload.firstName || "").trim();
   const lastName = String(payload.employeeLastName || payload.lastName || "").trim();
   const displayName = [firstName, lastName].filter(Boolean).join(" ").trim() || String(payload.serviceProvider || payload.displayName || externalId);
-  return prisma.bookingProfessional.upsert({
+  return db.bookingProfessional.upsert({
     where: { connectionId_externalId: { connectionId: connection.id, externalId } },
     create: {
       businessProfileId: connection.businessProfileId,
@@ -6294,13 +6434,51 @@ async function syncVagaroPublicServices(connection, { publicInfo = null, publicS
   const businessUrl = String(settings.vagaroBusinessUrl || connection?.bookingUrl || "").trim();
   if (!businessUrl) throw new Error("Vagaro business link is required for Simple mode");
   const refreshedPublicInfo = publicInfo || (await fetchVagaroPublicBusinessInfo(businessUrl));
-  const { services, policyEntriesExcluded } = publicServicesResult || (await fetchVagaroPublicServices(refreshedPublicInfo));
+  const {
+    services,
+    policyEntriesExcluded,
+    providers = [],
+    mappings = [],
+    catalogType = "services",
+  } = publicServicesResult || (await fetchVagaroPublicServices(refreshedPublicInfo));
   const syncedAt = new Date();
+  const bookingUrl = catalogType === "classes"
+    ? vagaroPublicPageUrl(refreshedPublicInfo, "classes")
+    : vagaroGeneralBookingUrl(refreshedPublicInfo.bookingUrl || refreshedPublicInfo.canonicalUrl || businessUrl);
   const updatedConnection = await prisma.$transaction(
     async (tx) => {
       await tx.bookingService.updateMany({ where: { connectionId: connection.id }, data: { active: false } });
       await tx.bookingProfessional.updateMany({ where: { connectionId: connection.id }, data: { active: false } });
-      for (const servicePayload of services) await upsertVagaroService(connection, servicePayload, tx);
+      const servicesByExternalId = new Map();
+      const professionalsByExternalId = new Map();
+      for (const servicePayload of services) {
+        const service = await upsertVagaroService(connection, servicePayload, tx);
+        if (service) servicesByExternalId.set(String(service.externalId), service);
+      }
+      for (const providerPayload of providers) {
+        const professional = await upsertVagaroProfessional(connection, providerPayload, tx);
+        if (professional) professionalsByExternalId.set(String(professional.externalId), professional);
+      }
+      for (const mapping of mappings) {
+        const professional = professionalsByExternalId.get(String(mapping.serviceProviderId || ""));
+        const service = servicesByExternalId.get(String(mapping.serviceId || ""));
+        if (!professional || !service) continue;
+        await tx.bookingProfessionalService.upsert({
+          where: { professionalId_serviceId: { professionalId: professional.id, serviceId: service.id } },
+          create: {
+            professionalId: professional.id,
+            serviceId: service.id,
+            price: mapping.price,
+            currency: service.currency || null,
+            raw: mapping.raw || mapping,
+          },
+          update: {
+            price: mapping.price,
+            currency: service.currency || null,
+            raw: mapping.raw || mapping,
+          },
+        });
+      }
       return tx.bookingConnection.update({
         where: { id: connection.id },
         data: {
@@ -6308,6 +6486,7 @@ async function syncVagaroPublicServices(connection, { publicInfo = null, publicS
           externalBusinessId: refreshedPublicInfo.publicNumericBusinessId || connection.externalBusinessId || null,
           externalGroupId: refreshedPublicInfo.groupId || connection.externalGroupId || null,
           region: refreshedPublicInfo.publicRegion || connection.region || "us02",
+          bookingUrl,
           lastSyncAt: syncedAt,
           settings: {
             ...settings,
@@ -6319,6 +6498,7 @@ async function syncVagaroPublicServices(connection, { publicInfo = null, publicS
             vagaroPublicRegion: refreshedPublicInfo.publicRegion || settings.vagaroPublicRegion || null,
             vagaroPublicProfile: refreshedPublicInfo,
             vagaroPublicSyncWarning: "",
+            vagaroPublicCatalogType: catalogType,
             publicServicesLastSyncAt: syncedAt.toISOString(),
             publicServicesExcludedPolicies: policyEntriesExcluded,
           },
@@ -6330,8 +6510,10 @@ async function syncVagaroPublicServices(connection, { publicInfo = null, publicS
   return {
     connection: updatedConnection,
     servicesImported: services.length,
-    professionalsImported: 0,
+    professionalsImported: providers.length,
     policyEntriesExcluded,
+    classesImported: catalogType === "classes" ? services.length : 0,
+    catalogType,
   };
 }
 

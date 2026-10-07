@@ -1221,11 +1221,18 @@ function renderTransferTargets(entries = []) {
 function bookingServiceLabel(service) {
   if (!service) return "Any service";
   const details = [];
+  if (service.type === "class") details.push("class");
   if (service.durationMinutes) details.push(`${service.durationMinutes} min`);
   if (service.price !== null && service.price !== undefined) {
     details.push(`${service.currency || "USD"} ${service.price}`);
   }
   return [service.name || `Service #${service.id}`, details.length ? `(${details.join(", ")})` : ""].filter(Boolean).join(" ");
+}
+
+function vagaroCatalogCountLabel(sync = {}, services = []) {
+  const classCount = sync.classesImported || services.filter((service) => service.type === "class").length;
+  if (sync.catalogType === "classes" || classCount) return `${classCount || sync.servicesImported || services.length || 0} classes`;
+  return `${sync.servicesImported ?? services.length ?? 0} services`;
 }
 
 function vagaroPublicServiceIdFromValue(value) {
@@ -1366,7 +1373,7 @@ function renderBooking(data = {}) {
       provider !== "vagaro"
         ? "RingPort calendar is active."
         : connection.status === "active"
-          ? `Vagaro ${mode} mode · ${services.length} services${mode === "API" ? ` · ${professionals.length} professionals` : ""} · ${links.length ? "general link saved" : "no general link"}${lastSync}${credentials}${apiLocation}${warning}`
+          ? `Vagaro ${mode} mode · ${vagaroCatalogCountLabel(connection.settings || {}, services)}${mode === "API" ? ` · ${professionals.length} professionals` : ""} · ${links.length ? "general link saved" : "no general link"}${lastSync}${credentials}${apiLocation}${warning}`
           : "Vagaro is not connected. Choose a mode and save the business link.";
   }
 
@@ -1836,7 +1843,7 @@ async function saveVagaroSettings() {
   if (enabled && data.sync) {
     setAdminStatus(
       data.activeConnection?.settings?.vagaroMode === "simple"
-        ? `Vagaro Simple mode saved · ${data.sync.servicesImported || 0} services imported${data.sync.policyEntriesExcluded ? ` · excluded ${data.sync.policyEntriesExcluded} policy entries` : ""}`
+        ? `Vagaro Simple mode saved · ${vagaroCatalogCountLabel(data.sync)} imported${data.sync.policyEntriesExcluded ? ` · excluded ${data.sync.policyEntriesExcluded} policy entries` : ""}`
         : `Vagaro saved · ${data.sync.locationsImported || 0} locations · ${data.sync.servicesImported || 0} services · ${data.sync.professionalsImported || 0} professionals`,
     );
   } else {
@@ -1856,7 +1863,7 @@ async function syncVagaro() {
   const sync = data.sync || {};
   setAdminStatus(
     data.activeConnection?.settings?.vagaroMode === "simple"
-      ? `Synced ${sync.servicesImported || 0} public services${sync.policyEntriesExcluded ? ` · excluded ${sync.policyEntriesExcluded} policy entries` : ""}`
+      ? `Synced ${vagaroCatalogCountLabel(sync)}${sync.policyEntriesExcluded ? ` · excluded ${sync.policyEntriesExcluded} policy entries` : ""}`
       : `Synced ${sync.servicesImported || 0} services and ${sync.professionalsImported || 0} professionals`,
   );
 }

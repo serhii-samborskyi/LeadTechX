@@ -705,8 +705,11 @@ async function saveProfile({ silent = false } = {}) {
     state.profile = data.profile;
     renderProfileFields(data.profile);
     if (!silent) {
+      const vagaroCatalogLabel = data.vagaroSync?.catalogType === "classes"
+        ? `${data.vagaroSync.classesImported || data.vagaroSync.servicesImported || 0} Vagaro classes synced`
+        : `${data.vagaroSync?.servicesImported || 0} Vagaro services synced`;
       el.profileMessage.textContent = data.vagaroSync
-        ? `Profile saved · ${data.vagaroSync.servicesImported || 0} Vagaro services synced${data.vagaroSync.policyEntriesExcluded ? ` · ${data.vagaroSync.policyEntriesExcluded} policy entries excluded` : ""}`
+        ? `Profile saved · ${vagaroCatalogLabel}${data.vagaroSync.policyEntriesExcluded ? ` · ${data.vagaroSync.policyEntriesExcluded} policy entries excluded` : ""}`
         : data.vagaroDisconnected
           ? "Profile saved · Vagaro disconnected"
           : "Profile saved";
