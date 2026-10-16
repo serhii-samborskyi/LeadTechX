@@ -3086,6 +3086,105 @@ function appointmentSummaryHtml({ profile, appointment, config, manageUrl = "" }
   }.</p><ul>${rows.join("")}</ul>`;
 }
 
+function appointmentDetailText(value) {
+  if (value === undefined || value === null || value === "") return "";
+  if (Array.isArray(value)) return value.map(appointmentDetailText).filter(Boolean).join(", ");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value).trim();
+}
+
+function appointmentDetailLabel(key, config) {
+  const configured = config?.intakeFields?.find((field) => field.fieldKey === key)?.label;
+  if (configured) return configured;
+  return String(key || "Detail")
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function businessAppointmentSummaryLines({ profile, appointment, config }) {
+  const intakeData =
+    appointment?.intakeData && typeof appointment.intakeData === "object" && !Array.isArray(appointment.intakeData)
+      ? appointment.intakeData
+      : {};
+  const externalData =
+    appointment?.raw && typeof appointment.raw === "object" && !Array.isArray(appointment.raw) ? appointment.raw : {};
+  const service =
+    appointment.serviceTitle || intakeData.service || intakeData.service_name || intakeData.serviceName || externalData.serviceTitle;
+  const professional =
+    appointment.professionalName ||
+    intakeData.professional ||
+    intakeData.professional_name ||
+    intakeData.professionalName ||
+    externalData.serviceProviderName ||
+    externalData.serviceProvider;
+  const address =
+    intakeData.address ||
+    intakeData.service_address ||
+    intakeData.serviceAddress ||
+    intakeData.location ||
+    externalData.serviceAddress ||
+    externalData.customerAddress ||
+    externalData.address ||
+    externalData.location;
+  const reason = appointment.reason || intakeData.reason || externalData.reason;
+  const notes = appointment.notes || intakeData.notes || externalData.notes || externalData.note || externalData.comments;
+  const status = String(appointment.status || appointment.bookingStatus || "booked").replace(/[_-]+/g, " ");
+  const lines = [
+    `New appointment for ${profile.businessName}`,
+    `Status: ${status}`,
+    appointment.scheduledStart || appointment.requestedAt
+      ? `When: ${formatAppointmentTime(appointment, config?.timezone)}`
+      : "",
+    appointment.customerName || intakeData.name ? `Customer: ${appointment.customerName || intakeData.name}` : "",
+    appointment.phone || intakeData.phone ? `Phone: ${appointment.phone || intakeData.phone}` : "",
+    appointment.email || intakeData.email ? `Email: ${appointment.email || intakeData.email}` : "",
+    service ? `Service: ${appointmentDetailText(service)}` : "",
+    professional ? `Professional: ${appointmentDetailText(professional)}` : "",
+    address ? `Address: ${appointmentDetailText(address)}` : "",
+    reason ? `Reason: ${appointmentDetailText(reason)}` : "",
+    notes ? `Notes: ${appointmentDetailText(notes)}` : "",
+    appointment.amount ? `Amount: ${appointment.currency ? `${appointment.currency} ` : ""}${appointment.amount}` : "",
+    appointment.externalId ? `External booking: ${appointment.externalId}` : "",
+    appointment.calendarProvider === "internal" && appointment.id
+      ? `Confirmation: ${appointmentConfirmationLabel(appointment)}`
+      : "",
+  ].filter(Boolean);
+  const includedKeys = new Set([
+    "name",
+    "customer_name",
+    "customerName",
+    "phone",
+    "email",
+    "service",
+    "service_name",
+    "serviceName",
+    "professional",
+    "professional_name",
+    "professionalName",
+    "address",
+    "service_address",
+    "serviceAddress",
+    "location",
+    "reason",
+    "notes",
+  ]);
+  for (const [key, value] of Object.entries(intakeData)) {
+    const detail = appointmentDetailText(value);
+    if (!includedKeys.has(key) && detail) lines.push(`${appointmentDetailLabel(key, config)}: ${detail}`);
+  }
+  return lines;
+}
+
+function businessAppointmentSummaryText(args) {
+  return businessAppointmentSummaryLines(args).join("\n");
+}
+
+function businessAppointmentSummaryHtml(args) {
+  const rows = businessAppointmentSummaryLines(args).map((line) => `<li>${htmlEscape(line)}</li>`);
+  return `<p>A new appointment was booked for <strong>${htmlEscape(args.profile.businessName)}</strong>.</p><ul>${rows.join("")}</ul>`;
+}
+
 function complaintEscalationMessage({ config, profile, customerName = "", customerPhone = "", complaint = "" }) {
   return templateText(config.complaintEscalationTemplate, {
     business_name: profile.businessName,
@@ -6706,6 +6805,9 @@ async function processVagaroAppointmentEvent({ connection, event }) {
   const payload = event.payload || {};
   const externalId = String(payload.appointmentId || "").trim();
   if (!externalId) return { skipped: true, reason: "missing_appointment_id" };
+  const existingAppointment = await prisma.bookingAppointment.findUnique({
+    where: { connectionId_externalId: { connectionId: connection.id, externalId } },
+  });
   const service = payload.serviceId
     ? await upsertVagaroService(connection, {
         serviceId: payload.serviceId,
@@ -6748,11 +6850,13 @@ async function processVagaroAppointmentEvent({ connection, event }) {
     status,
     source: payload.bookingSource || payload.onlineVsInhouse || null,
     amount: Number(payload.amount ?? NaN) || null,
+    currency: payload.currency || null,
     scheduledStart,
     scheduledEnd,
     timezone: connection.settings?.timezone || null,
     bookingUrl: payload.bookingUrl || connection.bookingUrl || null,
     manageUrl: payload.cancelRescheduleUrl || payload.manageUrl || connection.cancelRescheduleUrl || null,
+    notes: payload.notes || payload.note || payload.comments || null,
     raw: payload,
   };
   const appointment = await prisma.bookingAppointment.upsert({
@@ -6761,7 +6865,26 @@ async function processVagaroAppointmentEvent({ connection, event }) {
     update: data,
   });
   const match = await matchBookingLinkSendToAppointment({ connection, appointment, payload });
-  return { appointmentId: appointment.id, status, match };
+  let businessSummaryDelivery = null;
+  if (!existingAppointment && !["cancelled", "canceled", "deleted"].includes(String(status).toLowerCase())) {
+    try {
+      const profile = await prisma.businessProfile.findUnique({ where: { id: connection.businessProfileId } });
+      if (!profile) throw new Error("Business profile was not found");
+      const config = await ensureBusinessConfig(profile);
+      const settings = await getSettings();
+      businessSummaryDelivery = await sendBusinessAppointmentSummary({
+        settings,
+        profile,
+        config,
+        appointment,
+        source: "vagaro_booking_webhook",
+      });
+    } catch (error) {
+      businessSummaryDelivery = { error: error.message };
+      console.warn(`[appointments] Vagaro business summary failed for ${externalId}: ${error.message}`);
+    }
+  }
+  return { appointmentId: appointment.id, status, match, businessSummaryDelivery };
 }
 
 async function processVagaroEmployeeEvent({ connection, event }) {
@@ -7092,6 +7215,71 @@ async function sendAppointmentSummary({ settings, profile, config, appointment, 
         leadId: lead?.id || null,
         voiceCallId,
         appointmentId: appointment.id,
+        metadata,
+      });
+      result.emailSent = true;
+      result.emailDeliveryId = emailDelivery.delivery.id;
+    } catch (error) {
+      result.emailError = error.message;
+    }
+  }
+  return result;
+}
+
+async function sendBusinessAppointmentSummary({ settings, profile, config, appointment, source = "appointment_booking" }) {
+  const textEnabled = Boolean(config.appointmentNotificationTextEnabled);
+  const emailEnabled = Boolean(config.appointmentNotificationEmailEnabled);
+  const message = businessAppointmentSummaryText({ profile, appointment, config });
+  const internalAppointmentId = appointment.calendarProvider === "internal" ? appointment.id : null;
+  const metadata = {
+    source,
+    appointmentTime: formatAppointmentTime(appointment, config.timezone),
+    appointmentStatus: appointment.status || appointment.bookingStatus || "booked",
+    externalAppointmentId: appointment.externalId || null,
+  };
+  const result = {
+    textEnabled,
+    emailEnabled,
+    textSent: false,
+    emailSent: false,
+    textError: null,
+    emailError: null,
+    textDeliveryId: null,
+    emailDeliveryId: null,
+  };
+  if (textEnabled) {
+    try {
+      await ensureConfigEntitlements(profile, config);
+      if (!entitlementFeatureEnabled(config, "messageInboxEnabled")) {
+        throw new Error(`${planFeatureLabel("messageInboxEnabled")} is not included in this plan`);
+      }
+      const textDelivery = await deliverBusinessMessage({
+        settings,
+        profile,
+        toPhone: config.appointmentNotificationPhone,
+        message,
+        purpose: "business_appointment_summary",
+        appointmentId: internalAppointmentId,
+        metadata,
+      });
+      result.textSent = true;
+      result.textDeliveryId = textDelivery.delivery.id;
+      result.textProvider = textDelivery.provider;
+    } catch (error) {
+      result.textError = error.message;
+    }
+  }
+  if (emailEnabled) {
+    try {
+      const emailDelivery = await sendTrackedEmail({
+        settings,
+        profile,
+        toEmail: config.appointmentNotificationEmail,
+        subject: `New ${profile.businessName} appointment: ${appointment.customerName || "Customer"}`,
+        text: message,
+        html: businessAppointmentSummaryHtml({ profile, appointment, config }),
+        purpose: "business_appointment_summary_email",
+        appointmentId: internalAppointmentId,
         metadata,
       });
       result.emailSent = true;
@@ -9577,6 +9765,13 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       voiceCallId: context.voiceCallId || null,
       source: context.channel === "phone" ? "phone_agent_booking" : "browser_agent_booking",
     });
+    const businessSummaryDelivery = await sendBusinessAppointmentSummary({
+      settings,
+      profile,
+      config,
+      appointment,
+      source: context.channel === "phone" ? "phone_agent_booking" : "browser_agent_booking",
+    });
     if (contextLead?.id) {
       const contactPatch = leadContactPatch({
         lead: contextLead,
@@ -9624,6 +9819,7 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       emailSent: summaryDelivery.emailSent,
       manageUrl: summaryDelivery.manageUrl,
       summaryDelivery,
+      businessSummaryDelivery,
       message:
         appointment.status === "confirmed"
           ? `Appointment ${confirmationCode} is saved and confirmed. Summary sent by ${[
@@ -13415,11 +13611,36 @@ app.put("/api/business-admin/config", async (req, res) => {
       req.body.qualificationEnabled === undefined ? config.qualificationEnabled : Boolean(req.body.qualificationEnabled);
     const nextReviewRequestsEnabled =
       req.body.reviewRequestsEnabled === undefined ? config.reviewRequestsEnabled : Boolean(req.body.reviewRequestsEnabled);
+    const appointmentNotificationTextEnabled =
+      req.body.appointmentNotificationTextEnabled === undefined
+        ? Boolean(config.appointmentNotificationTextEnabled)
+        : Boolean(req.body.appointmentNotificationTextEnabled);
+    const appointmentNotificationEmailEnabled =
+      req.body.appointmentNotificationEmailEnabled === undefined
+        ? Boolean(config.appointmentNotificationEmailEnabled)
+        : Boolean(req.body.appointmentNotificationEmailEnabled);
+    const appointmentNotificationPhone = normalizeE164Phone(
+      req.body.appointmentNotificationPhone ?? config.appointmentNotificationPhone ?? "",
+    );
+    const appointmentNotificationEmail = String(
+      req.body.appointmentNotificationEmail ?? config.appointmentNotificationEmail ?? "",
+    )
+      .trim()
+      .toLowerCase();
     if (nextQualificationEnabled && !entitlements.features.outboundQualificationEnabled) {
       throw planGateError(`${planFeatureLabel("outboundQualificationEnabled")} is not included in this plan. ${featurePlanHint(entitlements)}`);
     }
     if (nextReviewRequestsEnabled && !entitlements.features.smartReviewsEnabled) {
       throw planGateError(`${planFeatureLabel("smartReviewsEnabled")} is not included in this plan. ${featurePlanHint(entitlements)}`);
+    }
+    if (appointmentNotificationTextEnabled && !entitlements.features.messageInboxEnabled) {
+      throw planGateError(`${planFeatureLabel("messageInboxEnabled")} is not included in this plan. ${featurePlanHint(entitlements)}`);
+    }
+    if (appointmentNotificationTextEnabled && !/^\+[1-9]\d{7,14}$/.test(appointmentNotificationPhone)) {
+      throw new Error("Enter a valid business notification phone in international format, such as +15551234567");
+    }
+    if (appointmentNotificationEmailEnabled && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(appointmentNotificationEmail)) {
+      throw new Error("Enter a valid business notification email address");
     }
     const rawBookingTrackingBaseUrl = req.body.bookingTrackingBaseUrl ?? config.bookingTrackingBaseUrl ?? "";
     const bookingTrackingBaseUrl = normalizeBookingTrackingBaseUrl(rawBookingTrackingBaseUrl);
@@ -13490,6 +13711,10 @@ app.put("/api/business-admin/config", async (req, res) => {
           req.body.complaintEscalationTemplate ?? config.complaintEscalationTemplate ?? "",
         ).trim(),
         managerNotificationPhone: String(req.body.managerNotificationPhone ?? config.managerNotificationPhone ?? "").trim(),
+        appointmentNotificationTextEnabled,
+        appointmentNotificationEmailEnabled,
+        appointmentNotificationPhone,
+        appointmentNotificationEmail,
         missedCallFollowupTemplate: String(
           req.body.missedCallFollowupTemplate ?? config.missedCallFollowupTemplate ?? "",
         ).trim(),
@@ -13886,7 +14111,14 @@ app.post("/api/business-admin/appointments", async (req, res) => {
     const summaryDelivery = req.body.sendSummary === false
       ? null
       : await sendAppointmentSummary({ settings, profile, config, appointment: updated, source: "manual_calendar_create" });
-    res.status(201).json({ appointment: updated, summaryDelivery });
+    const businessSummaryDelivery = await sendBusinessAppointmentSummary({
+      settings,
+      profile,
+      config,
+      appointment: updated,
+      source: "manual_calendar_create",
+    });
+    res.status(201).json({ appointment: updated, summaryDelivery, businessSummaryDelivery });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }

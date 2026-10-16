@@ -170,6 +170,10 @@ const el = {
   reviewLinkList: document.querySelector("#reviewLinkList"),
   complaintRecoveryInstructions: document.querySelector("#complaintRecoveryInstructions"),
   complaintEscalationTemplate: document.querySelector("#complaintEscalationTemplate"),
+  appointmentNotificationTextEnabled: document.querySelector("#appointmentNotificationTextEnabled"),
+  appointmentNotificationEmailEnabled: document.querySelector("#appointmentNotificationEmailEnabled"),
+  appointmentNotificationPhone: document.querySelector("#appointmentNotificationPhone"),
+  appointmentNotificationEmail: document.querySelector("#appointmentNotificationEmail"),
   missedCallFollowupTemplate: document.querySelector("#missedCallFollowupTemplate"),
   appointmentReminderTemplate: document.querySelector("#appointmentReminderTemplate"),
   saveInstructionsButton: document.querySelector("#saveInstructionsButton"),
@@ -648,6 +652,17 @@ function updateBookingFollowupUi() {
 function updateReviewFlowUi() {
   if (!el.reviewFlowSection || !el.reviewRequestsEnabled) return;
   el.reviewFlowSection.classList.toggle("is-disabled", !el.reviewRequestsEnabled.checked);
+}
+
+function updateAppointmentNotificationUi() {
+  const textLocked = !planAllows("messageInboxEnabled");
+  if (el.appointmentNotificationTextEnabled) el.appointmentNotificationTextEnabled.disabled = textLocked;
+  if (el.appointmentNotificationPhone) {
+    el.appointmentNotificationPhone.disabled = textLocked || !el.appointmentNotificationTextEnabled?.checked;
+  }
+  if (el.appointmentNotificationEmail) {
+    el.appointmentNotificationEmail.disabled = !el.appointmentNotificationEmailEnabled?.checked;
+  }
 }
 
 function adminIdentity() {
@@ -1550,7 +1565,9 @@ function applyPlanLocks() {
   planNotice(document.querySelector('[data-crm-panel="lead-webhook"] .crm-section-heading'), "leadWebhookEnabled", leadWebhookLocked);
 
   setNodesDisabled([el.refreshMessagesButton, el.testMessageProvider, el.testMessagePhone, el.testMessageBody, el.sendTestMessageButton], messageLocked);
+  setNodesDisabled([el.appointmentNotificationTextEnabled, el.appointmentNotificationPhone], messageLocked);
   planNotice(document.querySelector('[data-view="messages"] .admin-view-heading'), "messageInboxEnabled", messageLocked);
+  planNotice(document.querySelector(".appointment-notification-card > div"), "messageInboxEnabled", messageLocked);
   if (messageLocked) {
     el.messageList.className = "message-inbox empty";
     el.messageList.textContent = planGateMessage("messageInboxEnabled");
@@ -1558,6 +1575,7 @@ function applyPlanLocks() {
 
   setNodesDisabled([el.appointmentReminderTemplate], remindersLocked);
   planNotice(document.querySelector('[data-crm-panel="inbound-followup"] .crm-section-heading'), "appointmentRemindersEnabled", remindersLocked);
+  updateAppointmentNotificationUi();
 }
 
 function renderAvailability(rules) {
@@ -1641,6 +1659,11 @@ function applyAdminData(data) {
   el.reviewRequestTemplate.value = data.config.reviewRequestTemplate || "";
   el.complaintRecoveryInstructions.value = data.config.complaintRecoveryInstructions || "";
   el.complaintEscalationTemplate.value = data.config.complaintEscalationTemplate || "";
+  el.appointmentNotificationTextEnabled.checked = Boolean(data.config.appointmentNotificationTextEnabled);
+  el.appointmentNotificationEmailEnabled.checked = Boolean(data.config.appointmentNotificationEmailEnabled);
+  el.appointmentNotificationPhone.value = data.config.appointmentNotificationPhone || "";
+  el.appointmentNotificationEmail.value = data.config.appointmentNotificationEmail || "";
+  updateAppointmentNotificationUi();
   updateReviewFlowUi();
   el.missedCallFollowupTemplate.value = data.config.missedCallFollowupTemplate || "";
   el.appointmentReminderTemplate.value = data.config.appointmentReminderTemplate || "";
@@ -1755,6 +1778,10 @@ async function saveBusinessConfig() {
     reviewRequestTemplate: el.reviewRequestTemplate.value,
     complaintRecoveryInstructions: el.complaintRecoveryInstructions.value,
     complaintEscalationTemplate: el.complaintEscalationTemplate.value,
+    appointmentNotificationTextEnabled: el.appointmentNotificationTextEnabled.checked,
+    appointmentNotificationEmailEnabled: el.appointmentNotificationEmailEnabled.checked,
+    appointmentNotificationPhone: el.appointmentNotificationPhone.value,
+    appointmentNotificationEmail: el.appointmentNotificationEmail.value,
     missedCallFollowupTemplate: el.missedCallFollowupTemplate.value,
     appointmentReminderTemplate: el.appointmentReminderTemplate.value,
     appointmentMode: el.appointmentMode.value,
@@ -4027,6 +4054,8 @@ el.crmApplyDatesButton?.addEventListener("click", () => {
 });
 el.bookingFollowupEnabled?.addEventListener("change", updateBookingFollowupUi);
 el.reviewRequestsEnabled?.addEventListener("change", updateReviewFlowUi);
+el.appointmentNotificationTextEnabled?.addEventListener("change", updateAppointmentNotificationUi);
+el.appointmentNotificationEmailEnabled?.addEventListener("change", updateAppointmentNotificationUi);
 el.saveBookingFollowupButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.copyCrmWebhookButton.addEventListener("click", () => runAdmin(copyLeadWebhook));
 el.rotateCrmWebhookButton.addEventListener("click", () => runAdmin(rotateLeadWebhook));

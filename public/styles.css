@@ -4298,8 +4298,13 @@ a.appointment-field-value {
 }
 
 .appointment-editor-card,
+.appointment-notification-card,
 .review-directory-card {
   margin-bottom: 18px;
+}
+
+.appointment-notification-settings {
+  align-items: end;
 }
 
 .appointment-editor-card.is-read-only {

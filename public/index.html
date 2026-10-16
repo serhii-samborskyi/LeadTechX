@@ -371,6 +371,18 @@
               <label>Service filter<select id="calendarServiceFilter"><option value="">First available service</option></select></label>
               <label>Professional filter<select id="calendarProfessionalFilter"><option value="">Any professional</option></select></label>
             </div>
+            <div class="crm-webhook-card appointment-notification-card">
+              <div>
+                <h4>Business appointment summaries</h4>
+                <p>Notify the business when a new appointment or appointment request is booked. Customer confirmations are configured separately.</p>
+              </div>
+              <div class="form-grid appointment-notification-settings">
+                <label class="check-label"><input id="appointmentNotificationTextEnabled" type="checkbox" /> Send summary by text</label>
+                <label>Text destination<input id="appointmentNotificationPhone" type="tel" placeholder="+15551234567" /></label>
+                <label class="check-label"><input id="appointmentNotificationEmailEnabled" type="checkbox" /> Send summary by email</label>
+                <label>Email destination<input id="appointmentNotificationEmail" type="email" placeholder="owner@business.com" /></label>
+              </div>
+            </div>
             <div class="availability-list" id="availabilityRules"></div>
             <div class="crm-webhook-card appointment-editor-card">
               <div>
