@@ -42,6 +42,8 @@ const state = {
   booking: null,
   entitlements: null,
   planUsage: null,
+  billingData: null,
+  billingKeyboardSelectionVersion: 0,
   adTracking: null,
   businessName: params.get("business_name") || "Business Name",
   website: params.get("website") || "",
@@ -273,8 +275,15 @@ const el = {
   messageList: document.querySelector("#messageList"),
   refreshUsageButton: document.querySelector("#refreshUsageButton"),
   usageSummary: document.querySelector("#usageSummary"),
+  billingAccountBanner: document.querySelector("#billingAccountBanner"),
+  billingAccountState: document.querySelector("#billingAccountState"),
+  billingAccountTitle: document.querySelector("#billingAccountTitle"),
+  billingAccountMessage: document.querySelector("#billingAccountMessage"),
+  billingAccountBalance: document.querySelector("#billingAccountBalance"),
   billingStatus: document.querySelector("#billingStatus"),
+  billingCheckoutHint: document.querySelector("#billingCheckoutHint"),
   creditPackCredits: document.querySelector("#creditPackCredits"),
+  billingTopUpSection: document.querySelector("#billingTopUpSection"),
   billingPeriodSelect: document.querySelector("#billingPeriodSelect"),
   billingPlanSelect: document.querySelector("#billingPlanSelect"),
   billingPlanList: document.querySelector("#billingPlanList"),
@@ -3271,34 +3280,34 @@ function businessUsageText(text) {
 
 function renderUsage(data) {
   el.usageSummary.innerHTML = "";
-  const balance = document.createElement("span");
-  balance.className = `status-pill ${data.lowBalance ? "warning" : ""}`;
-  balance.textContent = `${data.creditBalance ?? 0} credits`;
-  el.usageSummary.appendChild(balance);
-  renderCreditBucketSummary(el.usageSummary, data.creditBuckets);
-  if (data.lowBalance) {
-    const warning = document.createElement("span");
-    warning.className = "status-pill warning";
-    warning.textContent = `low credit warning <= ${data.lowBalanceTokens ?? 0}`;
-    el.usageSummary.appendChild(warning);
-  }
+  const appendMetric = (label, value, tone = "") => {
+    const metric = document.createElement("div");
+    metric.className = `billing-usage-metric ${tone}`.trim();
+    const metricLabel = document.createElement("span");
+    metricLabel.textContent = label;
+    const metricValue = document.createElement("strong");
+    metricValue.textContent = value;
+    metric.append(metricLabel, metricValue);
+    el.usageSummary.appendChild(metric);
+  };
+  appendMetric("Available balance", `${data.creditBalance ?? 0} credits`, data.lowBalance ? "warning" : "");
   const rates = data.rates || {};
   for (const [label, value] of [
-    ["Phone/min", rates.telnyxMinuteCredits],
-    ["AI/min", rates.aiMinuteCredits],
-    ["Outbound", rates.outboundCallCredits],
-    ["Message", rates.messageCredits],
+    ["Phone rate", `${rates.telnyxMinuteCredits ?? 0} credits / min`],
+    ["AI voice rate", `${rates.aiMinuteCredits ?? 0} credits / min`],
+    ["Message rate", `${rates.messageCredits ?? 0} credits / message`],
   ]) {
-    const pill = document.createElement("span");
-    pill.className = "status-pill";
-    pill.textContent = `${label}: ${value ?? 0}`;
-    el.usageSummary.appendChild(pill);
+    appendMetric(label, value);
+  }
+  const bucketSummary = document.createElement("div");
+  bucketSummary.className = "billing-credit-breakdown";
+  renderCreditBucketSummary(bucketSummary, data.creditBuckets);
+  if (bucketSummary.childElementCount) el.usageSummary.appendChild(bucketSummary);
+  if (rates.outboundCallCredits !== undefined && rates.outboundCallCredits !== null) {
+    appendMetric("Outbound call", `${rates.outboundCallCredits} credits / call`);
   }
   for (const [category, total] of Object.entries(data.totals || {})) {
-    const pill = document.createElement("span");
-    pill.className = "status-pill";
-    pill.textContent = `${businessUsageCategoryLabel(category)}: ${total.credits || 0} credits`;
-    el.usageSummary.appendChild(pill);
+    appendMetric(`${businessUsageCategoryLabel(category)} used`, `${total.credits || 0} credits`);
   }
   el.usageList.innerHTML = "";
   for (const tx of data.transactions || []) {
@@ -3389,28 +3398,177 @@ function planBillingForPeriod(plan, settings, period) {
   };
 }
 
-function planFeatureLabels(plan) {
-  return [
-    `${plan.monthlyCredits || 0} monthly credits`,
-    `${plan.maxPhoneNumbers || 1} phone number${Number(plan.maxPhoneNumbers || 1) === 1 ? "" : "s"}`,
-    `${plan.maxTransferTargets ?? 0} transfer contact${Number(plan.maxTransferTargets ?? 0) === 1 ? "" : "s"}`,
-    `${plan.maxUsers || 1} user${Number(plan.maxUsers || 1) === 1 ? "" : "s"}`,
-    plan.outboundQualificationEnabled ? "Outbound qualification" : null,
-    plan.smartReviewsEnabled ? "Smart reviews" : null,
-    plan.callTransfersEnabled ? "Call transfers" : null,
-    plan.leadWebhookEnabled !== false ? "Lead webhook" : null,
-    plan.messageInboxEnabled !== false ? "Message inbox" : null,
-    plan.appointmentRemindersEnabled ? "Appointment reminders" : null,
-    plan.allowCreditTopups !== false ? "Credit top-ups" : null,
-    plan.prioritySupport ? "Priority support" : null,
-  ].filter(Boolean);
-}
-
 function planWaitlistedForBusiness(plan, currentPlan = null) {
   return Boolean(plan?.signupWaitlist && Number(currentPlan?.id || 0) !== Number(plan.id || 0));
 }
 
+function billingAccountPresentation(data) {
+  const accountStatus = String(data.accountStatus || "").trim().toLowerCase();
+  const currentPlan = data.currentPlan || null;
+  const checkoutResult = String(params.get("billing") || "").trim().toLowerCase();
+  if (checkoutResult === "success" && !currentPlan && accountStatus !== "paid") {
+    return {
+      tone: "success",
+      state: "Payment received",
+      title: "Your account is being updated",
+      message: "Your new plan should be ready shortly. Refresh this page if the status has not changed yet.",
+    };
+  }
+  if (accountStatus === "expired") {
+    return {
+      tone: "warning",
+      state: "Trial ended",
+      title: "Choose a plan to reactivate your account",
+      message: "Select a plan below to restore calls, messages, and booking tools.",
+    };
+  }
+  if (["cancelled", "canceled"].includes(accountStatus)) {
+    return {
+      tone: "warning",
+      state: "Subscription ended",
+      title: "Choose a plan to restart your account",
+      message: "Your business settings are still here. Select a plan below to resume service.",
+    };
+  }
+  if (accountStatus === "suspended") {
+    return {
+      tone: "warning",
+      state: "Account paused",
+      title: "Your account needs attention",
+      message: "Choose a plan below or contact support if you need help restoring service.",
+    };
+  }
+  if (currentPlan || accountStatus === "paid") {
+    return {
+      tone: "success",
+      state: "Active plan",
+      title: currentPlan ? `${currentPlan.name} is active` : "Your account is active",
+      message: "Calls, messages, and enabled business tools are available.",
+    };
+  }
+  if (accountStatus === "trial") {
+    return {
+      tone: "trial",
+      state: "Free trial",
+      title: "Your free trial is active",
+      message: "Choose a plan anytime to keep RingPort running after your trial.",
+    };
+  }
+  return {
+    tone: "warning",
+    state: checkoutResult === "cancelled" ? "Checkout not completed" : "No active plan",
+    title: "Choose a plan to activate your account",
+    message: "Select the option that fits your business, then continue to secure checkout.",
+  };
+}
+
+function billingCreditBalanceLabel(value) {
+  const credits = Math.round(Number(value || 0));
+  if (credits < 0) return `${Math.abs(credits)} credits over limit`;
+  return `${credits} credits`;
+}
+
+function billingPlanHighlights(plan) {
+  const labels = [
+    `${plan.maxPhoneNumbers || 1} phone number${Number(plan.maxPhoneNumbers || 1) === 1 ? "" : "s"}`,
+    `${plan.maxUsers || 1} user${Number(plan.maxUsers || 1) === 1 ? "" : "s"}`,
+    plan.callTransfersEnabled ? "Call transfers" : null,
+    plan.appointmentRemindersEnabled ? "Appointment reminders" : null,
+    plan.messageInboxEnabled !== false ? "Message inbox" : null,
+    plan.allowCreditTopups !== false ? "Credit top-ups" : null,
+  ].filter(Boolean);
+  return labels.slice(0, 4);
+}
+
+function updateBillingCheckoutSelection(data, selectedPlanId) {
+  const settings = data.settings || {};
+  const plans = data.availablePlans || [];
+  const currentPlan = data.currentPlan || null;
+  const selectedPeriod = normalizeBillingPeriod(el.billingPeriodSelect?.value || 1);
+  const selectedPlan = plans.find((plan) => String(plan.id) === String(selectedPlanId)) || null;
+  const canCheckout = Boolean(
+    data.stripe?.ready && selectedPlan && !planWaitlistedForBusiness(selectedPlan, currentPlan),
+  );
+  if (selectedPlan) {
+    const selectedBilling = planBillingForPeriod(selectedPlan, settings, selectedPeriod);
+    el.startSubscriptionButton.textContent = `Continue with ${selectedPlan.name}`;
+    el.billingCheckoutHint.textContent =
+      selectedPeriod === 12
+        ? `${moneyFromCents(selectedBilling.priceCents)} is billed once per year and includes ${selectedBilling.credits.toLocaleString()} credits.`
+        : `${moneyFromCents(selectedBilling.priceCents)} is billed monthly and includes ${selectedBilling.credits.toLocaleString()} credits each month.`;
+  } else {
+    el.startSubscriptionButton.textContent = "Continue to checkout";
+    el.billingCheckoutHint.textContent = "Choose a plan to see your checkout total.";
+  }
+  el.startSubscriptionButton.disabled = !canCheckout;
+}
+
+function selectBillingPlan(data, planId, { keyboard = false, focus = false } = {}) {
+  const plans = data.availablePlans || [];
+  const currentPlan = data.currentPlan || null;
+  const selectedPlan = plans.find(
+    (plan) => String(plan.id) === String(planId) && !planWaitlistedForBusiness(plan, currentPlan),
+  );
+  if (!selectedPlan) return;
+  const selectedPlanId = String(selectedPlan.id);
+  if (keyboard) {
+    state.billingKeyboardSelectionVersion += 1;
+    el.billingPlanList.classList.add("keyboard-selecting");
+  } else {
+    el.billingPlanList.classList.remove("keyboard-selecting");
+  }
+  el.billingPlanSelect.value = selectedPlanId;
+  let selectedCard = null;
+  for (const card of el.billingPlanList.querySelectorAll(".billing-plan-card")) {
+    const selected = card.dataset.planId === selectedPlanId;
+    const cardPlan = plans.find((plan) => String(plan.id) === String(card.dataset.planId));
+    const waitlisted = planWaitlistedForBusiness(cardPlan, currentPlan);
+    card.classList.toggle("selected", selected);
+    card.setAttribute("aria-checked", String(selected));
+    card.tabIndex = selected ? 0 : -1;
+    const choice = card.querySelector(".billing-plan-choice");
+    if (choice) {
+      choice.textContent = waitlisted
+        ? "Waitlist"
+        : currentPlan?.id === cardPlan?.id
+          ? "Current plan"
+          : selected
+            ? "Selected"
+            : "Select";
+    }
+    if (selected) selectedCard = card;
+  }
+  updateBillingCheckoutSelection(data, selectedPlanId);
+  if (focus) selectedCard?.focus({ preventScroll: true });
+  if (keyboard) {
+    const selectionVersion = state.billingKeyboardSelectionVersion;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (state.billingKeyboardSelectionVersion === selectionVersion) {
+          el.billingPlanList.classList.remove("keyboard-selecting");
+        }
+      });
+    });
+  }
+}
+
+function handleBillingPlanKeydown(event, data) {
+  const navigationKeys = new Set(["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"]);
+  if (!navigationKeys.has(event.key)) return;
+  const cards = Array.from(el.billingPlanList.querySelectorAll(".billing-plan-card:not(:disabled)"));
+  if (!cards.length) return;
+  const currentIndex = Math.max(0, cards.indexOf(event.currentTarget));
+  let nextIndex = currentIndex;
+  if (["ArrowRight", "ArrowDown"].includes(event.key)) nextIndex = (currentIndex + 1) % cards.length;
+  if (["ArrowLeft", "ArrowUp"].includes(event.key)) nextIndex = (currentIndex - 1 + cards.length) % cards.length;
+  if (event.key === "Home") nextIndex = 0;
+  if (event.key === "End") nextIndex = cards.length - 1;
+  event.preventDefault();
+  selectBillingPlan(data, cards[nextIndex].dataset.planId, { keyboard: true, focus: true });
+}
+
 function renderBilling(data) {
+  state.billingData = data;
   const stripe = data.stripe || {};
   const settings = data.settings || {};
   const plans = data.availablePlans || [];
@@ -3423,33 +3581,39 @@ function renderBilling(data) {
   }
   const ready = Boolean(stripe.ready);
   const selectablePlans = plans.filter((plan) => !planWaitlistedForBusiness(plan, currentPlan));
-  const subscriptionReady = ready && Boolean(selectablePlans.length);
-  const statusParts = [
-    stripe.configurationError || null,
-    stripe.configurationDetail || null,
-    ready ? "Stripe ready" : "Stripe not ready",
-    stripe.webhookConfigured ? "webhook configured" : "webhook missing",
-    currentPlan ? `plan ${currentPlan.name}` : "no active plan",
-    currentPlan ? `${currentPlan.monthlyCredits} monthly credits` : null,
-    stripe.subscriptionStatus ? `subscription ${stripe.subscriptionStatus}` : null,
-    stripe.subscriptionCurrentPeriodEnd ? `renews ${new Date(stripe.subscriptionCurrentPeriodEnd).toLocaleDateString()}` : null,
-  ].filter(Boolean);
-  el.billingStatus.textContent = statusParts.join(" · ");
+  const accountPresentation = billingAccountPresentation(data);
+  el.billingAccountBanner.className = `billing-account-banner ${accountPresentation.tone}`;
+  el.billingAccountState.textContent = accountPresentation.state;
+  el.billingAccountTitle.textContent = accountPresentation.title;
+  el.billingAccountMessage.textContent = accountPresentation.message;
+  el.billingAccountBalance.textContent = billingCreditBalanceLabel(data.creditBalance);
+  el.billingAccountBalance.classList.toggle("warning", Number(data.creditBalance || 0) < 0);
+  if (stripe.configurationError) {
+    el.billingStatus.textContent = "Checkout is temporarily unavailable. Please contact support.";
+  } else if (currentPlan) {
+    const renewal = stripe.subscriptionCurrentPeriodEnd
+      ? ` Your next renewal is ${new Date(stripe.subscriptionCurrentPeriodEnd).toLocaleDateString()}.`
+      : "";
+    el.billingStatus.textContent = `${currentPlan.name} includes ${currentPlan.monthlyCredits || 0} credits each month.${renewal}`;
+  } else {
+    el.billingStatus.textContent = "Select the option that best matches your monthly call volume.";
+  }
   el.creditPackCredits.value = settings.stripeCreditPackCredits || 1000;
   el.buyCreditsButton.disabled = !ready || currentPlan?.allowCreditTopups === false;
-  el.startSubscriptionButton.textContent = selectedPeriod === 12 ? "Start annual subscription" : "Start subscription";
+  el.billingTopUpSection.hidden = !currentPlan || currentPlan.allowCreditTopups === false;
   const previousPlanId = el.billingPlanSelect.value;
   el.billingPlanSelect.innerHTML = "";
-  const selectedPlanId = previousPlanId || String(currentPlan?.id || selectablePlans[0]?.id || "");
+  const previousPlanSelectable = selectablePlans.some((plan) => String(plan.id) === String(previousPlanId));
+  const selectedPlanId = previousPlanSelectable
+    ? String(previousPlanId)
+    : String(currentPlan?.id || selectablePlans[0]?.id || "");
   for (const plan of plans) {
     const billing = planBillingForPeriod(plan, settings, selectedPeriod);
     const option = document.createElement("option");
     option.value = String(plan.id);
     option.disabled = planWaitlistedForBusiness(plan, currentPlan);
-    option.textContent = `${plan.name} · ${moneyFromCents(billing.priceCents)} / ${
+    option.textContent = `${plan.name}, ${moneyFromCents(billing.priceCents)} per ${
       billing.months === 12 ? "year" : "month"
-    } · ${billing.credits} credits${
-      option.disabled ? " · waitlist" : plan.signupLimit ? ` · ${plan.signupSlotsRemaining ?? 0} slots left` : ""
     }`;
     option.selected = String(plan.id) === selectedPlanId;
     el.billingPlanSelect.appendChild(option);
@@ -3461,34 +3625,84 @@ function renderBilling(data) {
     el.billingPlanSelect.appendChild(option);
   }
   el.billingPlanList.innerHTML = "";
-  renderCreditBucketSummary(el.billingPlanList, data.creditBuckets);
   for (const plan of plans) {
     const billing = planBillingForPeriod(plan, settings, selectedPeriod);
-    const card = document.createElement("div");
-    card.className = `billing-plan-card ${currentPlan?.id === plan.id ? "active" : ""} ${planWaitlistedForBusiness(plan, currentPlan) ? "inactive" : ""}`;
+    const waitlisted = planWaitlistedForBusiness(plan, currentPlan);
+    const selected = String(plan.id) === selectedPlanId;
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = [
+      "billing-plan-card",
+      selected ? "selected" : "",
+      currentPlan?.id === plan.id ? "current" : "",
+      waitlisted ? "inactive" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    card.disabled = waitlisted;
+    card.dataset.planId = String(plan.id);
+    card.tabIndex = selected ? 0 : -1;
+    card.setAttribute("role", "radio");
+    card.setAttribute("aria-checked", String(selected));
+    const heading = document.createElement("span");
+    heading.className = "billing-plan-card-heading";
     const title = document.createElement("strong");
-    title.textContent = `${plan.name} · ${moneyFromCents(billing.priceCents)}${billing.months === 12 ? "/yr" : "/mo"}`;
-    const detail = document.createElement("span");
+    title.textContent = plan.name;
+    const choice = document.createElement("span");
+    choice.className = "billing-plan-choice";
+    choice.textContent = waitlisted
+      ? "Waitlist"
+      : currentPlan?.id === plan.id
+        ? "Current plan"
+        : selected
+          ? "Selected"
+          : "Select";
+    heading.append(title, choice);
+    const price = document.createElement("span");
+    price.className = "billing-plan-price";
+    price.textContent = `${moneyFromCents(billing.priceCents)} / ${billing.months === 12 ? "year" : "month"}`;
+    const credits = document.createElement("span");
+    credits.className = "billing-plan-credits";
+    credits.textContent = billing.months === 12
+      ? `${billing.credits.toLocaleString()} credits for the year`
+      : `${billing.credits.toLocaleString()} credits each month`;
+    const description = document.createElement("span");
+    description.className = "billing-plan-description";
+    description.textContent = plan.description || "Flexible service for your business.";
+    const features = document.createElement("span");
+    features.className = "billing-plan-features";
+    for (const label of billingPlanHighlights(plan)) {
+      const feature = document.createElement("span");
+      feature.textContent = label;
+      features.appendChild(feature);
+    }
     const slotLabel = planWaitlistedForBusiness(plan, currentPlan)
-      ? "waitlist"
+      ? "Join the waitlist to be notified when this plan opens."
       : plan.signupLimit
-        ? `${plan.signupSlotsRemaining ?? 0} signup slots left`
+        ? `${plan.signupSlotsRemaining ?? 0} signup slots left.`
         : null;
-    const creditLabel = billing.months === 12 ? `${billing.credits} credits for 12 months` : null;
-    const featureLabels = planFeatureLabels(plan).filter((_, index) => billing.months !== 12 || index !== 0);
-    detail.textContent = [slotLabel, creditLabel, ...featureLabels].filter(Boolean).join(" · ");
-    card.append(title, detail);
+    card.append(heading, price, credits, description, features);
+    if (slotLabel) {
+      const availability = document.createElement("span");
+      availability.className = "billing-plan-availability";
+      availability.textContent = slotLabel;
+      card.appendChild(availability);
+    }
+    if (!waitlisted) {
+      card.addEventListener("click", () => selectBillingPlan(data, plan.id));
+      card.addEventListener("keydown", (event) => handleBillingPlanKeydown(event, data));
+    }
     el.billingPlanList.appendChild(card);
   }
   if (!plans.length) el.billingPlanList.textContent = "No subscription plans are published yet.";
-  el.startSubscriptionButton.disabled = !subscriptionReady;
+  updateBillingCheckoutSelection(data, selectedPlanId);
   el.billingHistory.innerHTML = "";
   for (const session of data.checkoutSessions || []) {
     const row = document.createElement("div");
     row.className = "data-row compact-row";
     row.append(
       miniRow([
-        "Stripe checkout",
+        "Checkout",
         session.mode,
         session.status,
         session.subscriptionPlan ? session.subscriptionPlan.name : null,
@@ -3499,7 +3713,7 @@ function renderBilling(data) {
     );
     el.billingHistory.appendChild(row);
   }
-  if (!(data.checkoutSessions || []).length) el.billingHistory.textContent = "No Stripe checkouts yet.";
+  if (!(data.checkoutSessions || []).length) el.billingHistory.textContent = "No payments yet.";
 }
 
 async function loadBilling() {
@@ -3511,10 +3725,15 @@ async function loadBilling() {
 }
 
 async function refreshBillingTab() {
+  setAdminStatus("Loading billing");
   const results = await Promise.allSettled([loadUsage(), loadBilling()]);
   const failures = results.filter((result) => result.status === "rejected");
   if (failures.length === results.length) throw failures[0].reason;
-  if (failures.length) setAdminStatus(failures[0].reason?.message || "Billing loaded with partial data", true);
+  if (failures.length) {
+    setAdminStatus(failures[0].reason?.message || "Billing loaded with partial data", true);
+    return;
+  }
+  setAdminStatus("Billing updated");
 }
 
 async function loadUsage() {
@@ -3692,6 +3911,10 @@ async function initializePortal(user) {
   await loadSettings();
   await loadBusinessAdmin();
   await loadCrm().catch(() => {});
+  if (params.get("billing")) {
+    openBusinessTool("billing");
+    el.businessAdmin.scrollIntoView({ block: "start" });
+  }
 }
 
 async function checkSession() {
@@ -4134,8 +4357,10 @@ el.messageList.addEventListener("submit", (event) => {
   });
 });
 el.sendTestMessageButton.addEventListener("click", () => runAdmin(sendManualMessageFromBar));
-el.refreshUsageButton.addEventListener("click", () => runAdmin(loadUsage));
-el.billingPeriodSelect?.addEventListener("change", () => runAdmin(refreshBillingTab));
+el.refreshUsageButton.addEventListener("click", () => runAdmin(refreshBillingTab));
+el.billingPeriodSelect?.addEventListener("change", () => {
+  if (state.billingData) renderBilling(state.billingData);
+});
 el.buyCreditsButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("credits")));
 el.startSubscriptionButton.addEventListener("click", () => runAdmin(() => startBillingCheckout("subscription")));
 

@@ -760,33 +760,89 @@
           </section>
 
           <section class="admin-view" data-view="billing">
-            <div class="section-heading">
+            <div class="section-heading billing-heading">
               <div>
-                <h3>Billing and credits</h3>
-                <p>Call minutes, messages, credit deductions, and low-balance visibility.</p>
+                <h3>Billing</h3>
+                <p>Choose a plan, manage credits, and review past usage.</p>
               </div>
-              <button id="refreshUsageButton" type="button">Refresh usage</button>
+              <button id="refreshUsageButton" type="button">Refresh</button>
             </div>
-            <div class="crm-summary-strip" id="usageSummary"></div>
-            <div class="crm-webhook-card billing-card">
-              <div>
-                <h4>Billing</h4>
-                <p id="billingStatus">Loading billing status.</p>
+
+            <div class="billing-account-banner" id="billingAccountBanner" aria-live="polite">
+              <div class="billing-account-copy">
+                <span class="billing-account-state" id="billingAccountState">Account status</span>
+                <h4 id="billingAccountTitle">Loading your billing details</h4>
+                <p id="billingAccountMessage">Your plan options will appear in a moment.</p>
               </div>
-              <div class="inline-editor crm-editor billing-actions">
-                <input id="creditPackCredits" type="number" min="1" step="100" placeholder="Credits" />
-                <select id="billingPeriodSelect" aria-label="Billing period">
-                  <option value="1">Monthly</option>
-                  <option value="12">Annual</option>
-                </select>
-                <select id="billingPlanSelect" aria-label="Subscription plan"></select>
+              <div class="billing-account-balance">
+                <span>Credit balance</span>
+                <strong id="billingAccountBalance">Loading</strong>
+              </div>
+            </div>
+
+            <div class="billing-plan-shell">
+              <div class="billing-plan-heading">
+                <div>
+                  <span class="billing-step-label">Plan selection</span>
+                  <h4 id="billingPlanHeading">Choose the plan that fits your business</h4>
+                  <p id="billingStatus">Select a plan to continue.</p>
+                </div>
+                <label class="billing-period-control">
+                  <span>Billing cycle</span>
+                  <select id="billingPeriodSelect">
+                    <option value="1">Monthly</option>
+                    <option value="12">Annual</option>
+                  </select>
+                </label>
+              </div>
+              <select class="visually-hidden" id="billingPlanSelect" aria-label="Subscription plan"></select>
+              <div class="billing-plan-list" id="billingPlanList" role="radiogroup" aria-labelledby="billingPlanHeading"></div>
+              <div class="billing-checkout-bar">
+                <p id="billingCheckoutHint">Choose a plan to see your checkout total.</p>
+                <button class="primary" id="startSubscriptionButton" type="button">Continue to checkout</button>
+              </div>
+            </div>
+
+            <details class="billing-details" id="billingTopUpSection" hidden>
+              <summary>
+                <span>
+                  <strong>Buy extra credits</strong>
+                  <small>Add usage credits on top of your active plan.</small>
+                </span>
+              </summary>
+              <div class="billing-details-body billing-topup-body">
+                <label>
+                  <span>Credit amount</span>
+                  <input id="creditPackCredits" type="number" min="1" step="100" placeholder="Credits" />
+                </label>
                 <button id="buyCreditsButton" type="button">Buy credits</button>
-                <button id="startSubscriptionButton" type="button">Start subscription</button>
               </div>
-              <div class="crm-summary-strip" id="billingPlanList"></div>
-              <div class="data-list compact-list" id="billingHistory"></div>
-            </div>
-            <div class="data-list" id="usageList"></div>
+            </details>
+
+            <details class="billing-details" id="billingUsageDetails">
+              <summary>
+                <span>
+                  <strong>Credit usage and rates</strong>
+                  <small>See where credits were used and the current rates.</small>
+                </span>
+              </summary>
+              <div class="billing-details-body">
+                <div class="billing-usage-summary" id="usageSummary"></div>
+                <div class="data-list billing-activity-list" id="usageList"></div>
+              </div>
+            </details>
+
+            <details class="billing-details" id="billingHistoryDetails">
+              <summary>
+                <span>
+                  <strong>Payment history</strong>
+                  <small>Review completed and pending checkouts.</small>
+                </span>
+              </summary>
+              <div class="billing-details-body">
+                <div class="data-list compact-list billing-activity-list" id="billingHistory"></div>
+              </div>
+            </details>
           </section>
         </div>
       </section>
