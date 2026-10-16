@@ -280,6 +280,7 @@ const el = {
   billingAccountTitle: document.querySelector("#billingAccountTitle"),
   billingAccountMessage: document.querySelector("#billingAccountMessage"),
   billingAccountBalance: document.querySelector("#billingAccountBalance"),
+  billingInlineNotice: document.querySelector("#billingInlineNotice"),
   billingStatus: document.querySelector("#billingStatus"),
   billingCheckoutHint: document.querySelector("#billingCheckoutHint"),
   creditPackCredits: document.querySelector("#creditPackCredits"),
@@ -3480,6 +3481,32 @@ function billingPlanHighlights(plan) {
   return labels.slice(0, 4);
 }
 
+function setBillingInlineNotice(message = "", tone = "warning") {
+  if (!el.billingInlineNotice) return;
+  el.billingInlineNotice.textContent = message;
+  el.billingInlineNotice.className = `billing-inline-notice ${tone}`.trim();
+  el.billingInlineNotice.hidden = !message;
+}
+
+function setBillingUnavailableState() {
+  el.billingAccountBanner.className = "billing-account-banner warning";
+  el.billingAccountState.textContent = "Unable to load";
+  el.billingAccountTitle.textContent = "Billing is temporarily unavailable";
+  el.billingAccountMessage.textContent = "Refresh the page in a moment. Your account settings have not changed.";
+  el.billingAccountBalance.textContent = "Unavailable";
+  el.billingAccountBalance.classList.remove("warning");
+  el.billingPeriodSelect.disabled = true;
+  el.billingPlanList.replaceChildren();
+  el.billingPlanList.setAttribute("aria-busy", "false");
+  const emptyState = document.createElement("p");
+  emptyState.className = "billing-plan-empty";
+  emptyState.textContent = "Plan options could not be loaded. Use Refresh to try again.";
+  el.billingPlanList.appendChild(emptyState);
+  el.billingCheckoutHint.textContent = "Checkout will be available after billing reconnects.";
+  el.startSubscriptionButton.textContent = "Checkout unavailable";
+  el.startSubscriptionButton.disabled = true;
+}
+
 function updateBillingCheckoutSelection(data, selectedPlanId) {
   const settings = data.settings || {};
   const plans = data.availablePlans || [];
@@ -3569,12 +3596,14 @@ function handleBillingPlanKeydown(event, data) {
 
 function renderBilling(data) {
   state.billingData = data;
+  setBillingInlineNotice();
   const stripe = data.stripe || {};
   const settings = data.settings || {};
   const plans = data.availablePlans || [];
   const currentPlan = data.currentPlan || null;
   const selectedPeriod = normalizeBillingPeriod(el.billingPeriodSelect?.value || 1);
   if (el.billingPeriodSelect) {
+    el.billingPeriodSelect.disabled = false;
     el.billingPeriodSelect.value = String(selectedPeriod);
     const annualOption = el.billingPeriodSelect.querySelector('option[value="12"]');
     if (annualOption) annualOption.textContent = `Annual - save ${annualDiscountPercentFromSettings(settings)}%`;
@@ -3596,7 +3625,7 @@ function renderBilling(data) {
       : "";
     el.billingStatus.textContent = `${currentPlan.name} includes ${currentPlan.monthlyCredits || 0} credits each month.${renewal}`;
   } else {
-    el.billingStatus.textContent = "Select the option that best matches your monthly call volume.";
+    el.billingStatus.textContent = "Compare monthly credits and included tools.";
   }
   el.creditPackCredits.value = settings.stripeCreditPackCredits || 1000;
   el.buyCreditsButton.disabled = !ready || currentPlan?.allowCreditTopups === false;
@@ -3625,6 +3654,7 @@ function renderBilling(data) {
     el.billingPlanSelect.appendChild(option);
   }
   el.billingPlanList.innerHTML = "";
+  el.billingPlanList.setAttribute("aria-busy", "false");
   for (const plan of plans) {
     const billing = planBillingForPeriod(plan, settings, selectedPeriod);
     const waitlisted = planWaitlistedForBusiness(plan, currentPlan);
@@ -3694,7 +3724,12 @@ function renderBilling(data) {
     }
     el.billingPlanList.appendChild(card);
   }
-  if (!plans.length) el.billingPlanList.textContent = "No subscription plans are published yet.";
+  if (!plans.length) {
+    const emptyState = document.createElement("p");
+    emptyState.className = "billing-plan-empty";
+    emptyState.textContent = "No subscription plans are available right now. Please contact support for help.";
+    el.billingPlanList.appendChild(emptyState);
+  }
   updateBillingCheckoutSelection(data, selectedPlanId);
   el.billingHistory.innerHTML = "";
   for (const session of data.checkoutSessions || []) {
@@ -3726,11 +3761,28 @@ async function loadBilling() {
 
 async function refreshBillingTab() {
   setAdminStatus("Loading billing");
+  setBillingInlineNotice();
+  if (!state.billingData) el.billingPlanList.setAttribute("aria-busy", "true");
   const results = await Promise.allSettled([loadUsage(), loadBilling()]);
-  const failures = results.filter((result) => result.status === "rejected");
-  if (failures.length === results.length) throw failures[0].reason;
-  if (failures.length) {
-    setAdminStatus(failures[0].reason?.message || "Billing loaded with partial data", true);
+  const [usageResult, billingResult] = results;
+  if (billingResult.status === "rejected") {
+    if (!state.billingData) setBillingUnavailableState();
+    setBillingInlineNotice(
+      state.billingData
+        ? "Billing could not be refreshed. The previously loaded plan information is still shown."
+        : "Billing could not be loaded. Use Refresh to try again.",
+      "error",
+    );
+  }
+  if (usageResult.status === "rejected" && billingResult.status === "fulfilled") {
+    setBillingInlineNotice("Plans are available, but usage details could not be refreshed.");
+  }
+  if (results.every((result) => result.status === "rejected")) {
+    setAdminStatus("Billing could not be loaded", true);
+    return;
+  }
+  if (results.some((result) => result.status === "rejected")) {
+    setAdminStatus("Billing loaded with partial data", true);
     return;
   }
   setAdminStatus("Billing updated");
@@ -3976,6 +4028,11 @@ for (const tab of el.adminTabs) {
       item.setAttribute("aria-selected", String(selected));
     }
     for (const view of el.adminViews) view.classList.toggle("active", view.dataset.view === tab.dataset.tab);
+    const tabStrip = tab.parentElement;
+    tabStrip?.scrollTo({
+      left: tab.offsetLeft - (tabStrip.clientWidth - tab.clientWidth) / 2,
+      behavior: "auto",
+    });
     if (tab.dataset.tab === "calendar") {
       runAdmin(async () => {
         await loadBooking();

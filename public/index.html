@@ -287,7 +287,7 @@
               </div>
               <div id="vagaroSettingsPanel" class="vagaro-settings-panel" hidden>
                 <div class="form-grid booking-provider-grid">
-                  <label>Vagaro mode<select id="vagaroMode"><option value="simple">Simple — business link only</option><option value="api">API — live availability</option></select></label>
+                  <label>Vagaro mode<select id="vagaroMode"><option value="simple">Simple - business link only</option><option value="api">API - live availability</option></select></label>
                   <label>Vagaro business link<input id="vagaroBusinessUrl" type="url" placeholder="https://www.vagaro.com/shinehairspa" /></label>
                 </div>
                 <small id="vagaroSimpleModeHelp">Simple mode imports the public service list and sends customers to Vagaro to view live availability and book.</small>
@@ -780,26 +780,34 @@
               </div>
             </div>
 
+            <div class="billing-inline-notice" id="billingInlineNotice" role="alert" hidden></div>
+
             <div class="billing-plan-shell">
               <div class="billing-plan-heading">
                 <div>
-                  <span class="billing-step-label">Plan selection</span>
-                  <h4 id="billingPlanHeading">Choose the plan that fits your business</h4>
-                  <p id="billingStatus">Select a plan to continue.</p>
+                  <h4 id="billingPlanHeading">Choose a plan</h4>
+                  <p id="billingStatus">Compare monthly credits and included tools.</p>
                 </div>
                 <label class="billing-period-control">
                   <span>Billing cycle</span>
-                  <select id="billingPeriodSelect">
+                  <select id="billingPeriodSelect" disabled>
                     <option value="1">Monthly</option>
                     <option value="12">Annual</option>
                   </select>
                 </label>
               </div>
               <select class="visually-hidden" id="billingPlanSelect" aria-label="Subscription plan"></select>
-              <div class="billing-plan-list" id="billingPlanList" role="radiogroup" aria-labelledby="billingPlanHeading"></div>
+              <div class="billing-plan-list" id="billingPlanList" role="radiogroup" aria-labelledby="billingPlanHeading" aria-busy="true">
+                <div class="billing-plan-skeleton" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span>
+                </div>
+                <div class="billing-plan-skeleton" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span>
+                </div>
+              </div>
               <div class="billing-checkout-bar">
-                <p id="billingCheckoutHint">Choose a plan to see your checkout total.</p>
-                <button class="primary" id="startSubscriptionButton" type="button">Continue to checkout</button>
+                <p id="billingCheckoutHint" aria-live="polite">Plan totals will appear after billing loads.</p>
+                <button class="primary" id="startSubscriptionButton" type="button" disabled>Loading plans</button>
               </div>
             </div>
 
@@ -813,7 +821,7 @@
               <div class="billing-details-body billing-topup-body">
                 <label>
                   <span>Credit amount</span>
-                  <input id="creditPackCredits" type="number" min="1" step="100" placeholder="Credits" />
+                  <input id="creditPackCredits" type="number" min="1" step="100" />
                 </label>
                 <button id="buyCreditsButton" type="button">Buy credits</button>
               </div>
