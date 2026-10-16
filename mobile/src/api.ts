@@ -144,6 +144,30 @@ export function getDashboard(token: string) {
   return apiRequest<DashboardResponse>("/api/mobile/dashboard", { token });
 }
 
+export function saveMobileModule(
+  token: string,
+  moduleId: string,
+  profile: BusinessProfile,
+  values: Record<string, unknown>,
+) {
+  return apiRequest<DashboardResponse>(`/api/mobile/modules/${encodeURIComponent(moduleId)}`, {
+    method: "PUT",
+    token,
+    body: {
+      businessName: profile.businessName,
+      website: profile.website || "",
+      values,
+    },
+  });
+}
+
+export function createAgentTestSession(token: string) {
+  return apiRequest<{ accessToken: string; profile: BusinessProfile }>("/api/mobile/agent-test-session", {
+    method: "POST",
+    token,
+  });
+}
+
 export function getBilling(token: string, profile: BusinessProfile) {
   return apiRequest<BillingResponse>(
     `/api/business-admin/billing${queryString({ business_name: profile.businessName, website: profile.website || "" })}`,

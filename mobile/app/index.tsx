@@ -21,8 +21,10 @@ import {
   ArrowRight,
   Building2,
   CalendarDays,
+  ChevronRight,
   CheckCircle2,
   CreditCard,
+  ExternalLink,
   Globe2,
   LogIn,
   LogOut,
@@ -30,6 +32,7 @@ import {
   PhoneCall,
   PhoneOff,
   RefreshCw,
+  Save,
   Search,
   ShieldCheck,
   Sparkles,
@@ -37,8 +40,10 @@ import {
 } from "lucide-react-native";
 
 import {
+  API_BASE_URL,
   autocompletePlaces,
   buildMobileAgent,
+  createAgentTestSession,
   createSubscriptionCheckout,
   getBilling,
   getDashboard,
@@ -46,6 +51,7 @@ import {
   getPlaceDetails,
   login,
   logout,
+  saveMobileModule,
   savePreviewProfile,
   sendEmailCode,
   verifyEmailCode,
@@ -60,12 +66,25 @@ import type {
   BusinessProfile,
   DashboardResponse,
   FastAgentResponse,
+  MobileModule,
   PlaceSuggestion,
   SubscriptionPlan,
 } from "../src/types";
 
-type Screen = "boot" | "landing" | "building" | "review" | "test" | "claim" | "login" | "dashboard" | "agentTest" | "billing";
+type Screen =
+  | "boot"
+  | "landing"
+  | "building"
+  | "review"
+  | "test"
+  | "claim"
+  | "login"
+  | "dashboard"
+  | "agentTest"
+  | "billing"
+  | "module";
 type IconType = ComponentType<{ color?: string; size?: number; strokeWidth?: number }>;
+type ModuleFormValues = Record<string, string>;
 
 type EditableProfile = {
   summary: string;
@@ -120,6 +139,31 @@ function valueText(value: unknown, fallback = "Not set") {
   if (value === null || value === undefined || value === "") return fallback;
   if (typeof value === "string") return value;
   return String(value);
+}
+
+function formValuesFromModule(module?: MobileModule | null): ModuleFormValues {
+  const values: ModuleFormValues = {};
+  for (const field of module?.fields || []) values[field.key] = valueText(field.value, "");
+  return values;
+}
+
+function moduleHasEditableFields(module?: MobileModule | null) {
+  return Boolean(module?.fields?.length && ["business_profile", "agent_settings"].includes(module.id));
+}
+
+function moduleIcon(moduleId: string) {
+  if (moduleId === "calendar") return CalendarDays;
+  if (moduleId === "messaging") return MessageSquare;
+  if (moduleId === "billing") return CreditCard;
+  if (moduleId === "phone_numbers") return PhoneCall;
+  return Sparkles;
+}
+
+function openFastAgentWebTest(accessToken: string, deviceId?: string) {
+  const url = new URL(`${API_BASE_URL}/fastagent/`);
+  url.searchParams.set("token", accessToken);
+  if (deviceId) url.searchParams.set("mobile_device_id", deviceId);
+  return WebBrowser.openBrowserAsync(url.toString());
 }
 
 function Button({
@@ -304,6 +348,7 @@ function VoiceTestPanel({
         <Button label="Reset" icon={RefreshCw} variant="secondary" onPress={call.stop} />
       </View>
       {__DEV__ ? <Button label="Play test tone" icon={RefreshCw} variant="ghost" onPress={call.playDiagnosticTone} /> : null}
+      <Button label="Open browser test" icon={ExternalLink} variant="ghost" onPress={() => openFastAgentWebTest(agent.accessToken, deviceId)} />
       {agent.demoPhoneNumber ? (
         <Button
           label={`Call ${agent.demoPhoneNumber}`}
@@ -334,10 +379,12 @@ function OwnerVoiceTestPanel({
   dashboard,
   authToken,
   deviceId,
+  onOpenBrowserTest,
 }: {
   dashboard: DashboardResponse;
   authToken: string;
   deviceId: string;
+  onOpenBrowserTest: () => void;
 }) {
   const call = useLiveAgentCall({ sessionToken: authToken, deviceId });
   const isLive = ["connecting", "listening", "agent_speaking"].includes(call.status);
@@ -362,6 +409,7 @@ function OwnerVoiceTestPanel({
         <Button label="Reset" icon={RefreshCw} variant="secondary" onPress={call.stop} />
       </View>
       {__DEV__ ? <Button label="Play test tone" icon={RefreshCw} variant="ghost" onPress={call.playDiagnosticTone} /> : null}
+      <Button label="Open browser test" icon={ExternalLink} variant="ghost" onPress={onOpenBrowserTest} />
       {assignedNumber ? (
         <Button label={`Call ${assignedNumber}`} icon={PhoneCall} variant="ghost" onPress={() => Linking.openURL(`tel:${assignedNumber}`)} />
       ) : null}
@@ -378,6 +426,75 @@ function OwnerVoiceTestPanel({
           <Text style={styles.emptyText}>Transcript will appear during the test call.</Text>
         )}
       </View>
+    </View>
+  );
+}
+
+function ModuleDetailPanel({
+  module,
+  values,
+  busy,
+  onChange,
+  onSave,
+  onOpenBilling,
+}: {
+  module: MobileModule;
+  values: ModuleFormValues;
+  busy: boolean;
+  onChange: (key: string, value: string) => void;
+  onSave: () => void;
+  onOpenBilling: () => void;
+}) {
+  const Icon = moduleIcon(module.id);
+  const editable = moduleHasEditableFields(module);
+  const records = Array.isArray(module.records) ? module.records : [];
+
+  return (
+    <View style={styles.section}>
+      <View style={styles.moduleDetailHeader}>
+        <View style={styles.moduleIcon}>
+          <Icon color="#6a8f14" size={24} strokeWidth={2.3} />
+        </View>
+        <View style={styles.moduleCopy}>
+          <Text style={styles.sectionTitle}>{module.title}</Text>
+          <Text style={styles.moduleSummary}>{module.summary || module.status || "ready"}</Text>
+        </View>
+        <Text style={styles.moduleStatus}>{module.status || "ready"}</Text>
+      </View>
+
+      {module.fields?.map((field) => (
+        <TextField
+          key={field.key}
+          label={field.label}
+          value={values[field.key] || ""}
+          onChangeText={(value) => onChange(field.key, value)}
+          multiline={field.type === "textarea"}
+          keyboardType={field.type === "url" ? "url" : field.type === "number" ? "number-pad" : "default"}
+          autoCapitalize={field.type === "url" ? "none" : "sentences"}
+        />
+      ))}
+
+      {records.length ? (
+        <View style={styles.recordsList}>
+          {records.slice(0, 8).map((record, index) => {
+            const item = record && typeof record === "object" ? (record as Record<string, unknown>) : {};
+            return (
+              <View key={String(item.id || index)} style={styles.listItem}>
+                <Text style={styles.listTitle}>{valueText(item.label, valueText(item.phoneNumber, valueText(item.name, "Record")))}</Text>
+                <Text style={styles.listMeta}>{valueText(item.status, valueText(item.numberType, ""))}</Text>
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
+
+      {editable ? (
+        <Button label="Save changes" icon={Save} disabled={busy} onPress={onSave} />
+      ) : module.id === "billing" ? (
+        <Button label="Open billing" icon={CreditCard} disabled={busy} onPress={onOpenBilling} />
+      ) : (
+        <Text style={styles.emptyText}>No controls available.</Text>
+      )}
     </View>
   );
 }
@@ -405,11 +522,17 @@ export default function RingPortMobile() {
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [billing, setBilling] = useState<BillingResponse | null>(null);
   const [selectedPlanId, setSelectedPlanId] = useState<number | null>(null);
+  const [selectedModuleId, setSelectedModuleId] = useState("");
+  const [moduleForm, setModuleForm] = useState<ModuleFormValues>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const canBuildFromName = useMemo(() => Boolean(deviceId && query.trim().length >= 2), [deviceId, query]);
   const canBuildFromWebsite = useMemo(() => Boolean(deviceId && website.trim().length >= 5), [deviceId, website]);
+  const selectedModule = useMemo(
+    () => dashboard?.modules.find((module) => module.id === selectedModuleId) || null,
+    [dashboard?.modules, selectedModuleId],
+  );
 
   const loadDashboard = useCallback(async (token: string) => {
     const data = await getDashboard(token);
@@ -625,6 +748,54 @@ export default function RingPortMobile() {
       setBusy(false);
     }
   }, [authToken, dashboard?.profile]);
+
+  const openModule = useCallback(
+    (module: MobileModule) => {
+      if (module.id === "billing") {
+        openBilling();
+        return;
+      }
+      setSelectedModuleId(module.id);
+      setModuleForm(formValuesFromModule(module));
+      setError("");
+      setScreen("module");
+    },
+    [openBilling],
+  );
+
+  const updateModuleForm = useCallback((key: string, value: string) => {
+    setModuleForm((current) => ({ ...current, [key]: value }));
+  }, []);
+
+  const saveSelectedModule = useCallback(async () => {
+    if (!authToken || !dashboard?.profile || !selectedModule) return;
+    setBusy(true);
+    setError("");
+    try {
+      const nextDashboard = await saveMobileModule(authToken, selectedModule.id, dashboard.profile, moduleForm);
+      setDashboard(nextDashboard);
+      const nextModule = nextDashboard.modules.find((module) => module.id === selectedModule.id) || null;
+      setModuleForm(formValuesFromModule(nextModule));
+    } catch (moduleError) {
+      setError(moduleError instanceof Error ? moduleError.message : "Could not save this module.");
+    } finally {
+      setBusy(false);
+    }
+  }, [authToken, dashboard?.profile, moduleForm, selectedModule]);
+
+  const openOwnerBrowserTest = useCallback(async () => {
+    if (!authToken) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await createAgentTestSession(authToken);
+      await openFastAgentWebTest(response.accessToken, deviceId);
+    } catch (testError) {
+      setError(testError instanceof Error ? testError.message : "Could not open browser test.");
+    } finally {
+      setBusy(false);
+    }
+  }, [authToken, deviceId]);
 
   const startCheckout = useCallback(async () => {
     if (!authToken || !dashboard?.profile || !selectedPlanId || Platform.OS === "ios") return;
@@ -870,26 +1041,27 @@ export default function RingPortMobile() {
                   <Text style={styles.sectionTitle}>Control modules</Text>
                   <Button label="Billing" icon={CreditCard} variant="secondary" onPress={openBilling} />
                 </View>
-                {dashboard.modules.map((module) => (
-                  <View key={module.id} style={styles.moduleRow}>
-                    <View style={styles.moduleIcon}>
-                      {module.id === "calendar" ? (
-                        <CalendarDays color="#6a8f14" size={22} />
-                      ) : module.id === "messaging" ? (
-                        <MessageSquare color="#6a8f14" size={22} />
-                      ) : module.id === "billing" ? (
-                        <CreditCard color="#6a8f14" size={22} />
-                      ) : (
-                        <Sparkles color="#6a8f14" size={22} />
-                      )}
-                    </View>
-                    <View style={styles.moduleCopy}>
-                      <Text style={styles.moduleTitle}>{module.title}</Text>
-                      <Text style={styles.moduleSummary}>{module.summary || module.status}</Text>
-                    </View>
-                    <Text style={styles.moduleStatus}>{module.status || "ready"}</Text>
-                  </View>
-                ))}
+                {dashboard.modules.map((module) => {
+                  const Icon = moduleIcon(module.id);
+                  return (
+                    <Pressable
+                      key={module.id}
+                      accessibilityRole="button"
+                      onPress={() => openModule(module)}
+                      style={({ pressed }) => [styles.moduleRow, pressed && styles.pressed]}
+                    >
+                      <View style={styles.moduleIcon}>
+                        <Icon color="#6a8f14" size={22} strokeWidth={2.3} />
+                      </View>
+                      <View style={styles.moduleCopy}>
+                        <Text style={styles.moduleTitle}>{module.title}</Text>
+                        <Text style={styles.moduleSummary}>{module.summary || module.status}</Text>
+                      </View>
+                      <Text style={styles.moduleStatus}>{module.status || "ready"}</Text>
+                      <ChevronRight color="#65726c" size={18} strokeWidth={2.3} />
+                    </Pressable>
+                  );
+                })}
               </View>
 
               <View style={styles.section}>
@@ -913,7 +1085,25 @@ export default function RingPortMobile() {
             <>
               <TopChrome onBack={() => setScreen("dashboard")} />
               <BrandHeader title="Test the receptionist" subtitle={dashboard.profile.businessName} />
-              <OwnerVoiceTestPanel dashboard={dashboard} authToken={authToken} deviceId={deviceId} />
+              <OwnerVoiceTestPanel dashboard={dashboard} authToken={authToken} deviceId={deviceId} onOpenBrowserTest={openOwnerBrowserTest} />
+              {error ? <Text style={styles.errorText}>{error}</Text> : null}
+            </>
+          ) : null}
+
+          {screen === "module" && selectedModule ? (
+            <>
+              <TopChrome onBack={() => setScreen("dashboard")} />
+              <BrandHeader title={selectedModule.title} subtitle={dashboard?.profile.businessName || ""} />
+              <ModuleDetailPanel
+                module={selectedModule}
+                values={moduleForm}
+                busy={busy}
+                onChange={updateModuleForm}
+                onSave={saveSelectedModule}
+                onOpenBilling={openBilling}
+              />
+              {busy ? <ActivityIndicator color="#87b72d" /> : null}
+              {error ? <Text style={styles.errorText}>{error}</Text> : null}
             </>
           ) : null}
 
@@ -1080,6 +1270,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: 12,
+  },
+  moduleDetailHeader: {
+    minHeight: 78,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#dfe5df",
+    backgroundColor: "#ffffff",
+    padding: 12,
   },
   sectionTitle: {
     color: "#0a211c",
@@ -1262,6 +1463,9 @@ const styles = StyleSheet.create({
     borderColor: "#dfe5df",
     backgroundColor: "#ffffff",
     padding: 12,
+    gap: 9,
+  },
+  recordsList: {
     gap: 9,
   },
   bubble: {

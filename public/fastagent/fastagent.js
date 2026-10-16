@@ -17,6 +17,7 @@ const businessName = (params.get("business_name") || "").trim();
 const website = normalizeWebsiteInput(params.get("website"));
 const placeId = (params.get("place_id") || "").trim();
 const accessTokenFromUrl = (params.get("token") || params.get("access_token") || "").trim();
+const mobileDeviceIdFromUrl = (params.get("mobile_device_id") || params.get("mobileDeviceId") || "").trim();
 const shortCodeFromPath = /^\/(\d{8})\/?$/.exec(window.location.pathname)?.[1] || "";
 const claimToken = (params.get("claim_token") || "").trim();
 const emailParam = (params.get("email") || params.get("owner_email") || params.get("ownerEmail") || "").trim();
@@ -938,7 +939,7 @@ async function startCall() {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     state.ws = new WebSocket(`${protocol}//${location.host}/live`);
     state.ws.addEventListener("open", () => {
-      state.ws.send(JSON.stringify({ type: "start", demoToken: state.accessToken }));
+      state.ws.send(JSON.stringify({ type: "start", demoToken: state.accessToken, mobileDeviceId: mobileDeviceIdFromUrl }));
     });
     state.ws.addEventListener("message", async (event) => {
       const message = JSON.parse(event.data);

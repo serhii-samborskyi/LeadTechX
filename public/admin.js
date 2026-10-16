@@ -99,6 +99,7 @@ const el = {
   demoNumberCapacity: document.querySelector("#demoNumberCapacity"),
   demoCallerLimit: document.querySelector("#demoCallerLimit"),
   fastAgentBuildsPerIpPerHour: document.querySelector("#fastAgentBuildsPerIpPerHour"),
+  autoBuyTrialPhoneNumber: document.querySelector("#autoBuyTrialPhoneNumber"),
   smtpHost: document.querySelector("#smtpHost"),
   smtpPort: document.querySelector("#smtpPort"),
   smtpSecure: document.querySelector("#smtpSecure"),
@@ -506,6 +507,7 @@ async function loadSystem() {
   setPostbackEvents(data.settings.postbackEvents);
   renderAdEventRows(data.adEvents?.definitions || [], data.adEvents?.config || {});
   el.smtpSecure.checked = Boolean(data.settings.smtpSecure);
+  el.autoBuyTrialPhoneNumber.checked = Boolean(data.settings.autoBuyTrialPhoneNumber);
   el.postbackEnabled.checked = Boolean(data.settings.postbackEnabled);
   el.postbackIncludeAllParams.checked = Boolean(data.settings.postbackIncludeAllParams);
   el.postbackIncludeEmail.checked = data.settings.postbackIncludeEmail !== false;
@@ -1888,6 +1890,7 @@ el.systemForm.addEventListener("submit", async (event) => {
         demoNumberCapacity: Number(el.demoNumberCapacity.value),
         demoCallerLimit: Number(el.demoCallerLimit.value),
         fastAgentBuildsPerIpPerHour: Number(el.fastAgentBuildsPerIpPerHour.value),
+        autoBuyTrialPhoneNumber: el.autoBuyTrialPhoneNumber.checked,
         smtpHost: el.smtpHost.value,
         smtpPort: Number(el.smtpPort.value),
         smtpSecure: el.smtpSecure.checked,

@@ -1,0 +1,2 @@
+ALTER TABLE "AppSettings"
+  ADD COLUMN IF NOT EXISTS "autoBuyTrialPhoneNumber" BOOLEAN NOT NULL DEFAULT false;

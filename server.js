@@ -4725,6 +4725,7 @@ async function getSettings() {
       postbackParamKeys: DEFAULT_POSTBACK_PARAM_KEYS.join(","),
       annualPrepayDiscountPercent: 25,
       fastAgentBuildsPerIpPerHour: 5,
+      autoBuyTrialPhoneNumber: false,
     },
     update: {},
   });
@@ -5085,6 +5086,161 @@ async function startBusinessTrial({ businessProfileId, settings, source = "trial
 
   profile = await prisma.businessProfile.findUnique({ where: { id: profileId } });
   return { profile, started: true, trialStartedAt: now, trialEndsAt };
+}
+
+function nanpAreaCodeFromValue(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1, 4);
+  if (digits.length === 10) return digits.slice(0, 3);
+  return "";
+}
+
+function trialPhoneNumberAreaCode(profile) {
+  const rawData = profile?.rawData && typeof profile.rawData === "object" && !Array.isArray(profile.rawData) ? profile.rawData : {};
+  return (
+    nanpAreaCodeFromValue(rawData.phone) ||
+    nanpAreaCodeFromValue(rawData.contactPhone) ||
+    nanpAreaCodeFromValue(profile?.contact) ||
+    ""
+  );
+}
+
+function telnyxPhoneNumberValue(number) {
+  return String(number?.phone_number || number?.phoneNumber || number?.e164 || "").trim();
+}
+
+async function searchTrialTelnyxNumber(profile) {
+  const search = async (areaCode = "") => {
+    const query = new URLSearchParams();
+    query.set("filter[country_code]", "US");
+    query.set("filter[features]", "voice");
+    query.set("filter[phone_number_type]", "local");
+    query.set("filter[limit]", "10");
+    query.set("filter[reservable]", "true");
+    query.set("filter[exclude_held_numbers]", "true");
+    if (areaCode) query.set("filter[national_destination_code]", areaCode);
+    const data = await telnyxRequest(`/available_phone_numbers?${query}`);
+    return (data.data || []).map((number) => ({ ...number, phoneNumber: telnyxPhoneNumberValue(number) })).filter((number) => number.phoneNumber);
+  };
+  const areaCode = trialPhoneNumberAreaCode(profile);
+  const local = areaCode ? await search(areaCode).catch(() => []) : [];
+  return local[0] || (await search(""))[0] || null;
+}
+
+function trialPhoneNumberOrderId(orderData) {
+  const data = orderData?.data || orderData || {};
+  return data.id || data.order_id || null;
+}
+
+async function findOwnedTelnyxPhoneNumber(phoneNumber) {
+  const normalized = String(phoneNumber || "").trim();
+  const queries = [
+    new URLSearchParams({ "filter[phone_number]": normalized, "page[size]": "10" }),
+    new URLSearchParams({ "page[size]": "100" }),
+  ];
+  for (const query of queries) {
+    try {
+      const data = await telnyxRequest(`/phone_numbers?${query}`);
+      const match = (data.data || []).find((number) => telnyxPhoneNumberValue(number) === normalized);
+      if (match) return match;
+    } catch (error) {
+      if (!String(query).includes("filter%5Bphone_number%5D")) throw error;
+    }
+  }
+  return null;
+}
+
+async function recordTrialPhoneAutoBuyState(profileId, state) {
+  const current = await prisma.businessProfile.findUnique({ where: { id: profileId }, select: { rawData: true } }).catch(() => null);
+  const rawData = current?.rawData && typeof current.rawData === "object" && !Array.isArray(current.rawData) ? current.rawData : {};
+  await prisma.businessProfile.update({
+    where: { id: profileId },
+    data: {
+      rawData: {
+        ...rawData,
+        autoBuyTrialPhoneNumber: {
+          ...state,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    },
+  }).catch((error) => console.warn(`[telnyx] trial phone auto-buy state skipped: ${error.message}`));
+}
+
+async function maybeAutoBuyTrialPhoneNumber({ businessProfileId, settings, source = "trial_claim" }) {
+  if (!settings?.autoBuyTrialPhoneNumber) return { enabled: false, skipped: true, reason: "disabled" };
+  const profile = await prisma.businessProfile.findUnique({
+    where: { id: Number(businessProfileId) },
+    include: { users: { select: { id: true }, take: 1 }, voiceNumbers: true },
+  });
+  if (!profile) return { enabled: true, skipped: true, reason: "profile_not_found" };
+  const now = new Date();
+  if (profile.accountStatus !== "trial" || !profile.trialEndsAt || profile.trialEndsAt <= now) {
+    return { enabled: true, skipped: true, reason: "not_active_trial" };
+  }
+  if (!profile.users.length) return { enabled: true, skipped: true, reason: "email_not_confirmed" };
+  const regularNumbers = profile.voiceNumbers.filter((number) => number.numberType === "regular" && number.status !== "deleted");
+  if (regularNumbers.length) return { enabled: true, skipped: true, reason: "already_has_regular_number", voiceNumberId: regularNumbers[0].id };
+  try {
+    await requireBusinessLimit(profile.id, "maxPhoneNumbers", 0, "Phone number");
+    const connectionId = await systemSecret("telnyx_connection_id", "TELNYX_CONNECTION_ID");
+    if (!connectionId) throw new Error("Telnyx connection ID is not configured");
+    const available = await searchTrialTelnyxNumber(profile);
+    if (!available?.phoneNumber) throw new Error("No Telnyx trial phone number inventory was available");
+    const orderData = await telnyxRequest("/number_orders", {
+      method: "POST",
+      body: JSON.stringify({
+        phone_numbers: [{ phone_number: available.phoneNumber }],
+        connection_id: connectionId,
+        customer_reference: profile.cacheKey,
+      }),
+    });
+    await sleep(1500);
+    const ownedNumber = await findOwnedTelnyxPhoneNumber(available.phoneNumber);
+    if (!ownedNumber?.id) {
+      throw new Error(`Telnyx ordered ${available.phoneNumber}, but the phone number was not visible for assignment yet`);
+    }
+    await telnyxRequest(`/phone_numbers/${encodeURIComponent(ownedNumber.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ connection_id: connectionId, customer_reference: profile.cacheKey }),
+    });
+    const voiceNumber = await prisma.voiceNumber.upsert({
+      where: { providerNumberId: ownedNumber.id },
+      create: {
+        providerNumberId: ownedNumber.id,
+        phoneNumber: telnyxPhoneNumberValue(ownedNumber) || available.phoneNumber,
+        status: ownedNumber.status || "active",
+        connectionId,
+        numberType: "regular",
+        label: "Auto-bought trial number",
+        businessProfileId: profile.id,
+        metadata: { ...ownedNumber, autoBuyTrialPhoneNumber: { source, orderId: trialPhoneNumberOrderId(orderData) } },
+      },
+      update: {
+        phoneNumber: telnyxPhoneNumberValue(ownedNumber) || available.phoneNumber,
+        status: ownedNumber.status || "active",
+        connectionId,
+        numberType: "regular",
+        label: "Auto-bought trial number",
+        businessProfileId: profile.id,
+        metadata: { ...ownedNumber, autoBuyTrialPhoneNumber: { source, orderId: trialPhoneNumberOrderId(orderData) } },
+      },
+    });
+    const result = {
+      enabled: true,
+      purchased: true,
+      phoneNumber: voiceNumber.phoneNumber,
+      voiceNumberId: voiceNumber.id,
+      providerNumberId: voiceNumber.providerNumberId,
+      orderId: trialPhoneNumberOrderId(orderData),
+    };
+    await recordTrialPhoneAutoBuyState(profile.id, { status: "purchased", source, ...result });
+    return result;
+  } catch (error) {
+    console.warn(`[telnyx] trial phone auto-buy failed for business ${profile.id}: ${error.message}`);
+    await recordTrialPhoneAutoBuyState(profile.id, { status: "failed", source, error: error.message });
+    return { enabled: true, purchased: false, error: error.message };
+  }
 }
 
 async function allocateDemoNumber(profile, settings) {
@@ -10917,9 +11073,15 @@ app.post("/api/onboarding/complete", async (req, res) => {
       settings,
       source: "account_setup",
     });
+    const trialPhoneNumber = await maybeAutoBuyTrialPhoneNumber({
+      businessProfileId: claim.businessProfileId,
+      settings,
+      source: "account_setup",
+    });
     setSessionCookie(req, res, session.token);
     res.status(201).json({
       user: { id: user.id, email: user.email, name: user.name, role: user.role, business: trial.profile || user.businessProfile },
+      ...(trialPhoneNumber.enabled ? { trialPhoneNumber } : {}),
     });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -10951,8 +11113,8 @@ function mobileAppStoreConfig() {
     backendUrl: "https://ai.ringport.app",
     billing: {
       provider: "stripe",
-      iosExternalCheckoutMode: "region_gated",
-      iosStripeCheckoutAllowedCountries: ["US"],
+      iosExternalCheckoutMode: "hidden_worldwide",
+      iosStripeCheckoutAllowedCountries: [],
       androidStripeCheckout: true,
     },
     onboarding: {
@@ -11342,6 +11504,11 @@ app.post("/api/mobile/onboarding/verify-code", async (req, res) => {
       settings,
       source: "mobile_email_claim",
     });
+    const trialPhoneNumber = await maybeAutoBuyTrialPhoneNumber({
+      businessProfileId: session.businessProfileId,
+      settings,
+      source: "mobile_email_claim",
+    });
     const auth = issueToken();
     const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
     await prisma.session.create({ data: { tokenHash: auth.tokenHash, userId: user.id, expiresAt } });
@@ -11358,6 +11525,7 @@ app.post("/api/mobile/onboarding/verify-code", async (req, res) => {
         started: trial.started,
         endsAt: trial.profile?.trialEndsAt || null,
         credits: trial.profile?.creditBalance ?? null,
+        ...(trialPhoneNumber.enabled ? { phoneNumber: trialPhoneNumber } : {}),
       },
     });
   } catch (error) {
@@ -11378,6 +11546,81 @@ app.get("/api/mobile/modules", requireAuth, requireBusinessMobileUser, async (re
     const { profile, config } = await adminContext("", "", req.user);
     const admin = await businessAdminResponse(profile, config);
     res.json({ schemaVersion: 1, modules: mobileModuleDescriptors({ profile, config, admin }) });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.put("/api/mobile/modules/:moduleId", requireAuth, requireBusinessMobileUser, async (req, res) => {
+  try {
+    const moduleId = String(req.params.moduleId || "").trim();
+    const values = req.body?.values && typeof req.body.values === "object" ? req.body.values : {};
+    const { profile, config } = await adminContext("", "", req.user);
+
+    if (moduleId === "business_profile") {
+      const businessName = normalizeBusinessName(values.businessName ?? profile.businessName);
+      const website = values.website === undefined ? profile.website : normalizeWebsite(values.website);
+      if (!businessName) throw new Error("Business name is required");
+      const rawData = profile.rawData && typeof profile.rawData === "object" && !Array.isArray(profile.rawData)
+        ? profile.rawData
+        : {};
+      const nextRawData = {
+        ...rawData,
+        businessName,
+        website,
+        address: String(values.address ?? rawData.address ?? "").trim() || "unknown",
+        phone: String(values.phone ?? rawData.phone ?? "").trim() || "unknown",
+        email: String(values.email ?? rawData.email ?? "").trim() || "unknown",
+      };
+      const nextProfile = {
+        businessName,
+        website,
+        summary: String(values.summary ?? profile.summary ?? "").trim(),
+        hours: String(values.hours ?? profile.hours ?? "").trim(),
+        services: String(values.services ?? profile.services ?? "").trim(),
+        serviceArea: String(values.serviceArea ?? profile.serviceArea ?? "").trim(),
+        contact: [nextRawData.phone, nextRawData.email, nextRawData.address].filter((value) => value && value !== "unknown").join(" | "),
+        rawData: nextRawData,
+      };
+      await prisma.businessProfile.update({
+        where: { id: profile.id },
+        data: {
+          ...nextProfile,
+          normalized: businessName,
+          cacheKey: businessCacheKey(businessName, website),
+          systemPrompt: buildSystemPrompt(nextProfile),
+        },
+      });
+    } else if (moduleId === "agent_settings") {
+      await prisma.businessConfig.update({
+        where: { id: config.id },
+        data: {
+          agentName: String(values.agentName ?? config.agentName ?? "Alex").trim().slice(0, 80) || "Alex",
+          language: String(values.language ?? config.language ?? "English").trim().slice(0, 80) || "English",
+          voiceName: String(values.voiceName ?? config.voiceName ?? "Puck").trim().slice(0, 80) || "Puck",
+          extraInstructions: String(values.extraInstructions ?? config.extraInstructions ?? "").trim(),
+        },
+      });
+    } else {
+      return res.status(400).json({ error: "This module is not editable in the mobile app yet", code: "MODULE_NOT_EDITABLE" });
+    }
+
+    res.json(await mobileDashboard(req.user));
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.post("/api/mobile/agent-test-session", requireAuth, requireBusinessMobileUser, async (req, res) => {
+  try {
+    const { profile, config } = await adminContext("", "", req.user);
+    const settings = await getSettings();
+    await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
+    const access = issueToken();
+    await prisma.fastAgentSession.create({
+      data: { tokenHash: access.tokenHash, businessProfileId: profile.id, expiresAt: fastAgentAccessExpiresAt(profile, settings) },
+    });
+    res.status(201).json({ accessToken: access.token, profile: publicBusinessProfile(profile, config) });
   } catch (error) {
     res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
@@ -12238,6 +12481,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         demoNumberCapacity: Math.max(1, Number(req.body.demoNumberCapacity || 10)),
         demoCallerLimit: Math.max(1, Number(req.body.demoCallerLimit || 3)),
         fastAgentBuildsPerIpPerHour: fastAgentBuildsPerIpLimit(req.body.fastAgentBuildsPerIpPerHour ?? 5),
+        autoBuyTrialPhoneNumber: Boolean(req.body.autoBuyTrialPhoneNumber),
         smtpHost: String(req.body.smtpHost || "").trim(),
         smtpPort: Math.max(1, Number(req.body.smtpPort || 587)),
         smtpSecure: Boolean(req.body.smtpSecure),
@@ -12304,6 +12548,8 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
           req.body.fastAgentBuildsPerIpPerHour === undefined
             ? undefined
             : fastAgentBuildsPerIpLimit(req.body.fastAgentBuildsPerIpPerHour),
+        autoBuyTrialPhoneNumber:
+          typeof req.body.autoBuyTrialPhoneNumber === "boolean" ? req.body.autoBuyTrialPhoneNumber : undefined,
         smtpHost: typeof req.body.smtpHost === "string" ? req.body.smtpHost.trim() : undefined,
         smtpPort: req.body.smtpPort === undefined ? undefined : Math.max(1, Number(req.body.smtpPort)),
         smtpSecure: typeof req.body.smtpSecure === "boolean" ? req.body.smtpSecure : undefined,
@@ -18548,7 +18794,7 @@ wss.on("connection", (clientWs, request) => {
           const demoSession = await fastAgentSession(message.demoToken);
           if (!demoSession) throw new Error("This demo session is invalid or expired");
           const demoStatus = String(demoSession.businessProfile.accountStatus || "").toLowerCase();
-          if (!["unclaimed", "trial"].includes(demoStatus)) throw new Error("This demo is no longer active");
+          if (!["unclaimed", "trial", "paid"].includes(demoStatus)) throw new Error("This demo is no longer active");
           if (demoStatus === "unclaimed") {
             const alreadyClaimed = await prisma.user.findFirst({ where: { businessProfileId: demoSession.businessProfileId }, select: { id: true } });
             if (alreadyClaimed) throw new Error("This business has already been claimed. Log in to test it.");

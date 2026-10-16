@@ -28,8 +28,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ...config.ios,
       appleTeamId: process.env.EXPO_APPLE_TEAM_ID || config.ios?.appleTeamId,
       bundleIdentifier: "ai.ringport.app",
-      buildNumber: "2",
-      supportsTablet: true,
+      buildNumber: "3",
+      supportsTablet: false,
       infoPlist: {
         ...config.ios?.infoPlist,
         ITSAppUsesNonExemptEncryption: false,
@@ -44,7 +44,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     android: {
       ...config.android,
       package: "ai.ringport.app",
-      versionCode: 1,
+      versionCode: 2,
       permissions: ["RECORD_AUDIO"],
       adaptiveIcon: {
         backgroundColor: "#071a16",

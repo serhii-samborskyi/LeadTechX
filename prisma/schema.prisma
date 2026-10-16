@@ -617,6 +617,7 @@ model AppSettings {
   demoNumberCapacity          Int      @default(10)
   demoCallerLimit             Int      @default(3)
   fastAgentBuildsPerIpPerHour Int      @default(5)
+  autoBuyTrialPhoneNumber     Boolean  @default(false)
   smtpHost                    String   @default("")
   smtpPort                    Int      @default(587)
   smtpSecure                  Boolean  @default(false)
