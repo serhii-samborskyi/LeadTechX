@@ -17,6 +17,7 @@ const businessName = (params.get("business_name") || "").trim();
 const website = normalizeWebsiteInput(params.get("website"));
 const placeId = (params.get("place_id") || "").trim();
 const accessTokenFromUrl = (params.get("token") || params.get("access_token") || "").trim();
+const shortCodeFromPath = /^\/(\d{8})\/?$/.exec(window.location.pathname)?.[1] || "";
 const claimToken = (params.get("claim_token") || "").trim();
 const emailParam = (params.get("email") || params.get("owner_email") || params.get("ownerEmail") || "").trim();
 const requestedPlan = (params.get("plan") || params.get("plan_slug") || params.get("subscription_plan") || "").trim();
@@ -28,7 +29,11 @@ const storageKey = placeId
     : "";
 
 const state = {
-  accessToken: accessTokenFromUrl || (storageKey ? localStorage.getItem(storageKey) || "" : ""),
+  accessToken:
+    accessTokenFromUrl ||
+    (shortCodeFromPath ? `short:${shortCodeFromPath}` : "") ||
+    (storageKey ? localStorage.getItem(storageKey) || "" : ""),
+  shortUrl: "",
   claimToken,
   profile: null,
   profileDirty: false,
@@ -84,6 +89,7 @@ const el = Object.fromEntries(
     "credits",
     "profileForm",
     "profileSaveButton",
+    "copyAgentLinkButton",
     "profileMessage",
     "profileSummary",
     "profilePhone",
@@ -738,6 +744,8 @@ function renderTrialState(profile) {
 
 function renderAgent(data) {
   state.profile = data.profile;
+  state.shortUrl = data.shortUrl || state.shortUrl;
+  el.copyAgentLinkButton.hidden = !state.shortUrl;
   if (data.profile?.subscriptionPlanId) {
     state.selectedPlanId = Number(data.profile.subscriptionPlanId);
   } else if (data.selectedPlan?.id) {
@@ -1073,6 +1081,38 @@ el.profileForm.addEventListener("submit", async (event) => {
     await saveProfile();
   } catch {
     // The message is already shown beside the profile form.
+  }
+});
+el.copyAgentLinkButton.addEventListener("click", async () => {
+  if (!state.shortUrl) return;
+  const label = el.copyAgentLinkButton.querySelector("span");
+  const originalLabel = label.textContent;
+  el.copyAgentLinkButton.disabled = true;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(state.shortUrl);
+    } else {
+      const copyField = document.createElement("textarea");
+      copyField.value = state.shortUrl;
+      copyField.setAttribute("readonly", "");
+      copyField.style.position = "fixed";
+      copyField.style.opacity = "0";
+      document.body.appendChild(copyField);
+      copyField.select();
+      const copied = document.execCommand("copy");
+      copyField.remove();
+      if (!copied) throw new Error("Copy failed");
+    }
+    label.textContent = "Copied";
+    el.copyAgentLinkButton.classList.add("copied");
+  } catch {
+    label.textContent = "Copy failed";
+  } finally {
+    window.setTimeout(() => {
+      label.textContent = originalLabel;
+      el.copyAgentLinkButton.classList.remove("copied");
+      el.copyAgentLinkButton.disabled = false;
+    }, 1800);
   }
 });
 el.callerForm.addEventListener("submit", async (event) => {

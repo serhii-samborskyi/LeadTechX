@@ -744,6 +744,7 @@ model VoiceNumber {
 model FastAgentSession {
   id                Int             @id @default(autoincrement())
   tokenHash         String          @unique
+  shortCode         String?         @unique
   businessProfileId Int
   businessProfile   BusinessProfile @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
   expiresAt         DateTime

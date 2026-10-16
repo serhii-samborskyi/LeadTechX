@@ -407,6 +407,7 @@ function issueToken() {
 
 const BOOKING_SHORT_CODE_PATTERN = /^BK[A-Z0-9]{4,12}$/;
 const BOOKING_SHORT_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const FAST_AGENT_SHORT_CODE_PATTERN = /^\d{8}$/;
 
 function randomBookingShortCode() {
   let suffix = "";
@@ -430,6 +431,19 @@ async function generateBookingShortCode() {
     if (!(await bookingShortCodeExists(shortCode))) return shortCode;
   }
   throw new Error("Could not generate a unique booking short link");
+}
+
+function randomFastAgentShortCode() {
+  return String(crypto.randomInt(10_000_000, 100_000_000));
+}
+
+async function generateFastAgentShortCode() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const shortCode = randomFastAgentShortCode();
+    const existing = await prisma.fastAgentSession.findUnique({ where: { shortCode }, select: { id: true } });
+    if (!existing) return shortCode;
+  }
+  throw new Error("Could not generate a unique fast agent link");
 }
 
 function setSessionCookie(req, res, token) {
@@ -5160,8 +5174,9 @@ async function resolveInboundBusiness(voiceNumber, callerPhone) {
 
 async function fastAgentSession(token) {
   if (!token) return null;
+  const shortCode = String(token).match(/^short:(\d{8})$/)?.[1] || "";
   const session = await prisma.fastAgentSession.findUnique({
-    where: { tokenHash: sessionTokenHash(token) },
+    where: shortCode ? { shortCode } : { tokenHash: sessionTokenHash(token) },
     include: { businessProfile: true },
   });
   if (!session || session.expiresAt <= new Date()) return null;
@@ -5169,10 +5184,36 @@ async function fastAgentSession(token) {
   return session;
 }
 
+async function ensureFastAgentShortCode(session) {
+  if (session?.shortCode) return session.shortCode;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const shortCode = await generateFastAgentShortCode();
+    try {
+      const updated = await prisma.fastAgentSession.updateMany({
+        where: { id: session.id, shortCode: null },
+        data: { shortCode },
+      });
+      if (updated.count) return shortCode;
+      const assigned = await prisma.fastAgentSession.findUnique({
+        where: { id: session.id },
+        select: { shortCode: true },
+      });
+      if (assigned?.shortCode) return assigned.shortCode;
+    } catch (error) {
+      if (error?.code !== "P2002") throw error;
+    }
+  }
+  throw new Error("Could not assign a fast agent link");
+}
+
 function requestBaseUrl(req, settings) {
   const configured = String(settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
   if (/^https?:\/\//i.test(configured)) return configured;
   return `${req.protocol}://${req.get("host")}`;
+}
+
+function fastAgentShortUrl(req, settings, shortCode) {
+  return new URL(`/${encodeURIComponent(shortCode)}`, `${requestBaseUrl(req, settings)}/`).toString();
 }
 
 function normalizedBookingProvider(value) {
@@ -10359,9 +10400,14 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
     const config = await ensureBusinessConfig(profile);
     await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
     const access = issueToken();
-    await prisma.fastAgentSession.create({
-      data: { tokenHash: access.tokenHash, businessProfileId: profile.id, expiresAt: fastAgentAccessExpiresAt(profile, settings) },
+    const fastAgentSessionRecord = await prisma.fastAgentSession.create({
+      data: {
+        tokenHash: access.tokenHash,
+        businessProfileId: profile.id,
+        expiresAt: fastAgentAccessExpiresAt(profile, settings),
+      },
     });
+    const shortCode = await ensureFastAgentShortCode(fastAgentSessionRecord);
     let demoAssignment = await prisma.demoNumberAssignment.findUnique({
       where: { businessProfileId: profile.id },
       include: { voiceNumber: true },
@@ -10371,6 +10417,7 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
     }
     res.status(profileActiveTrial ? 200 : 201).json({
       accessToken: access.token,
+      shortUrl: fastAgentShortUrl(req, settings, shortCode),
       cached: researched.cached,
       profile: publicBusinessProfile(profile, config),
       trial: {
@@ -10394,6 +10441,7 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
   const session = await fastAgentSession(req.query.token);
   if (!session) return res.status(401).json({ error: "This demo session is invalid or expired" });
   const settings = await getSettings();
+  const shortCode = await ensureFastAgentShortCode(session);
   const requestedPlan = await activeSubscriptionPlanFromParam(req.query.plan || req.query.planSlug || req.query.subscriptionPlan);
   let sessionProfile = session.businessProfile;
   let selectedPlan = requestedPlan ? await planWithSignupUsage(requestedPlan) : null;
@@ -10420,6 +10468,7 @@ app.get("/api/onboarding/fast-agent", async (req, res) => {
   }
   const config = await ensureBusinessConfig(sessionProfile);
   res.json({
+    shortUrl: fastAgentShortUrl(req, settings, shortCode),
     profile: publicBusinessProfile(sessionProfile, config),
     demoPhoneNumber: assignment?.voiceNumber.phoneNumber || null,
     callerPhones: assignment?.callerBindings.map((binding) => binding.callerPhone) || [],
@@ -13478,7 +13527,12 @@ app.get("/book/:token", async (req, res) => {
 });
 
 app.get("/:shortCode", async (req, res, next) => {
-  const shortCode = String(req.params.shortCode || "").trim().toUpperCase();
+  const requestedCode = String(req.params.shortCode || "").trim();
+  if (FAST_AGENT_SHORT_CODE_PATTERN.test(requestedCode)) {
+    res.set("Cache-Control", "no-store");
+    return res.sendFile(path.join(__dirname, "public/fastagent/index.html"));
+  }
+  const shortCode = requestedCode.toUpperCase();
   if (!BOOKING_SHORT_CODE_PATTERN.test(shortCode)) return next();
   try {
     const send = await prisma.bookingLinkSend.findUnique({

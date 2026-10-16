@@ -484,15 +484,41 @@ body {
 }
 
 .fast-profile-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto auto;
   align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+  justify-content: end;
+  gap: 8px;
+}
+
+.fast-profile-actions #credits {
+  grid-column: 1 / -1;
+  justify-self: end;
+  text-align: right;
 }
 
 .fast-profile-actions button {
   min-height: 40px;
   padding: 8px 12px;
+}
+
+.fast-profile-actions .fast-copy-link {
+  border-color: #b8d8c8;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.fast-profile-actions .fast-copy-link svg {
+  width: 16px;
+  height: 16px;
+}
+
+.fast-profile-actions .fast-copy-link.copied {
+  border-color: var(--accent-dark);
+  background: var(--accent-dark);
+  color: #fff;
 }
 
 .fast-profile-grid {
@@ -954,7 +980,8 @@ body {
   .fast-orb { width: 150px; height: 150px; }
   .fast-section { padding-inline: 16px; }
   .fast-section-heading { align-items: flex-start; flex-direction: column; }
-  .fast-profile-actions { width: 100%; justify-content: space-between; }
+  .fast-profile-actions { width: 100%; justify-content: stretch; }
+  .fast-profile-actions #credits { justify-self: start; text-align: left; }
   .fast-profile-actions button { flex: 0 0 auto; }
   .fast-profile-grid { grid-template-columns: 1fr; }
   .fast-profile-grid .wide { grid-column: auto; }
