@@ -106,6 +106,8 @@
               <label>Low balance warning (credits)<input id="lowBalanceTokens" type="number" min="0" required /></label>
               <label>Voice minute credits<input id="voiceMinuteCredits" type="number" min="0" required /></label>
               <label>AI voice minute credits<input id="geminiMinuteCredits" type="number" min="0" required /></label>
+              <label>Silent caller warning (seconds)<input id="callSilenceWarningSeconds" type="number" min="0" max="300" required /><small>Ask “Are you still there?” after this delay. Set 0 to disable.</small></label>
+              <label>Hang up after warning (seconds)<input id="callSilenceHangupSeconds" type="number" min="5" max="120" required /><small>End the call if the caller remains silent after the warning.</small></label>
               <label>Outbound call credits<input id="outboundCallCredits" type="number" min="0" required /></label>
               <label>Message credits<input id="messageCredits" type="number" min="0" required /></label>
               <label>Recording retention (days)<input id="recordingRetentionDays" type="number" min="1" required /></label>

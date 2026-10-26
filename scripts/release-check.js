@@ -3,7 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
-const jsRoots = ["server.js", "public", "scripts", "calendar"];
+const jsRoots = ["server.js", "call-silence-guard.js", "public", "scripts", "calendar"];
 
 function run(command, args, options = {}) {
   const label = [command, ...args].join(" ");
@@ -39,6 +39,7 @@ for (const file of jsFiles) {
 }
 
 run("npx", ["prisma", "validate"]);
+run(process.execPath, ["scripts/test-call-silence-guard.js"]);
 
 if (process.env.RUN_INTEGRATION === "1" || process.env.RUN_BOOKING_TEST === "1") {
   run("npm", ["run", "test:booking"]);

@@ -619,6 +619,8 @@ model AppSettings {
   fastAgentBuildsPerIpPerHour Int      @default(5)
   autoBuyTrialPhoneNumber     Boolean  @default(false)
   trialPhoneNumberGraceDays   Int      @default(7)
+  callSilenceWarningSeconds   Int      @default(20)
+  callSilenceHangupSeconds    Int      @default(15)
   smtpHost                    String   @default("")
   smtpPort                    Int      @default(587)
   smtpSecure                  Boolean  @default(false)

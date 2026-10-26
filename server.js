@@ -24,6 +24,12 @@ import {
   backfillAppointmentBookingKeys,
   verifyCalendarAppointment,
 } from "./calendar/verification.js";
+import {
+  createCallSilenceGuard,
+  normalizedCallSilenceHangupSeconds,
+  normalizedCallSilenceWarningSeconds,
+  telephonyAudioLevel,
+} from "./call-silence-guard.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2230,6 +2236,9 @@ const TELNYX_MAX_OUTBOUND_QUEUE_FRAMES = Math.max(
 const TELNYX_DROP_QUEUED_AUDIO = ["1", "true", "yes", "on"].includes(
   String(process.env.TELNYX_DROP_QUEUED_AUDIO || "").trim().toLowerCase(),
 );
+const TELNYX_CALLER_VOICE_RMS_THRESHOLD = Math.max(100, Number(process.env.TELNYX_CALLER_VOICE_RMS_THRESHOLD || 650));
+const TELNYX_CALLER_VOICE_PEAK_THRESHOLD = Math.max(500, Number(process.env.TELNYX_CALLER_VOICE_PEAK_THRESHOLD || 1800));
+const TELNYX_CALLER_VOICE_MIN_FRAMES = Math.max(1, Number(process.env.TELNYX_CALLER_VOICE_MIN_FRAMES || 3));
 const BRIDGE_AUDIO_CAPTURE_ENABLED = ["1", "true", "yes", "on"].includes(
   String(process.env.BRIDGE_AUDIO_CAPTURE || "").trim().toLowerCase(),
 );
@@ -4736,6 +4745,8 @@ async function getSettings() {
       fastAgentBuildsPerIpPerHour: 5,
       autoBuyTrialPhoneNumber: false,
       trialPhoneNumberGraceDays: 7,
+      callSilenceWarningSeconds: 20,
+      callSilenceHangupSeconds: 15,
     },
     update: {},
   });
@@ -12651,6 +12662,8 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         fastAgentBuildsPerIpPerHour: fastAgentBuildsPerIpLimit(req.body.fastAgentBuildsPerIpPerHour ?? 5),
         autoBuyTrialPhoneNumber: Boolean(req.body.autoBuyTrialPhoneNumber),
         trialPhoneNumberGraceDays: normalizedTrialPhoneNumberGraceDays(req.body.trialPhoneNumberGraceDays),
+        callSilenceWarningSeconds: normalizedCallSilenceWarningSeconds(req.body.callSilenceWarningSeconds),
+        callSilenceHangupSeconds: normalizedCallSilenceHangupSeconds(req.body.callSilenceHangupSeconds),
         smtpHost: String(req.body.smtpHost || "").trim(),
         smtpPort: Math.max(1, Number(req.body.smtpPort || 587)),
         smtpSecure: Boolean(req.body.smtpSecure),
@@ -12723,6 +12736,14 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
           req.body.trialPhoneNumberGraceDays === undefined
             ? undefined
             : normalizedTrialPhoneNumberGraceDays(req.body.trialPhoneNumberGraceDays),
+        callSilenceWarningSeconds:
+          req.body.callSilenceWarningSeconds === undefined
+            ? undefined
+            : normalizedCallSilenceWarningSeconds(req.body.callSilenceWarningSeconds),
+        callSilenceHangupSeconds:
+          req.body.callSilenceHangupSeconds === undefined
+            ? undefined
+            : normalizedCallSilenceHangupSeconds(req.body.callSilenceHangupSeconds),
         smtpHost: typeof req.body.smtpHost === "string" ? req.body.smtpHost.trim() : undefined,
         smtpPort: req.body.smtpPort === undefined ? undefined : Math.max(1, Number(req.body.smtpPort)),
         smtpSecure: typeof req.body.smtpSecure === "boolean" ? req.body.smtpSecure : undefined,
@@ -17536,6 +17557,9 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   let closing = false;
   let bridgeDetachedForTransfer = false;
   let transferDetachDetail = null;
+  let activePhoneToolCalls = 0;
+  let callerVoicedFrameRun = 0;
+  let silenceGuard = null;
   let mediaStartTimer = null;
   let onboardingTranscript = onboardingSession?.transcript || "";
   let onboardingRealtimeTranscript = onboardingTranscript;
@@ -17829,6 +17853,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       return;
     }
     closing = true;
+    silenceGuard?.stop();
     await logVoiceCallEvent(callControlId, "hangup.requested", { reason });
     try {
       await telnyxRequest(`/calls/${encodeURIComponent(callControlId)}/actions/hangup`, {
@@ -17849,6 +17874,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       detachedAt: new Date().toISOString(),
     };
     closing = true;
+    silenceGuard?.stop();
     clearTelnyxPlayback("call_transfer_detach", 0);
     geminiReady = false;
     await logVoiceCallEvent(callControlId, "call.transfer_bridge_detached", transferDetachDetail);
@@ -17888,6 +17914,63 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
 
   const agentOutputActive = () => agentAudioPlaying || outboundAudioQueue.length > 0 || Date.now() < suppressInputUntil;
 
+  silenceGuard = createCallSilenceGuard({
+    warningSeconds: settings.callSilenceWarningSeconds,
+    hangupSeconds: settings.callSilenceHangupSeconds,
+    canAct: () =>
+      !closing &&
+      !bridgeDetachedForTransfer &&
+      geminiReady &&
+      initialGreetingComplete &&
+      activePhoneToolCalls === 0 &&
+      !agentOutputActive(),
+    onWarning: async (detail) => {
+      await logVoiceCallEvent(callControlId, "silence.warning_requested", {
+        silentForSeconds: Math.round(detail.silentForMs / 1000),
+        warningSeconds: detail.warningSeconds,
+        hangupSeconds: detail.hangupSeconds,
+        callerEverSpoke: detail.callerEverSpoke,
+        callMode: isOnboarding ? "onboarding" : isQualification ? "qualification" : "business",
+      });
+      if (geminiWs?.readyState !== WebSocket.OPEN) {
+        await hangup("silence_timeout");
+        return;
+      }
+      geminiWs.send(
+        JSON.stringify({
+          clientContent: {
+            turns: [
+              {
+                role: "user",
+                parts: [
+                  {
+                    text: `The caller has been silent. Say exactly: "Are you still there? If I don't hear you, I'll end the call." Then wait silently. Do not call any tools.`,
+                  },
+                ],
+              },
+            ],
+            turnComplete: true,
+          },
+        }),
+      );
+    },
+    onResume: async (detail) => {
+      await logVoiceCallEvent(callControlId, "silence.caller_resumed", {
+        source: detail.source,
+        silentForSeconds: Math.round(detail.silentForMs / 1000),
+      });
+    },
+    onHangup: async (detail) => {
+      await logVoiceCallEvent(callControlId, "silence.hangup", {
+        silentForSeconds: Math.round(detail.silentForMs / 1000),
+        callerEverSpoke: detail.callerEverSpoke,
+        callMode: isOnboarding ? "onboarding" : isQualification ? "qualification" : "business",
+      });
+      await hangup("silence_timeout");
+    },
+    onError: (error) => console.warn(`[telnyx] silence guard failed: ${error.message}`),
+  });
+
   const enableCallerInput = (reason) => {
     if (callerInputForwardingEnabled || closing) return;
     callerInputForwardingEnabled = true;
@@ -17898,9 +17981,17 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   };
 
   const maybeEnableCallerInputAfterPlayback = () => {
-    if (!enableCallerInputWhenPlaybackDrains || callerInputForwardingEnabled || outboundAudioQueue.length || agentAudioPlaying) return;
+    if (!enableCallerInputWhenPlaybackDrains || outboundAudioQueue.length || agentAudioPlaying) return;
     enableCallerInputWhenPlaybackDrains = false;
-    setTimeout(() => enableCallerInput("initial_greeting_played"), 250);
+    setTimeout(() => {
+      enableCallerInput("initial_greeting_played");
+      if (silenceGuard.start()) {
+        logVoiceCallEvent(callControlId, "silence.guard_started", {
+          warningSeconds: normalizedCallSilenceWarningSeconds(settings.callSilenceWarningSeconds),
+          hangupSeconds: normalizedCallSilenceHangupSeconds(settings.callSilenceHangupSeconds),
+        }).catch(() => {});
+      }
+    }, 250);
   };
 
   const sendTelnyxAudioPayload = (payload) => {
@@ -17929,6 +18020,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       if (!payload) {
         clearOutboundAudioQueue(250);
         maybeEnableCallerInputAfterPlayback();
+        silenceGuard?.noteAgentPlaybackEnded();
         return;
       }
       sendTelnyxAudioPayload(payload);
@@ -18606,6 +18698,7 @@ Live session identity and language:
       let callerHangupRequested = false;
       if (isOnboarding && serverContent?.inputTranscription?.text) {
         const text = serverContent.inputTranscription.text;
+        if (/\p{L}|\d/u.test(text)) silenceGuard?.noteCallerActivity("transcription");
         if (agentOutputActive() && /\p{L}|\d/u.test(text)) clearTelnyxPlayback("caller_input_transcription", 250);
         callerHangupRequested = maybeEndPhoneCallFromCallerText(text);
         if (onboardingConfirmationTextSent && onboardingAffirmativeConfirmation(text)) {
@@ -18628,6 +18721,7 @@ Live session identity and language:
         );
       } else if (!isOnboarding && serverContent?.inputTranscription?.text) {
         const text = serverContent.inputTranscription.text;
+        if (/\p{L}|\d/u.test(text)) silenceGuard?.noteCallerActivity("transcription");
         if (agentOutputActive() && /\p{L}|\d/u.test(text)) clearTelnyxPlayback("caller_input_transcription", 250);
         callerHangupRequested = maybeEndPhoneCallFromCallerText(text);
         runBackground("persist caller transcript", async () => {
@@ -18738,66 +18832,72 @@ Live session identity and language:
         enforceOnboardingToolClaims(completedTurnText);
       }
       if (message.toolCall) {
-        if (agentOutputActive()) clearTelnyxPlayback("tool_call_started", 100);
-        const functionResponses = [];
-        let shouldEndCall = false;
-        let endReason = "Call completed";
-        let personaPrompt = null;
-        let detachAfterTransfer = null;
-        for (const functionCall of message.toolCall.functionCalls || []) {
-          try {
-            const toolContext = {
-              channel: "phone",
-              callControlId,
-              voiceCallId: call.id,
-              fromNumber: call.fromNumber,
-              toNumber: call.toNumber,
-              qualificationLeadId: qualificationLead?.id || null,
-              qualificationAttemptId: qualificationAttempt?.id || null,
-              leadExtractedFields: qualificationLead?.extractedFields || null,
-            };
-            const result = await runPhoneToolWithWaitNotice(functionCall, async () =>
-              isOnboarding
-                ? runOnboardingTool(functionCall)
-                : isQualification
-                  ? runQualificationToolCall(profile, config, functionCall, toolContext)
-                  : runToolCall(profile, config, functionCall, {
-                      callControlId,
-                      voiceCallId: call.id,
-                      fromNumber: call.fromNumber,
-                      toNumber: call.toNumber,
-                    }),
-            );
-            if (result.detachAgent) {
-              detachAfterTransfer = result;
-              shouldEndCall = false;
-            } else {
-              shouldEndCall ||= Boolean(result.shouldEndCall);
+        activePhoneToolCalls += 1;
+        try {
+          if (agentOutputActive()) clearTelnyxPlayback("tool_call_started", 100);
+          const functionResponses = [];
+          let shouldEndCall = false;
+          let endReason = "Call completed";
+          let personaPrompt = null;
+          let detachAfterTransfer = null;
+          for (const functionCall of message.toolCall.functionCalls || []) {
+            try {
+              const toolContext = {
+                channel: "phone",
+                callControlId,
+                voiceCallId: call.id,
+                fromNumber: call.fromNumber,
+                toNumber: call.toNumber,
+                qualificationLeadId: qualificationLead?.id || null,
+                qualificationAttemptId: qualificationAttempt?.id || null,
+                leadExtractedFields: qualificationLead?.extractedFields || null,
+              };
+              const result = await runPhoneToolWithWaitNotice(functionCall, async () =>
+                isOnboarding
+                  ? runOnboardingTool(functionCall)
+                  : isQualification
+                    ? runQualificationToolCall(profile, config, functionCall, toolContext)
+                    : runToolCall(profile, config, functionCall, {
+                        callControlId,
+                        voiceCallId: call.id,
+                        fromNumber: call.fromNumber,
+                        toNumber: call.toNumber,
+                      }),
+              );
+              if (result.detachAgent) {
+                detachAfterTransfer = result;
+                shouldEndCall = false;
+              } else {
+                shouldEndCall ||= Boolean(result.shouldEndCall);
+              }
+              endReason = result.reason || endReason;
+              personaPrompt ||= result.personaPrompt || null;
+              functionResponses.push({ id: functionCall.id, name: functionCall.name, response: { result } });
+            } catch (error) {
+              functionResponses.push({
+                id: functionCall.id,
+                name: functionCall.name,
+                response: { ok: false, error: error.message },
+              });
             }
-            endReason = result.reason || endReason;
-            personaPrompt ||= result.personaPrompt || null;
-            functionResponses.push({ id: functionCall.id, name: functionCall.name, response: { result } });
-          } catch (error) {
-            functionResponses.push({
-              id: functionCall.id,
-              name: functionCall.name,
-              response: { ok: false, error: error.message },
-            });
           }
-        }
-        if (detachAfterTransfer) shouldEndCall = false;
-        if (geminiWs.readyState === WebSocket.OPEN) {
-          geminiWs.send(JSON.stringify({ toolResponse: { functionResponses } }));
-          if (personaPrompt) {
-            geminiWs.send(
-              JSON.stringify({
-                clientContent: { turns: [{ role: "user", parts: [{ text: personaPrompt }] }], turnComplete: true },
-              }),
-            );
+          if (detachAfterTransfer) shouldEndCall = false;
+          if (geminiWs.readyState === WebSocket.OPEN) {
+            geminiWs.send(JSON.stringify({ toolResponse: { functionResponses } }));
+            if (personaPrompt) {
+              geminiWs.send(
+                JSON.stringify({
+                  clientContent: { turns: [{ role: "user", parts: [{ text: personaPrompt }] }], turnComplete: true },
+                }),
+              );
+            }
           }
+          if (detachAfterTransfer) await detachBridgeAfterTransfer(detachAfterTransfer);
+          if (shouldEndCall) setTimeout(() => hangup(endReason), 1200);
+        } finally {
+          activePhoneToolCalls = Math.max(0, activePhoneToolCalls - 1);
+          silenceGuard?.notePauseEnded();
         }
-        if (detachAfterTransfer) await detachBridgeAfterTransfer(detachAfterTransfer);
-        if (shouldEndCall) setTimeout(() => hangup(endReason), 1200);
       }
     });
 
@@ -18858,6 +18958,17 @@ Live session identity and language:
           }
           return;
         }
+        if (!agentOutputActive()) {
+          const level = telephonyAudioLevel(message.media?.payload, telnyxEncoding, TELNYX_L16_ENDIAN);
+          const voiceLike =
+            level.sampleCount > 0 &&
+            level.rms >= TELNYX_CALLER_VOICE_RMS_THRESHOLD &&
+            level.peak >= TELNYX_CALLER_VOICE_PEAK_THRESHOLD;
+          callerVoicedFrameRun = voiceLike ? callerVoicedFrameRun + 1 : 0;
+          if (callerVoicedFrameRun >= TELNYX_CALLER_VOICE_MIN_FRAMES) {
+            silenceGuard?.noteCallerActivity("voice_energy");
+          }
+        }
         geminiWs.send(
           JSON.stringify({
             realtimeInput: {
@@ -18874,6 +18985,7 @@ Live session identity and language:
       } else if (message.event === "stop") {
         await logVoiceCallEvent(callControlId, "media.stopped", { reason: message.stop?.reason || null });
         closing = true;
+        silenceGuard?.stop();
         if (geminiWs?.readyState === WebSocket.OPEN) geminiWs.close(1000, "Telnyx stream stopped");
       } else if (message.event === "error") {
         await logVoiceCallEvent(callControlId, "media.provider_error", message.error || message);
@@ -18902,6 +19014,7 @@ Live session identity and language:
 
   telnyxWs.on("close", async (code, reason) => {
       if (mediaStartTimer) clearTimeout(mediaStartTimer);
+      silenceGuard?.stop();
       clearOutboundAudioQueue();
       if (onboardingTextSessionKey) {
         const active = activeOnboardingTextSessions.get(onboardingTextSessionKey);

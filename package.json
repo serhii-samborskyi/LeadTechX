@@ -23,6 +23,7 @@
     "check": "node scripts/release-check.js",
     "db:migrate-sqlite": "bash -c 'source scripts/use-node-22.sh && node scripts/migrate-sqlite-to-postgres.js \"$@\"' --",
     "test:booking": "node scripts/test-booking-stack.js",
+    "test:silence": "node scripts/test-call-silence-guard.js",
     "test:telnyx": "node scripts/test-telnyx-suite.js",
     "test:telnyx-media": "node scripts/test-telnyx-media-bridge.js",
     "test:onboarding-media": "node scripts/test-onboarding-media-bridge.js"
