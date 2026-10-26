@@ -169,6 +169,8 @@ const blueBubblesDeliveryRetryLocks = new Set();
 let blueBubblesPendingDeliveryInterval = null;
 let bookingFollowupWorkerTimer = null;
 let bookingFollowupWorkerRunning = false;
+let trialPhoneNumberCleanupInterval = null;
+let trialPhoneNumberCleanupRunning = false;
 const aiRateLimitHits = new Map();
 let prismaReconnectPromise = null;
 
@@ -2161,7 +2163,10 @@ async function telnyxRequest(apiPath, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = data.errors?.map((error) => error.detail || error.title).filter(Boolean).join("; ");
-    throw new Error(detail || `Telnyx request failed with status ${response.status}`);
+    const error = new Error(detail || `Telnyx request failed with status ${response.status}`);
+    error.status = response.status;
+    error.detail = data;
+    throw error;
   }
   return data;
 }
@@ -4085,6 +4090,13 @@ async function bootstrapAdmin() {
   });
 }
 
+async function expireEndedBusinessTrials(now = new Date()) {
+  return prisma.businessProfile.updateMany({
+    where: { accountStatus: "trial", trialEndsAt: { lte: now } },
+    data: { accountStatus: "expired" },
+  });
+}
+
 async function bootstrapBusinessLifecycle() {
   const claimed = await prisma.businessProfile.findMany({
     where: { users: { some: { active: true } }, accountStatus: "unclaimed" },
@@ -4096,10 +4108,7 @@ async function bootstrapBusinessLifecycle() {
       data: { accountStatus: "paid" },
     });
   }
-  await prisma.businessProfile.updateMany({
-    where: { accountStatus: "trial", trialEndsAt: { lte: new Date() } },
-    data: { accountStatus: "expired" },
-  });
+  await expireEndedBusinessTrials();
 }
 
 function normalizeBusinessName(value) {
@@ -4726,6 +4735,7 @@ async function getSettings() {
       annualPrepayDiscountPercent: 25,
       fastAgentBuildsPerIpPerHour: 5,
       autoBuyTrialPhoneNumber: false,
+      trialPhoneNumberGraceDays: 7,
     },
     update: {},
   });
@@ -5204,6 +5214,14 @@ async function maybeAutoBuyTrialPhoneNumber({ businessProfileId, settings, sourc
       method: "PATCH",
       body: JSON.stringify({ connection_id: connectionId, customer_reference: profile.cacheKey }),
     });
+    const purchasedAt = new Date().toISOString();
+    const autoBuyTrialPhoneNumber = {
+      source,
+      orderId: trialPhoneNumberOrderId(orderData),
+      businessProfileId: profile.id,
+      lifecycleManaged: true,
+      purchasedAt,
+    };
     const voiceNumber = await prisma.voiceNumber.upsert({
       where: { providerNumberId: ownedNumber.id },
       create: {
@@ -5214,7 +5232,7 @@ async function maybeAutoBuyTrialPhoneNumber({ businessProfileId, settings, sourc
         numberType: "regular",
         label: "Auto-bought trial number",
         businessProfileId: profile.id,
-        metadata: { ...ownedNumber, autoBuyTrialPhoneNumber: { source, orderId: trialPhoneNumberOrderId(orderData) } },
+        metadata: { ...ownedNumber, autoBuyTrialPhoneNumber },
       },
       update: {
         phoneNumber: telnyxPhoneNumberValue(ownedNumber) || available.phoneNumber,
@@ -5223,7 +5241,7 @@ async function maybeAutoBuyTrialPhoneNumber({ businessProfileId, settings, sourc
         numberType: "regular",
         label: "Auto-bought trial number",
         businessProfileId: profile.id,
-        metadata: { ...ownedNumber, autoBuyTrialPhoneNumber: { source, orderId: trialPhoneNumberOrderId(orderData) } },
+        metadata: { ...ownedNumber, autoBuyTrialPhoneNumber },
       },
     });
     const result = {
@@ -5241,6 +5259,153 @@ async function maybeAutoBuyTrialPhoneNumber({ businessProfileId, settings, sourc
     await recordTrialPhoneAutoBuyState(profile.id, { status: "failed", source, error: error.message });
     return { enabled: true, purchased: false, error: error.message };
   }
+}
+
+function normalizedTrialPhoneNumberGraceDays(value) {
+  const parsed = Number(value ?? 7);
+  return Math.max(0, Math.round(Number.isFinite(parsed) ? parsed : 7));
+}
+
+function autoBoughtTrialPhoneNumberState(number) {
+  const state = jsonObject(jsonObject(number?.metadata).autoBuyTrialPhoneNumber);
+  return Object.keys(state).length ? state : null;
+}
+
+function expiredTrialPhoneNumberEligible(number, settings, now = new Date()) {
+  const profile = number?.businessProfile;
+  const lifecycle = autoBoughtTrialPhoneNumberState(number);
+  const trialEndsAt = profile?.trialEndsAt ? new Date(profile.trialEndsAt) : null;
+  if (
+    !number ||
+    number.numberType !== "regular" ||
+    number.status === "deleted" ||
+    !lifecycle ||
+    lifecycle.lifecycleManaged === false ||
+    !profile ||
+    profile.accountStatus !== "expired" ||
+    !trialEndsAt ||
+    Number.isNaN(trialEndsAt.getTime())
+  ) {
+    return false;
+  }
+  if (lifecycle.businessProfileId && Number(lifecycle.businessProfileId) !== profile.id) return false;
+  const releaseAt = new Date(
+    trialEndsAt.getTime() + normalizedTrialPhoneNumberGraceDays(settings?.trialPhoneNumberGraceDays) * 86400000,
+  );
+  return releaseAt <= now;
+}
+
+async function releaseExpiredTrialPhoneNumbers({ settings = null, now = new Date() } = {}) {
+  const resolvedSettings = settings || (await getSettings());
+  await expireEndedBusinessTrials(now);
+  const graceDays = normalizedTrialPhoneNumberGraceDays(resolvedSettings.trialPhoneNumberGraceDays);
+  const cutoff = new Date(now.getTime() - graceDays * 86400000);
+  const candidates = await prisma.voiceNumber.findMany({
+    where: {
+      provider: "telnyx",
+      numberType: "regular",
+      status: { not: "deleted" },
+      businessProfile: { accountStatus: "expired", trialEndsAt: { lte: cutoff } },
+    },
+    include: {
+      businessProfile: { select: { id: true, businessName: true, accountStatus: true, trialEndsAt: true } },
+    },
+    orderBy: { id: "asc" },
+    take: 50,
+  });
+  let released = 0;
+  let failed = 0;
+  for (const candidate of candidates) {
+    if (!expiredTrialPhoneNumberEligible(candidate, resolvedSettings, now)) continue;
+    const number = await prisma.voiceNumber.findUnique({
+      where: { id: candidate.id },
+      include: {
+        businessProfile: { select: { id: true, businessName: true, accountStatus: true, trialEndsAt: true } },
+      },
+    });
+    if (!expiredTrialPhoneNumberEligible(number, resolvedSettings, now)) continue;
+    const metadata = jsonObject(number.metadata);
+    const lifecycle = autoBoughtTrialPhoneNumberState(number);
+    let providerResult = null;
+    try {
+      providerResult = await telnyxRequest(`/phone_numbers/${encodeURIComponent(number.providerNumberId)}`, {
+        method: "DELETE",
+      });
+    } catch (error) {
+      if (error?.status !== 404) {
+        failed += 1;
+        await prisma.voiceNumber
+          .update({
+            where: { id: number.id },
+            data: {
+              metadata: jsonSafe({
+                ...metadata,
+                autoBuyTrialPhoneNumber: {
+                  ...lifecycle,
+                  releaseStatus: "failed",
+                  releaseAttemptCount: Math.max(0, Number(lifecycle.releaseAttemptCount || 0)) + 1,
+                  releaseAttemptedAt: now.toISOString(),
+                  releaseError: String(error.message || "Telnyx release failed").slice(0, 500),
+                },
+              }),
+            },
+          })
+          .catch((metadataError) =>
+            console.warn(`[telnyx] trial number release failure state skipped for ${number.phoneNumber}: ${metadataError.message}`),
+          );
+        console.warn(`[telnyx] trial number release failed for ${number.phoneNumber}: ${error.message}`);
+        continue;
+      }
+    }
+    const providerNumber = jsonObject(providerResult?.data);
+    const updated = await prisma.voiceNumber.updateMany({
+      where: {
+        id: number.id,
+        businessProfileId: number.businessProfile.id,
+        status: { not: "deleted" },
+      },
+      data: {
+        status: "deleted",
+        businessProfileId: null,
+        connectionId: null,
+        metadata: jsonSafe({
+          ...metadata,
+          autoBuyTrialPhoneNumber: {
+            ...lifecycle,
+            releaseStatus: "released",
+            releasedAt: now.toISOString(),
+            releaseReason: "expired_trial_grace_elapsed",
+            providerStatus: providerNumber.status || "deleted",
+          },
+        }),
+      },
+    });
+    released += updated.count;
+  }
+  if (released || failed) {
+    console.log(`[telnyx] trial number cleanup checked=${candidates.length} released=${released} failed=${failed}`);
+  }
+  return { checked: candidates.length, released, failed };
+}
+
+function scheduleTrialPhoneNumberCleanupWorker(delayMs = 15000) {
+  if (trialPhoneNumberCleanupInterval) return;
+  const run = async () => {
+    if (trialPhoneNumberCleanupRunning) return;
+    trialPhoneNumberCleanupRunning = true;
+    try {
+      await releaseExpiredTrialPhoneNumbers();
+    } finally {
+      trialPhoneNumberCleanupRunning = false;
+    }
+  };
+  const startupTimer = setTimeout(() => safeBackground("trial phone number cleanup", run), delayMs);
+  if (typeof startupTimer.unref === "function") startupTimer.unref();
+  trialPhoneNumberCleanupInterval = setInterval(
+    () => safeBackground("trial phone number cleanup", run),
+    60 * 60 * 1000,
+  );
+  if (typeof trialPhoneNumberCleanupInterval.unref === "function") trialPhoneNumberCleanupInterval.unref();
 }
 
 async function allocateDemoNumber(profile, settings) {
@@ -5283,6 +5448,9 @@ async function resolveInboundBusiness(voiceNumber, callerPhone) {
   if (voiceNumber.numberType !== "demo") {
     const profile = voiceNumber.businessProfile?.archivedAt ? null : voiceNumber.businessProfile || null;
     if (!profile || voiceNumber.numberType !== "regular") return profile;
+    const trialEnded =
+      profile.accountStatus === "trial" && profile.trialEndsAt && new Date(profile.trialEndsAt) <= new Date();
+    if (profile.accountStatus === "expired" || trialEnded) return null;
     const entitlements = await businessEntitlements(profile.id);
     const maxNumbers = Math.max(0, Number(entitlements.limits.maxPhoneNumbers || 0));
     const assignedRegularNumbers = await prisma.voiceNumber.findMany({
@@ -12482,6 +12650,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         demoCallerLimit: Math.max(1, Number(req.body.demoCallerLimit || 3)),
         fastAgentBuildsPerIpPerHour: fastAgentBuildsPerIpLimit(req.body.fastAgentBuildsPerIpPerHour ?? 5),
         autoBuyTrialPhoneNumber: Boolean(req.body.autoBuyTrialPhoneNumber),
+        trialPhoneNumberGraceDays: normalizedTrialPhoneNumberGraceDays(req.body.trialPhoneNumberGraceDays),
         smtpHost: String(req.body.smtpHost || "").trim(),
         smtpPort: Math.max(1, Number(req.body.smtpPort || 587)),
         smtpSecure: Boolean(req.body.smtpSecure),
@@ -12550,6 +12719,10 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
             : fastAgentBuildsPerIpLimit(req.body.fastAgentBuildsPerIpPerHour),
         autoBuyTrialPhoneNumber:
           typeof req.body.autoBuyTrialPhoneNumber === "boolean" ? req.body.autoBuyTrialPhoneNumber : undefined,
+        trialPhoneNumberGraceDays:
+          req.body.trialPhoneNumberGraceDays === undefined
+            ? undefined
+            : normalizedTrialPhoneNumberGraceDays(req.body.trialPhoneNumberGraceDays),
         smtpHost: typeof req.body.smtpHost === "string" ? req.body.smtpHost.trim() : undefined,
         smtpPort: req.body.smtpPort === undefined ? undefined : Math.max(1, Number(req.body.smtpPort)),
         smtpSecure: typeof req.body.smtpSecure === "boolean" ? req.body.smtpSecure : undefined,
@@ -13156,6 +13329,15 @@ app.get("/api/admin/telnyx/numbers", requireAuth, requireAdmin, async (_req, res
     const query = new URLSearchParams({ "page[size]": "100" });
     const data = await telnyxRequest(`/phone_numbers?${query}`);
     for (const number of data.data || []) {
+      const existing = await prisma.voiceNumber.findUnique({
+        where: { providerNumberId: number.id },
+        select: { metadata: true },
+      });
+      const lifecycle = autoBoughtTrialPhoneNumberState(existing);
+      const metadata = jsonSafe({
+        ...number,
+        ...(lifecycle ? { autoBuyTrialPhoneNumber: lifecycle } : {}),
+      });
       await prisma.voiceNumber.upsert({
         where: { providerNumberId: number.id },
         create: {
@@ -13163,13 +13345,13 @@ app.get("/api/admin/telnyx/numbers", requireAuth, requireAdmin, async (_req, res
           phoneNumber: number.phone_number,
           status: number.status || "unknown",
           connectionId: number.connection_id || null,
-          metadata: number,
+          metadata,
         },
         update: {
           phoneNumber: number.phone_number,
           status: number.status || "unknown",
           connectionId: number.connection_id || null,
-          metadata: number,
+          metadata,
         },
       });
     }
@@ -13207,9 +13389,21 @@ app.post("/api/admin/telnyx/numbers/:id/assign", requireAuth, requireAdmin, asyn
       method: "PATCH",
       body: JSON.stringify({ connection_id: connectionId, customer_reference: business.cacheKey }),
     });
+    const lifecycle = autoBoughtTrialPhoneNumberState(number);
+    const metadata = lifecycle
+      ? jsonSafe({
+          ...jsonObject(number.metadata),
+          autoBuyTrialPhoneNumber: {
+            ...lifecycle,
+            lifecycleManaged: false,
+            manuallyAssignedAt: new Date().toISOString(),
+            manuallyAssignedBusinessProfileId: business.id,
+          },
+        })
+      : undefined;
     const updated = await prisma.voiceNumber.update({
       where: { id: number.id },
-      data: { businessProfileId: business.id, connectionId, numberType: "regular" },
+      data: { businessProfileId: business.id, connectionId, numberType: "regular", metadata },
       include: { businessProfile: true },
     });
     res.json({ number: updated });
@@ -13223,12 +13417,26 @@ app.patch("/api/admin/telnyx/numbers/:id", requireAuth, requireAdmin, async (req
     const numberType = ["regular", "demo", "onboarding"].includes(req.body.numberType)
       ? req.body.numberType
       : "regular";
+    const number = await prisma.voiceNumber.findUnique({ where: { id: Number(req.params.id) } });
+    if (!number) throw new Error("Phone number was not found");
+    const lifecycle = autoBoughtTrialPhoneNumberState(number);
+    const metadata = lifecycle
+      ? jsonSafe({
+          ...jsonObject(number.metadata),
+          autoBuyTrialPhoneNumber: {
+            ...lifecycle,
+            lifecycleManaged: false,
+            manuallyUpdatedAt: new Date().toISOString(),
+          },
+        })
+      : undefined;
     const updated = await prisma.voiceNumber.update({
-      where: { id: Number(req.params.id) },
+      where: { id: number.id },
       data: {
         numberType,
         label: req.body.label === undefined ? undefined : String(req.body.label || "").trim() || null,
         businessProfileId: numberType === "regular" ? undefined : null,
+        metadata,
       },
       include: { businessProfile: true, demoAssignments: true },
     });
@@ -19079,6 +19287,7 @@ await recoverQualificationQueue().catch((error) => console.warn(`[qualification]
 scheduleQualificationWorker(1000);
 scheduleBlueBubblesPendingDeliveryWorker(10000);
 scheduleBookingFollowupWorker(5000);
+scheduleTrialPhoneNumberCleanupWorker(15000);
 
 server.listen(PORT, () => {
   const protocol = USE_HTTPS ? "https" : "http";
