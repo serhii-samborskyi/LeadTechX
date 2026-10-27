@@ -43,7 +43,21 @@ const state = {
   entitlements: null,
   planUsage: null,
   billingData: null,
+  usageData: null,
   billingKeyboardSelectionVersion: 0,
+  ownerPage: "home",
+  ownerTabs: {
+    inbox: "leads",
+    appointments: "calendar",
+    receptionist: "setup",
+    settings: "notifications",
+  },
+  home: {
+    phoneNumbers: [],
+    crmCounts: {},
+    appointments: [],
+    messageThreads: 0,
+  },
   adTracking: null,
   businessName: params.get("business_name") || "Business Name",
   website: params.get("website") || "",
@@ -57,6 +71,8 @@ const el = {
   loginPassword: document.querySelector("#loginPassword"),
   loginError: document.querySelector("#loginError"),
   logoutButton: document.querySelector("#logoutButton"),
+  globalAccountButton: document.querySelector("#globalAccountButton"),
+  globalAccountState: document.querySelector("#globalAccountState"),
   title: document.querySelector("#title"),
   status: document.querySelector("#status"),
   businessName: document.querySelector("#businessName"),
@@ -85,8 +101,28 @@ const el = {
   orb: document.querySelector("#orb"),
   voiceVisualizer: document.querySelector("#voiceVisualizer"),
   diagnostics: document.querySelector("#diagnostics"),
+  ownerNavItems: document.querySelectorAll(".owner-nav-item"),
+  ownerPages: document.querySelectorAll("[data-owner-page-panel]"),
+  homePage: document.querySelector("#homePage"),
+  homeTestAgentButton: document.querySelector("#homeTestAgentButton"),
+  closeTestAgentButton: document.querySelector("#closeTestAgentButton"),
+  testAgentWorkspace: document.querySelector("#testAgentWorkspace"),
+  homeAccountCard: document.querySelector("#homeAccountCard"),
+  homeAccountState: document.querySelector("#homeAccountState"),
+  homeAccountDetail: document.querySelector("#homeAccountDetail"),
+  homePhoneCard: document.querySelector("#homePhoneCard"),
+  homePhoneState: document.querySelector("#homePhoneState"),
+  homePhoneDetail: document.querySelector("#homePhoneDetail"),
+  homeLeadCount: document.querySelector("#homeLeadCount"),
+  homeNeedsReplyCount: document.querySelector("#homeNeedsReplyCount"),
+  homeAppointmentCount: document.querySelector("#homeAppointmentCount"),
+  homeActionList: document.querySelector("#homeActionList"),
   businessAdmin: document.querySelector("#businessAdmin"),
   adminStatus: document.querySelector("#adminStatus"),
+  adminSectionEyebrow: document.querySelector("#adminSectionEyebrow"),
+  adminSectionTitle: document.querySelector("#adminSectionTitle"),
+  adminSectionDescription: document.querySelector("#adminSectionDescription"),
+  adminSubnavs: document.querySelectorAll("[data-admin-group]"),
   adminTabs: document.querySelectorAll(".admin-tab"),
   adminViews: document.querySelectorAll(".admin-view"),
   crmMenuButtons: document.querySelectorAll(".crm-menu-button"),
@@ -176,6 +212,7 @@ const el = {
   appointmentNotificationEmailEnabled: document.querySelector("#appointmentNotificationEmailEnabled"),
   appointmentNotificationPhone: document.querySelector("#appointmentNotificationPhone"),
   appointmentNotificationEmail: document.querySelector("#appointmentNotificationEmail"),
+  saveNotificationSettingsButton: document.querySelector("#saveNotificationSettingsButton"),
   missedCallFollowupTemplate: document.querySelector("#missedCallFollowupTemplate"),
   appointmentReminderTemplate: document.querySelector("#appointmentReminderTemplate"),
   saveInstructionsButton: document.querySelector("#saveInstructionsButton"),
@@ -293,6 +330,7 @@ const el = {
   billingHistory: document.querySelector("#billingHistory"),
   usageList: document.querySelector("#usageList"),
   mobileNavItems: document.querySelectorAll(".mobile-nav-item"),
+  mobileMoreMenu: document.querySelector("#mobileMoreMenu"),
 };
 
 function businessDisplayText(text) {
@@ -311,6 +349,177 @@ function setTitle() {
   const name = el.businessName.value.trim() || "Business Name";
   el.title.textContent = name;
   document.title = `${name} | RingPort`;
+}
+
+const OWNER_PAGE_META = {
+  inbox: {
+    eyebrow: "Inbox",
+    title: "Customer activity",
+    description: "Review leads and customer conversations that need attention.",
+  },
+  appointments: {
+    eyebrow: "Appointments",
+    title: "Schedule and requests",
+    description: "See upcoming bookings first, with calendar configuration kept out of the way.",
+  },
+  receptionist: {
+    eyebrow: "Receptionist",
+    title: "What your receptionist knows",
+    description: "Keep business details, answers, pricing, and call transfers up to date.",
+  },
+  settings: {
+    eyebrow: "Settings",
+    title: "Account and preferences",
+    description: "Manage owner notifications, advanced safeguards, and your RingPort plan.",
+  },
+};
+
+const OWNER_PAGE_FOR_TAB = {
+  leads: "inbox",
+  messages: "inbox",
+  calendar: "appointments",
+  setup: "receptionist",
+  content: "receptionist",
+  transfers: "receptionist",
+  notifications: "settings",
+  advanced: "settings",
+  billing: "settings",
+};
+
+function homeAction({ icon, title, detail, page, tab, tone = "" }) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `home-action ${tone}`.trim();
+  button.dataset.homeDestination = page;
+  if (tab) button.dataset.homeTab = tab;
+  const iconWrap = document.createElement("span");
+  iconWrap.className = "home-action-icon";
+  const iconNode = document.createElement("i");
+  iconNode.setAttribute("data-lucide", icon);
+  iconWrap.appendChild(iconNode);
+  const copy = document.createElement("span");
+  copy.className = "home-action-copy";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const description = document.createElement("span");
+  description.textContent = detail;
+  copy.append(heading, description);
+  const arrow = document.createElement("i");
+  arrow.setAttribute("data-lucide", "chevron-right");
+  button.append(iconWrap, copy, arrow);
+  return button;
+}
+
+function renderEmptyGuidance(container, title, detail) {
+  container.replaceChildren();
+  const empty = document.createElement("div");
+  empty.className = "empty-guidance";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const description = document.createElement("p");
+  description.textContent = detail;
+  empty.append(heading, description);
+  container.appendChild(empty);
+}
+
+function updateHomeDashboard() {
+  const crmCounts = state.home.crmCounts || {};
+  const totalLeads = Object.values(crmCounts).reduce((sum, value) => sum + Number(value || 0), 0);
+  const needsReply = Number(crmCounts.needs_reply || 0) + Number(crmCounts.callback || 0);
+  const appointments = state.home.appointments || [];
+  const requestedAppointments = appointments.filter((appointment) => appointment.status === "requested").length;
+  const activeNumbers = (state.home.phoneNumbers || []).filter((number) => number.status === "active");
+
+  if (el.homeLeadCount) el.homeLeadCount.textContent = String(totalLeads);
+  if (el.homeNeedsReplyCount) el.homeNeedsReplyCount.textContent = String(needsReply);
+  if (el.homeAppointmentCount) el.homeAppointmentCount.textContent = String(appointments.length);
+
+  if (el.homePhoneState && el.homePhoneDetail) {
+    el.homePhoneCard?.classList.toggle("warning", activeNumbers.length === 0);
+    el.homePhoneState.textContent = activeNumbers.length
+      ? activeNumbers.length === 1
+        ? "Number connected"
+        : `${activeNumbers.length} numbers connected`
+      : "Phone setup needed";
+    el.homePhoneDetail.textContent = activeNumbers.length
+      ? activeNumbers.map((number) => number.phoneNumber).filter(Boolean).join(", ")
+      : "No active RingPort number is assigned yet.";
+  }
+
+  const billing = state.billingData;
+  let accountPresentation = null;
+  if (billing) {
+    accountPresentation = billingAccountPresentation(billing);
+    const balance = billingCreditBalanceLabel(billing.creditBalance);
+    el.homeAccountCard?.classList.toggle("warning", ["warning"].includes(accountPresentation.tone));
+    if (el.homeAccountState) el.homeAccountState.textContent = accountPresentation.state;
+    if (el.homeAccountDetail) el.homeAccountDetail.textContent = `${accountPresentation.title}. ${balance}.`;
+    if (el.globalAccountButton && el.globalAccountState) {
+      el.globalAccountButton.hidden = false;
+      el.globalAccountButton.className = `account-state-button ${accountPresentation.tone}`.trim();
+      el.globalAccountState.textContent = accountPresentation.state;
+    }
+  }
+
+  if (!el.homeActionList) return;
+  el.homeActionList.replaceChildren();
+  if (accountPresentation?.tone === "warning") {
+    el.homeActionList.appendChild(
+      homeAction({
+        icon: "circle-alert",
+        title: accountPresentation.title,
+        detail: accountPresentation.message,
+        page: "settings",
+        tab: "billing",
+        tone: "warning",
+      }),
+    );
+  }
+  if (!activeNumbers.length) {
+    el.homeActionList.appendChild(
+      homeAction({
+        icon: "phone-off",
+        title: "Finish phone setup",
+        detail: "Review your receptionist setup before forwarding live business calls.",
+        page: "receptionist",
+        tab: "setup",
+        tone: "warning",
+      }),
+    );
+  }
+  if (needsReply) {
+    el.homeActionList.appendChild(
+      homeAction({
+        icon: "message-circle-reply",
+        title: `${needsReply} customer${needsReply === 1 ? "" : "s"} waiting for a reply`,
+        detail: "Open the inbox to review callbacks and unanswered conversations.",
+        page: "inbox",
+        tab: "leads",
+      }),
+    );
+  }
+  if (requestedAppointments) {
+    el.homeActionList.appendChild(
+      homeAction({
+        icon: "calendar-clock",
+        title: `${requestedAppointments} appointment request${requestedAppointments === 1 ? "" : "s"} to review`,
+        detail: "Confirm or update the requested time from the appointment list.",
+        page: "appointments",
+        tab: "calendar",
+      }),
+    );
+  }
+  if (!el.homeActionList.childElementCount) {
+    const empty = document.createElement("div");
+    empty.className = "home-action-empty success";
+    const icon = document.createElement("i");
+    icon.setAttribute("data-lucide", "circle-check");
+    const text = document.createElement("span");
+    text.textContent = "You are all caught up. New leads and appointment requests will appear here.";
+    empty.append(icon, text);
+    el.homeActionList.appendChild(empty);
+  }
+  window.lucide?.createIcons();
 }
 
 function appendTranscript(speaker, text) {
@@ -619,6 +828,7 @@ function updateProfile(profile, cached) {
 }
 
 function renderNumberStatus(phoneNumbers = []) {
+  state.home.phoneNumbers = phoneNumbers;
   const activeNumbers = phoneNumbers.filter((number) => number.status === "active");
   el.numberStatus.classList.toggle("assigned", activeNumbers.length > 0);
   el.numberStatus.classList.toggle("missing", activeNumbers.length === 0);
@@ -631,6 +841,7 @@ function renderNumberStatus(phoneNumbers = []) {
     el.numberStatusTitle.textContent = "No phone number assigned";
     el.numberStatusDetail.textContent = "Assign a phone number before live calls and outbound qualification.";
   }
+  updateHomeDashboard();
 }
 
 async function loadSettings() {
@@ -1103,7 +1314,13 @@ function renderSchedule(data) {
     day.append(heading, grid);
     el.availableSlots.appendChild(day);
   }
-  if (!days.size) el.availableSlots.textContent = "No schedule entries in this range.";
+  if (!days.size) {
+    renderEmptyGuidance(
+      el.availableSlots,
+      "No schedule entries yet",
+      "Open Appointment settings to add availability or connect your booking system.",
+    );
+  }
 }
 
 function renderIntakeFields(fields) {
@@ -1976,6 +2193,7 @@ async function loadCalendar() {
   if (el.calendarProfessionalFilter?.value) query.set("professional_id", el.calendarProfessionalFilter.value);
   if (el.slotDuration?.value) query.set("duration", el.slotDuration.value);
   const data = await apiJson(`/api/business-admin/calendar?${query}`);
+  state.home.appointments = data.appointments || [];
   renderSchedule(data);
   if (data.warning) {
     const simpleVagaro = state.booking?.activeConnection?.settings?.vagaroMode === "simple";
@@ -2067,7 +2285,14 @@ async function loadCalendar() {
     row.append(summary, details, actions);
     el.bookedAppointments.appendChild(row);
   }
-  if (!data.appointments.length) el.bookedAppointments.textContent = "No booked appointments in this range.";
+  if (!data.appointments.length) {
+    renderEmptyGuidance(
+      el.bookedAppointments,
+      "No upcoming appointments",
+      "New bookings and appointment requests will appear here.",
+    );
+  }
+  updateHomeDashboard();
 }
 
 async function sendAppointmentReminder(button) {
@@ -2482,7 +2707,7 @@ function renderCrm(leads) {
       <label>Feedback<select class="crm-row-feedback-sentiment"><option value="happy">Happy</option><option value="neutral">Neutral</option><option value="unhappy">Unhappy</option><option value="unknown">Unknown</option></select></label>
       <label>Rating<input class="crm-row-feedback-rating" type="number" min="1" max="5" step="1" /></label>
       <label class="wide-field">Feedback / complaint<textarea class="crm-row-feedback-text" rows="3"></textarea></label>
-      <label class="wide-field">Extracted fields JSON<textarea class="crm-row-fields" rows="4"></textarea></label>
+      <label class="wide-field">Advanced captured data<textarea class="crm-row-fields" rows="4"></textarea></label>
       <button data-action="save-crm" type="button">Save lead</button>
       <button data-action="record-feedback" type="button">Record feedback</button>
       <button data-action="qualify-crm" type="button">Call and qualify</button>
@@ -2512,6 +2737,12 @@ function renderCrm(leads) {
       statusSelect.appendChild(option);
     }
 
+    const editSection = document.createElement("details");
+    editSection.className = "compact-disclosure crm-edit-disclosure";
+    const editSummary = document.createElement("summary");
+    editSummary.textContent = "Edit lead and follow-up actions";
+    editSection.append(editSummary, editor);
+
     const summaryText = lead.summary || call?.transcript?.split("\n").slice(0, 3).join("\n") || "No summary yet.";
     const summaryBlock = document.createElement("p");
     summaryBlock.className = "crm-summary";
@@ -2522,9 +2753,9 @@ function renderCrm(leads) {
       const transcript = document.createElement("pre");
       transcript.className = "transcript crm-transcript";
       transcript.textContent = transcriptText;
-      body.append(grid, summaryBlock, editor, transcript);
+      body.append(grid, summaryBlock, editSection, transcript);
     } else {
-      body.append(grid, summaryBlock, editor);
+      body.append(grid, summaryBlock, editSection);
     }
     if (qualificationCalls.length) {
       const attempts = document.createElement("div");
@@ -2680,7 +2911,13 @@ function renderCrm(leads) {
     card.append(summary, body);
     el.crmList.appendChild(card);
   }
-  if (!leads.length) el.crmList.textContent = "No leads yet.";
+  if (!leads.length) {
+    renderEmptyGuidance(
+      el.crmList,
+      "No leads in this period",
+      "Incoming calls and form leads will appear here when customers contact the business.",
+    );
+  }
   window.lucide?.createIcons();
 }
 
@@ -2783,8 +3020,10 @@ async function loadCrm() {
   if (el.crmDateFrom?.value) query.set("from", el.crmDateFrom.value);
   if (el.crmDateTo?.value) query.set("to", el.crmDateTo.value);
   const [data] = await Promise.all([apiJson(`/api/business-admin/crm?${query}`), loadLeadWebhook(), loadWebhookEvents()]);
+  state.home.crmCounts = data.statusCounts || {};
   renderCrm(data.leads || []);
   renderCrmStatusCounts(data.statusCounts || {});
+  updateHomeDashboard();
   setAdminStatus("Leads loaded");
 }
 
@@ -3131,10 +3370,16 @@ function normalizeMessageThreads(messages = [], inboundMessages = []) {
 function renderMessages(messages = [], inboundMessages = []) {
   state.messageData = { messages, inboundMessages };
   const threads = normalizeMessageThreads(messages, inboundMessages);
+  state.home.messageThreads = threads.length;
+  updateHomeDashboard();
   el.messageList.innerHTML = "";
   if (!threads.length) {
     el.messageList.className = "message-inbox empty";
-    el.messageList.textContent = "No messages yet.";
+    renderEmptyGuidance(
+      el.messageList,
+      "No conversations yet",
+      "Customer replies, reminders, review requests, and manual texts will appear here.",
+    );
     state.selectedMessageThreadKey = "";
     return;
   }
@@ -3280,6 +3525,7 @@ function businessUsageText(text) {
 }
 
 function renderUsage(data) {
+  state.usageData = data;
   el.usageSummary.innerHTML = "";
   const appendMetric = (label, value, tone = "") => {
     const metric = document.createElement("div");
@@ -3344,6 +3590,7 @@ function renderUsage(data) {
     el.usageList.appendChild(row);
   }
   if (!(data.events || []).length) el.usageList.textContent = "No usage events yet.";
+  updateHomeDashboard();
 }
 
 function creditBucketPill(container, text, className = "") {
@@ -3749,6 +3996,7 @@ function renderBilling(data) {
     el.billingHistory.appendChild(row);
   }
   if (!(data.checkoutSessions || []).length) el.billingHistory.textContent = "No payments yet.";
+  updateHomeDashboard();
 }
 
 async function loadBilling() {
@@ -3962,10 +4210,11 @@ async function initializePortal(user) {
   await loadAdTracking();
   await loadSettings();
   await loadBusinessAdmin();
-  await loadCrm().catch(() => {});
+  await Promise.allSettled([loadCrm(), loadMessages(), refreshBillingTab()]);
   if (params.get("billing")) {
     openBusinessTool("billing");
-    el.businessAdmin.scrollIntoView({ block: "start" });
+  } else {
+    selectOwnerPage("home", null, { scroll: false });
   }
 }
 
@@ -4020,29 +4269,90 @@ function runAdmin(action) {
   action().catch((error) => setAdminStatus(error.message, true));
 }
 
-for (const tab of el.adminTabs) {
-  tab.addEventListener("click", () => {
-    for (const item of el.adminTabs) {
-      const selected = item === tab;
-      item.classList.toggle("active", selected);
-      item.setAttribute("aria-selected", String(selected));
-    }
-    for (const view of el.adminViews) view.classList.toggle("active", view.dataset.view === tab.dataset.tab);
-    const tabStrip = tab.parentElement;
-    tabStrip?.scrollTo({
+function loadAdminTab(tabName) {
+  if (tabName === "calendar") {
+    runAdmin(async () => {
+      await loadBooking();
+      await loadCalendar();
+    });
+  }
+  if (tabName === "leads") runAdmin(loadCrm);
+  if (tabName === "messages") runAdmin(loadMessages);
+  if (tabName === "billing") runAdmin(refreshBillingTab);
+}
+
+function activateAdminTab(tabName, { load = true } = {}) {
+  const tab = Array.from(el.adminTabs).find((item) => item.dataset.tab === tabName);
+  if (!tab) return;
+  for (const item of el.adminTabs) {
+    const selected = item === tab;
+    item.classList.toggle("active", selected);
+    item.setAttribute("aria-selected", String(selected));
+  }
+  for (const view of el.adminViews) view.classList.toggle("active", view.dataset.view === tabName);
+  const page = OWNER_PAGE_FOR_TAB[tabName];
+  if (page) state.ownerTabs[page] = tabName;
+  const tabStrip = tab.closest("[data-admin-group]");
+  if (tabStrip && !tabStrip.hidden) {
+    tabStrip.scrollTo({
       left: tab.offsetLeft - (tabStrip.clientWidth - tab.clientWidth) / 2,
       behavior: "auto",
     });
-    if (tab.dataset.tab === "calendar") {
-      runAdmin(async () => {
-        await loadBooking();
-        await loadCalendar();
-      });
-    }
-    if (tab.dataset.tab === "leads") runAdmin(loadCrm);
-    if (tab.dataset.tab === "messages") runAdmin(loadMessages);
-    if (tab.dataset.tab === "billing") runAdmin(refreshBillingTab);
+  }
+  if (load) loadAdminTab(tabName);
+}
+
+function setMobileMoreOpen(open) {
+  if (!el.mobileMoreMenu) return;
+  el.mobileMoreMenu.hidden = !open;
+  const moreButton = Array.from(el.mobileNavItems).find((item) => item.dataset.mobileTarget === "more");
+  moreButton?.setAttribute("aria-expanded", String(open));
+}
+
+function selectOwnerPage(pageName, tabName = null, { scroll = true } = {}) {
+  const page = pageName === "home" || OWNER_PAGE_META[pageName] ? pageName : "home";
+  state.ownerPage = page;
+  for (const panel of el.ownerPages) {
+    const active = panel.dataset.ownerPagePanel === (page === "home" ? "home" : "manage");
+    panel.hidden = !active;
+    panel.classList.toggle("active", active);
+  }
+  for (const item of el.ownerNavItems) item.classList.toggle("active", item.dataset.ownerPage === page);
+  for (const item of el.mobileNavItems) {
+    const target = item.dataset.mobileTarget;
+    item.classList.toggle("active", target === page || (target === "more" && ["receptionist", "settings"].includes(page)));
+  }
+  setMobileMoreOpen(false);
+
+  if (page !== "home") {
+    const meta = OWNER_PAGE_META[page];
+    el.adminSectionEyebrow.textContent = meta.eyebrow;
+    el.adminSectionTitle.textContent = meta.title;
+    el.adminSectionDescription.textContent = meta.description;
+    for (const subnav of el.adminSubnavs) subnav.hidden = subnav.dataset.adminGroup !== page;
+    activateAdminTab(tabName || state.ownerTabs[page], { load: true });
+  }
+  if (scroll) {
+    const target = page === "home" ? el.homePage : el.businessAdmin;
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+function openTestWorkspace() {
+  selectOwnerPage("home", null, { scroll: false });
+  el.testAgentWorkspace.hidden = false;
+  el.testAgentWorkspace.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+for (const tab of el.adminTabs) {
+  tab.addEventListener("click", () => {
+    const page = OWNER_PAGE_FOR_TAB[tab.dataset.tab] || state.ownerPage;
+    selectOwnerPage(page, tab.dataset.tab, { scroll: false });
   });
+}
+
+for (const navItem of el.ownerNavItems) {
+  navItem.addEventListener("click", () => selectOwnerPage(navItem.dataset.ownerPage));
 }
 
 function crmAreaAllowed(areaName, channelName = state.crmChannel) {
@@ -4110,31 +4420,47 @@ for (const button of el.crmAreaButtons) {
 }
 
 function openBusinessTool(tabName) {
-  const tab = Array.from(el.adminTabs).find((item) => item.dataset.tab === tabName);
-  tab?.click();
+  const page = OWNER_PAGE_FOR_TAB[tabName] || "receptionist";
+  selectOwnerPage(page, tabName);
 }
 
 for (const navItem of el.mobileNavItems) {
   navItem.addEventListener("click", () => {
-    for (const item of el.mobileNavItems) item.classList.toggle("active", item === navItem);
     const target = navItem.dataset.mobileTarget;
-    if (target === "call") {
-      document.querySelector("#callScreen").scrollIntoView({ behavior: "smooth", block: "start" });
-    } else if (target === "business") {
-      document.querySelector("#profileScreen").scrollIntoView({ behavior: "smooth", block: "start" });
-    } else {
-      if (target === "crm") openBusinessTool("leads");
-      if (target === "messages") openBusinessTool("messages");
-      if (target === "calendar") openBusinessTool("calendar");
-      if (target === "setup") openBusinessTool("setup");
-      el.businessAdmin.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (target === "more") {
+      setMobileMoreOpen(el.mobileMoreMenu?.hidden !== false);
+      return;
     }
+    selectOwnerPage(target);
   });
 }
 
+el.mobileMoreMenu?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-mobile-page]");
+  if (!button) return;
+  if (button.dataset.mobileAction === "test") {
+    openTestWorkspace();
+    return;
+  }
+  selectOwnerPage(button.dataset.mobilePage, button.dataset.mobileTab || null);
+});
+
+el.homePage?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-home-destination]");
+  if (!button) return;
+  selectOwnerPage(button.dataset.homeDestination, button.dataset.homeTab || null);
+});
+
+el.globalAccountButton?.addEventListener("click", () => selectOwnerPage("settings", "billing"));
+el.homeTestAgentButton?.addEventListener("click", openTestWorkspace);
+el.closeTestAgentButton?.addEventListener("click", () => {
+  if (state.ws) stopCall();
+  el.testAgentWorkspace.hidden = true;
+  el.homePage?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
 el.openAdminButton.addEventListener("click", () => {
-  openBusinessTool("setup");
-  el.businessAdmin.scrollIntoView({ behavior: "smooth", block: "start" });
+  selectOwnerPage("receptionist", "setup");
   runAdmin(loadBusinessAdmin);
 });
 
@@ -4269,6 +4595,7 @@ el.transferTargetList.addEventListener("click", (event) => {
 });
 el.saveBusinessProfileButton.addEventListener("click", () => runAdmin(saveBusinessProfile));
 el.saveCalendarButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
+el.saveNotificationSettingsButton?.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.refreshCalendarButton.addEventListener("click", () => runAdmin(loadCalendar));
 el.calendarProvider.addEventListener("change", updateCalendarProviderUi);
 el.vagaroMode?.addEventListener("change", updateCalendarProviderUi);

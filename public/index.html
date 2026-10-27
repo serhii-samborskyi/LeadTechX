@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RingPort</title>
     <link rel="icon" type="image/png" href="/assets/ringport-icon.png" />
     <link rel="apple-touch-icon" href="/assets/ringport-icon.png" />
@@ -36,18 +36,81 @@
           </div>
         </div>
         <div class="topbar-actions">
+          <button id="globalAccountButton" class="account-state-button" type="button" hidden>
+            <span id="globalAccountState">Account status</span>
+            <i data-lucide="chevron-right"></i>
+          </button>
           <div class="status" id="status"><i data-lucide="circle"></i> Idle</div>
-          <button id="logoutButton" class="icon-button" type="button" title="Sign out"><i data-lucide="log-out"></i></button>
+          <button id="logoutButton" class="icon-button" type="button" title="Sign out" aria-label="Sign out"><i data-lucide="log-out"></i></button>
         </div>
       </section>
 
+      <nav class="owner-nav" aria-label="Main navigation">
+        <button class="owner-nav-item active" data-owner-page="home" type="button"><i data-lucide="house"></i><span>Home</span></button>
+        <button class="owner-nav-item" data-owner-page="inbox" type="button"><i data-lucide="inbox"></i><span>Inbox</span></button>
+        <button class="owner-nav-item" data-owner-page="appointments" type="button"><i data-lucide="calendar-days"></i><span>Appointments</span></button>
+        <button class="owner-nav-item" data-owner-page="receptionist" type="button"><i data-lucide="headphones"></i><span>Receptionist</span></button>
+        <button class="owner-nav-item" data-owner-page="settings" type="button"><i data-lucide="settings-2"></i><span>Settings</span></button>
+      </nav>
+
+      <section class="owner-page active" data-owner-page-panel="home" id="homePage">
+        <div class="home-dashboard">
+          <div class="home-welcome">
+            <div>
+              <p class="eyebrow">Today</p>
+              <h2>Your business at a glance</h2>
+              <p>See what needs attention and confirm that your receptionist is ready for calls.</p>
+            </div>
+            <button id="homeTestAgentButton" class="primary" type="button"><i data-lucide="phone-call"></i> Test receptionist</button>
+          </div>
+
+          <div class="home-status-grid">
+            <button class="home-status-card" id="homeAccountCard" data-home-destination="settings" data-home-tab="billing" type="button">
+              <span class="home-card-icon"><i data-lucide="badge-check"></i></span>
+              <span class="home-card-copy"><small>Account</small><strong id="homeAccountState">Loading status</strong><span id="homeAccountDetail">Checking your plan and usage.</span></span>
+              <i data-lucide="chevron-right"></i>
+            </button>
+            <button class="home-status-card" id="homePhoneCard" data-home-destination="receptionist" data-home-tab="setup" type="button">
+              <span class="home-card-icon"><i data-lucide="phone"></i></span>
+              <span class="home-card-copy"><small>Phone</small><strong id="homePhoneState">Checking number</strong><span id="homePhoneDetail">Confirming your assigned RingPort number.</span></span>
+              <i data-lucide="chevron-right"></i>
+            </button>
+          </div>
+
+          <div class="home-metrics" aria-label="Business activity">
+            <button data-home-destination="inbox" data-home-tab="leads" type="button"><span>New leads</span><strong id="homeLeadCount">0</strong><small>In the selected period</small></button>
+            <button data-home-destination="inbox" data-home-tab="leads" type="button"><span>Needs reply</span><strong id="homeNeedsReplyCount">0</strong><small>Customers waiting</small></button>
+            <button data-home-destination="appointments" data-home-tab="calendar" type="button"><span>Appointments</span><strong id="homeAppointmentCount">0</strong><small>Next 14 days</small></button>
+          </div>
+
+          <section class="home-actions-panel" aria-labelledby="homeActionsTitle">
+            <div>
+              <p class="eyebrow">Action list</p>
+              <h3 id="homeActionsTitle">What needs attention</h3>
+            </div>
+            <div class="home-action-list" id="homeActionList" aria-live="polite">
+              <div class="home-action-empty"><i data-lucide="loader-circle"></i><span>Loading your latest activity.</span></div>
+            </div>
+          </section>
+        </div>
+
+        <section class="test-agent-shell" id="testAgentWorkspace" hidden>
+          <div class="test-agent-heading">
+            <div>
+              <p class="eyebrow">Test receptionist</p>
+              <h2>Have a practice conversation</h2>
+              <p>Calls from this screen are for testing and do not use your public phone number.</p>
+            </div>
+            <button id="closeTestAgentButton" type="button"><i data-lucide="x"></i> Close test</button>
+          </div>
+
       <section class="workspace">
         <aside class="panel controls" aria-label="Call controls">
-          <label>
+          <label class="portal-context-field">
             Business name
             <input id="businessName" placeholder="Business Name" autocomplete="organization" />
           </label>
-          <label>
+          <label class="portal-context-field">
             Website optional
             <input id="website" placeholder="https://example.com" autocomplete="url" />
           </label>
@@ -76,7 +139,7 @@
             <div>
               <h2 id="callHeading">Ready to test the receptionist</h2>
               <p id="callSubheading">Start a browser call to test how the agent answers customers.</p>
-              <p class="diagnostics" id="diagnostics">Mic chunks: 0 | Agent audio chunks: 0 | Audio seconds: 0.0</p>
+              <p class="diagnostics" id="diagnostics" hidden>Mic chunks: 0 | Agent audio chunks: 0 | Audio seconds: 0.0</p>
             </div>
           </div>
 
@@ -102,32 +165,40 @@
           </dl>
         </aside>
       </section>
+        </section>
+      </section>
 
-      <section class="panel admin-panel" id="businessAdmin">
+      <section class="panel admin-panel owner-page" data-owner-page-panel="manage" id="businessAdmin" hidden>
         <div class="admin-header">
           <div>
-            <p class="eyebrow">Business tools</p>
-            <h2>Manage business</h2>
+            <p class="eyebrow" id="adminSectionEyebrow">Inbox</p>
+            <h2 id="adminSectionTitle">Customer activity</h2>
+            <p id="adminSectionDescription">Review leads and conversations that need attention.</p>
           </div>
           <div class="admin-status" id="adminStatus">Loading</div>
         </div>
 
-        <nav class="admin-tabs" role="tablist" aria-label="Business tools">
-          <button class="admin-tab active" data-tab="leads" role="tab" aria-selected="true" type="button">CRM</button>
-          <button class="admin-tab" data-tab="messages" role="tab" aria-selected="false" type="button">Messages</button>
-          <button class="admin-tab" data-tab="setup" role="tab" aria-selected="false" type="button">Setup</button>
-          <button class="admin-tab" data-tab="content" role="tab" aria-selected="false" type="button">Content</button>
-          <button class="admin-tab" data-tab="transfers" role="tab" aria-selected="false" type="button">Transfers</button>
-          <button class="admin-tab" data-tab="calendar" role="tab" aria-selected="false" type="button">Calendar</button>
-          <button class="admin-tab" data-tab="billing" role="tab" aria-selected="false" type="button">Billing</button>
-        </nav>
+        <div class="admin-subnavs">
+          <nav class="admin-tabs" data-admin-group="inbox" role="tablist" aria-label="Inbox sections">
+            <button class="admin-tab active" data-tab="leads" role="tab" aria-selected="true" type="button">Leads</button>
+            <button class="admin-tab" data-tab="messages" role="tab" aria-selected="false" type="button">Conversations</button>
+          </nav>
+          <nav class="admin-tabs" data-admin-group="receptionist" role="tablist" aria-label="Receptionist sections" hidden>
+            <button class="admin-tab" data-tab="setup" role="tab" aria-selected="false" type="button">Basics</button>
+            <button class="admin-tab" data-tab="content" role="tab" aria-selected="false" type="button">Knowledge</button>
+            <button class="admin-tab" data-tab="transfers" role="tab" aria-selected="false" type="button">Team &amp; transfers</button>
+          </nav>
+          <nav class="admin-tabs" data-admin-group="settings" role="tablist" aria-label="Settings sections" hidden>
+            <button class="admin-tab" data-tab="notifications" role="tab" aria-selected="false" type="button">Notifications</button>
+            <button class="admin-tab" data-tab="advanced" role="tab" aria-selected="false" type="button">Advanced</button>
+            <button class="admin-tab" data-tab="billing" role="tab" aria-selected="false" type="button">Plan &amp; usage</button>
+          </nav>
+          <button class="admin-tab infrastructure-tab" data-tab="calendar" type="button" hidden>Appointments</button>
+        </div>
 
         <div class="admin-content">
-          <section class="admin-view" data-view="setup">
-            <div class="admin-view-heading">
-              <h3>Business information</h3>
-              <p>These details tell the receptionist what the business does, where it works, and how customers can book.</p>
-            </div>
+          <details class="admin-view setup-disclosure" data-view="setup">
+            <summary><span><strong>Business information</strong><small>Name, services, hours, service area, and booking policy</small></span></summary>
             <div class="form-grid business-info-grid">
               <label>Business name<input id="profileBusinessName" /></label>
               <label>Website<input id="profileWebsite" type="url" /></label>
@@ -140,29 +211,27 @@
               <label class="wide-field">Address<input id="profileAddress" /></label>
               <label>Pricing<textarea id="profilePricing" rows="3"></textarea></label>
               <label>Booking policy<textarea id="profileBookingPolicy" rows="3"></textarea></label>
-              <label class="wide-field">FAQ (JSON)<textarea id="profileFaq" rows="6"></textarea></label>
+              <details class="wide-field form-advanced">
+                <summary>Advanced FAQ data</summary>
+                <label>FAQ JSON<textarea id="profileFaq" rows="6"></textarea></label>
+                <small>The Knowledge section is the easier way to add customer questions and answers.</small>
+              </details>
             </div>
             <button id="saveBusinessProfileButton" class="primary action-button" type="button">Save business information</button>
-          </section>
+          </details>
 
-          <section class="admin-view" data-view="setup">
-            <div class="admin-view-heading">
-              <h3>Agent basics</h3>
-              <p>Choose the public-facing name, voice, and language for this business receptionist.</p>
-            </div>
+          <details class="admin-view setup-disclosure" data-view="setup">
+            <summary><span><strong>Voice and language</strong><small>Choose the receptionist name, voice style, and spoken language</small></span></summary>
             <div class="form-grid">
-              <label>Voice<select id="voiceName"><option>Puck</option><option>Charon</option><option>Kore</option><option>Fenrir</option><option>Aoede</option></select></label>
+              <label>Voice style<select id="voiceName"><option value="Puck">Warm and upbeat</option><option value="Charon">Calm and steady</option><option value="Kore">Clear and professional</option><option value="Fenrir">Confident and direct</option><option value="Aoede">Friendly and expressive</option></select></label>
               <label>Language<select id="language"><option>English</option><option>Spanish</option><option>French</option><option>German</option><option>Italian</option><option>Portuguese</option><option>Polish</option><option>Ukrainian</option><option>Russian</option><option>Arabic</option><option>Hindi</option><option>Japanese</option><option>Korean</option><option>Chinese</option></select></label>
               <label>Agent name<input id="agentName" placeholder="Alex" autocomplete="off" /></label>
             </div>
             <button id="saveSettingsButton" class="primary action-button" type="button">Save agent settings</button>
-          </section>
+          </details>
 
-          <section class="admin-view" data-view="setup">
-            <div class="admin-view-heading">
-              <h3>Timezone and follow-up hours</h3>
-              <p>Set the business timezone and the hours automated follow-up texts are allowed to send.</p>
-            </div>
+          <details class="admin-view setup-disclosure" data-view="setup">
+            <summary><span><strong>Timezone and follow-up hours</strong><small>Control when automated customer texts are allowed to send</small></span></summary>
             <div class="form-grid">
               <label>Business timezone<input id="calendarTimezone" value="America/Chicago" list="timezoneOptions" /></label>
               <label>Follow-up texts start<input id="followupTextStartTime" type="time" /></label>
@@ -178,30 +247,33 @@
               <option value="Pacific/Honolulu"></option>
             </datalist>
             <button id="saveFollowupHoursButton" class="primary action-button" type="button">Save follow-up hours</button>
-          </section>
+          </details>
 
-          <section class="admin-view" data-view="setup">
+          <section class="admin-view" data-view="advanced">
             <div class="admin-view-heading">
               <h3>Spam protection</h3>
-              <p>Block repeat spam callers before the receptionist answers, so obvious abuse does not start an AI call session. Use 0 to disable a numeric rule.</p>
+              <p>Block repeat and suspicious callers before they use call minutes.</p>
             </div>
-            <div class="form-grid">
+            <div class="form-grid advanced-settings-grid">
               <label class="check-label"><input id="spamProtectionEnabled" type="checkbox" /> Enable spam protection</label>
               <label class="check-label"><input id="spamBlockUnknownCallers" type="checkbox" /> Block private or unknown callers</label>
               <label class="check-label"><input id="spamBlockTollFreeCallers" type="checkbox" /> Block toll-free callers</label>
-              <label>Max calls per number per hour<input id="spamMaxCallsPerPhonePerHour" type="number" min="0" step="1" /></label>
-              <label>Short-call threshold seconds<input id="spamShortCallThresholdSeconds" type="number" min="0" step="1" /></label>
-              <label>Max short calls per number per day<input id="spamMaxShortCallsPerPhonePerDay" type="number" min="0" step="1" /></label>
               <label class="wide-field">Blocked numbers<textarea id="spamBlockedNumbers" rows="4" placeholder="+15551234567&#10;+15557654321"></textarea></label>
             </div>
+            <details class="advanced-rule-details">
+              <summary>Fine-tune spam limits</summary>
+              <div class="form-grid">
+                <label>Max calls per number per hour<input id="spamMaxCallsPerPhonePerHour" type="number" min="0" step="1" /></label>
+                <label>Short-call threshold seconds<input id="spamShortCallThresholdSeconds" type="number" min="0" step="1" /></label>
+                <label>Max short calls per number per day<input id="spamMaxShortCallsPerPhonePerDay" type="number" min="0" step="1" /></label>
+              </div>
+              <small>Use 0 to disable an individual numeric rule.</small>
+            </details>
             <button id="saveSpamSettingsButton" class="primary action-button" type="button">Save spam settings</button>
           </section>
 
-          <section class="admin-view" data-view="content">
-            <div class="admin-view-heading">
-              <h3>Questions to ask</h3>
-              <p>Fields the receptionist should collect from callers and form leads.</p>
-            </div>
+          <details class="admin-view setup-disclosure" data-view="content">
+            <summary><span><strong>Questions to ask</strong><small>Choose the information your receptionist collects from callers</small></span></summary>
             <div class="inline-editor intake-editor">
               <input id="intakeLabel" placeholder="Field label" />
               <input id="intakeKey" placeholder="field_key" />
@@ -211,13 +283,10 @@
               <button id="addIntakeButton" type="button">Add field</button>
             </div>
             <div class="data-list" id="intakeList"></div>
-          </section>
+          </details>
 
-          <section class="admin-view" data-view="content">
-            <div class="admin-view-heading">
-              <h3>Knowledge base</h3>
-              <p>Answers the receptionist can use when customers ask common questions.</p>
-            </div>
+          <details class="admin-view setup-disclosure" data-view="content">
+            <summary><span><strong>Customer questions and answers</strong><small>Add the answers your receptionist can give during a call</small></span></summary>
             <div class="import-row">
               <input id="knowledgeFile" type="file" accept=".csv,.xlsx" />
               <button id="importKnowledgeButton" type="button">Import CSV/XLSX</button>
@@ -230,13 +299,10 @@
               <button id="addKnowledgeButton" type="button">Add answer</button>
             </div>
             <div class="data-list" id="knowledgeList"></div>
-          </section>
+          </details>
 
-          <section class="admin-view" data-view="content">
-            <div class="admin-view-heading">
-              <h3>Prices</h3>
-              <p>Service prices or pricing rules the receptionist can explain.</p>
-            </div>
+          <details class="admin-view setup-disclosure" data-view="content">
+            <summary><span><strong>Services and prices</strong><small>Add fixed prices, ranges, and call-for-quote services</small></span></summary>
             <div class="import-row">
               <input id="pricesFile" type="file" accept=".csv,.xlsx" />
               <button id="importPricesButton" type="button">Import CSV/XLSX</button>
@@ -253,7 +319,7 @@
               <button id="addPriceButton" type="button">Add price</button>
             </div>
             <div class="data-list" id="pricesList"></div>
-          </section>
+          </details>
 
           <section class="admin-view" data-view="transfers">
             <div class="admin-view-heading">
@@ -273,9 +339,28 @@
 
           <section class="admin-view" data-view="calendar">
             <div class="admin-view-heading">
-              <h3>Calendar</h3>
-              <p>Set appointment rules and see booked or requested times.</p>
+              <h3>Appointments</h3>
+              <p>Review upcoming bookings and requests. Open appointment settings only when you need to change availability or integrations.</p>
             </div>
+            <div class="calendar-board">
+              <div>
+                <div class="schedule-heading">
+                  <h3>Schedule</h3>
+                  <div class="schedule-legend" aria-label="Schedule colors">
+                    <span><i class="legend-dot available"></i>Available</span>
+                    <span><i class="legend-dot booked"></i>Booked</span>
+                    <span><i class="legend-dot requested"></i>Requested</span>
+                  </div>
+                </div>
+                <div class="slot-grid" id="availableSlots"></div>
+              </div>
+              <div><h3>Booked and requested</h3><div class="data-list" id="bookedAppointments"></div></div>
+            </div>
+            <details class="section-disclosure calendar-settings-disclosure">
+              <summary>
+                <span><strong>Appointment settings</strong><small>Availability, booking rules, manual appointments, and calendar connection</small></span>
+              </summary>
+              <div class="section-disclosure-body">
             <div class="crm-webhook-card booking-provider-card">
               <div>
                 <h4>Booking system</h4>
@@ -371,18 +456,6 @@
               <label>Service filter<select id="calendarServiceFilter"><option value="">First available service</option></select></label>
               <label>Professional filter<select id="calendarProfessionalFilter"><option value="">Any professional</option></select></label>
             </div>
-            <div class="crm-webhook-card appointment-notification-card">
-              <div>
-                <h4>Business appointment summaries</h4>
-                <p>Notify the business when a new appointment or appointment request is booked. Customer confirmations are configured separately.</p>
-              </div>
-              <div class="form-grid appointment-notification-settings">
-                <label class="check-label"><input id="appointmentNotificationTextEnabled" type="checkbox" /> Send summary by text</label>
-                <label>Text destination<input id="appointmentNotificationPhone" type="tel" placeholder="+15551234567" /></label>
-                <label class="check-label"><input id="appointmentNotificationEmailEnabled" type="checkbox" /> Send summary by email</label>
-                <label>Email destination<input id="appointmentNotificationEmail" type="email" placeholder="owner@business.com" /></label>
-              </div>
-            </div>
             <div class="availability-list" id="availabilityRules"></div>
             <div class="crm-webhook-card appointment-editor-card">
               <div>
@@ -406,27 +479,35 @@
               <button id="saveCalendarButton" class="primary" type="button">Save calendar settings</button>
               <button id="refreshCalendarButton" type="button">Refresh calendar</button>
             </div>
-            <div class="calendar-board">
-              <div>
-                <div class="schedule-heading">
-                  <h3>Schedule</h3>
-                  <div class="schedule-legend" aria-label="Schedule colors">
-                    <span><i class="legend-dot available"></i>Available</span>
-                    <span><i class="legend-dot booked"></i>Booked</span>
-                    <span><i class="legend-dot requested"></i>Requested</span>
-                  </div>
-                </div>
-                <div class="slot-grid" id="availableSlots"></div>
               </div>
-              <div><h3>Booked and requested</h3><div class="data-list" id="bookedAppointments"></div></div>
+            </details>
+          </section>
+
+          <section class="admin-view" data-view="notifications">
+            <div class="admin-view-heading">
+              <h3>Owner notifications</h3>
+              <p>Choose how RingPort should notify the business when an appointment is booked or requested.</p>
             </div>
+            <div class="crm-webhook-card appointment-notification-card">
+              <div>
+                <h4>Appointment summaries</h4>
+                <p>Customer confirmations are configured separately. These summaries are for the business owner or team.</p>
+              </div>
+              <div class="form-grid appointment-notification-settings">
+                <label class="check-label"><input id="appointmentNotificationTextEnabled" type="checkbox" /> Send summary by text</label>
+                <label>Text destination<input id="appointmentNotificationPhone" type="tel" placeholder="+15551234567" /></label>
+                <label class="check-label"><input id="appointmentNotificationEmailEnabled" type="checkbox" /> Send summary by email</label>
+                <label>Email destination<input id="appointmentNotificationEmail" type="email" placeholder="owner@business.com" /></label>
+              </div>
+            </div>
+            <button id="saveNotificationSettingsButton" class="primary action-button" type="button">Save notifications</button>
           </section>
 
           <section class="admin-view active" data-view="leads">
             <div class="section-heading crm-heading">
               <div class="admin-view-heading">
-                <h3>CRM</h3>
-                <p>Inbound call leads, outbound ad/form leads, follow-up rules, and customer history.</p>
+                <h3>Leads</h3>
+                <p>Review incoming callers and form leads, then follow up with the people who need a response.</p>
               </div>
               <button id="refreshCrmButton" type="button">Refresh leads</button>
             </div>
@@ -436,14 +517,19 @@
               <button class="crm-menu-button" data-crm-target="outbound" type="button" role="tab" aria-selected="false">Outbound</button>
             </div>
 
-            <div class="crm-area-subnav" role="tablist" aria-label="CRM subsections">
-              <button class="crm-area-button active" data-crm-area="leads" type="button" role="tab" aria-selected="true"><i data-lucide="list"></i><span>Lead list</span></button>
-              <button class="crm-area-button" data-crm-area="agent-rules" data-crm-channel-only="inbound" type="button" role="tab" aria-selected="false"><i data-lucide="phone-call"></i><span>Call rules</span></button>
-              <button class="crm-area-button" data-crm-area="booking-followup" data-crm-channel-only="inbound" type="button" role="tab" aria-selected="false"><i data-lucide="git-branch"></i><span>Booking sequence</span></button>
-              <button class="crm-area-button" data-crm-area="reviews" data-crm-channel-only="inbound" type="button" role="tab" aria-selected="false"><i data-lucide="star"></i><span>Reviews</span></button>
-              <button class="crm-area-button" data-crm-area="outbound-qualification" data-crm-channel-only="outbound" type="button" role="tab" aria-selected="false"><i data-lucide="phone-forwarded"></i><span>Qualification</span></button>
-              <button class="crm-area-button" data-crm-area="lead-webhook" data-crm-channel-only="outbound" type="button" role="tab" aria-selected="false"><i data-lucide="webhook"></i><span>Lead webhook</span></button>
-            </div>
+            <details class="section-disclosure crm-automation-disclosure">
+              <summary><span><strong>Automation settings</strong><small>Call rules, booking follow-up, reviews, outbound qualification, and integrations</small></span></summary>
+              <div class="section-disclosure-body">
+                <div class="crm-area-subnav" role="tablist" aria-label="CRM automation sections">
+                  <button class="crm-area-button active" data-crm-area="leads" type="button" role="tab" aria-selected="true"><i data-lucide="list"></i><span>Lead list</span></button>
+                  <button class="crm-area-button" data-crm-area="agent-rules" data-crm-channel-only="inbound" type="button" role="tab" aria-selected="false"><i data-lucide="phone-call"></i><span>Call rules</span></button>
+                  <button class="crm-area-button" data-crm-area="booking-followup" data-crm-channel-only="inbound" type="button" role="tab" aria-selected="false"><i data-lucide="git-branch"></i><span>Booking sequence</span></button>
+                  <button class="crm-area-button" data-crm-area="reviews" data-crm-channel-only="inbound" type="button" role="tab" aria-selected="false"><i data-lucide="star"></i><span>Reviews</span></button>
+                  <button class="crm-area-button" data-crm-area="outbound-qualification" data-crm-channel-only="outbound" type="button" role="tab" aria-selected="false"><i data-lucide="phone-forwarded"></i><span>Qualification</span></button>
+                  <button class="crm-area-button" data-crm-area="lead-webhook" data-crm-channel-only="outbound" type="button" role="tab" aria-selected="false"><i data-lucide="webhook"></i><span>Lead integration</span></button>
+                </div>
+              </div>
+            </details>
 
             <div class="crm-records-panel active" data-crm-area-panel="leads" role="tabpanel">
               <div class="crm-section-heading">
@@ -477,14 +563,17 @@
                   <option value="unreachable">Unreachable</option>
                 </select>
               </div>
-              <div class="inline-editor crm-editor">
-                <input id="crmName" placeholder="Name" />
-                <input id="crmPhone" placeholder="Phone" />
-                <input id="crmEmail" placeholder="Email" />
-                <input id="crmNeed" placeholder="Need / service" />
-                <select id="crmStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="unqualified">Unqualified</option><option value="callback">Callback</option><option value="appointment">Appointment</option><option value="needs_reply">Needs reply</option><option value="transferred">Transferred</option><option value="unreachable">Unreachable</option></select>
-                <button id="addCrmLeadButton" type="button">Add lead</button>
-              </div>
+              <details class="compact-disclosure">
+                <summary>Add a lead manually</summary>
+                <div class="inline-editor crm-editor">
+                  <input id="crmName" placeholder="Name" />
+                  <input id="crmPhone" placeholder="Phone" />
+                  <input id="crmEmail" placeholder="Email" />
+                  <input id="crmNeed" placeholder="Need / service" />
+                  <select id="crmStatus"><option value="new">New</option><option value="qualified">Qualified</option><option value="unqualified">Unqualified</option><option value="callback">Callback</option><option value="appointment">Appointment</option><option value="needs_reply">Needs reply</option><option value="transferred">Transferred</option><option value="unreachable">Unreachable</option></select>
+                  <button id="addCrmLeadButton" type="button">Add lead</button>
+                </div>
+              </details>
               <div class="crm-board" id="crmList"></div>
             </div>
 
@@ -745,17 +834,20 @@
           <section class="admin-view" data-view="messages">
             <div class="section-heading">
               <div>
-                <h3>Messages</h3>
-                <p>Customer text threads, review requests, complaint escalations, setup links, and reminders.</p>
+                <h3>Conversations</h3>
+                <p>Read and respond to customer texts, reminders, review requests, and complaint follow-ups.</p>
               </div>
               <button id="refreshMessagesButton" type="button">Refresh messages</button>
             </div>
-            <div class="inline-editor crm-editor">
-              <input id="testMessageProvider" type="hidden" value="" />
-              <input id="testMessagePhone" placeholder="Phone +15551234567" />
-              <input id="testMessageBody" placeholder="Type a text message" />
-              <button id="sendTestMessageButton" type="button">Send text</button>
-            </div>
+            <details class="compact-disclosure start-conversation-disclosure">
+              <summary>Start a new text conversation</summary>
+              <div class="inline-editor crm-editor">
+                <input id="testMessageProvider" type="hidden" value="" />
+                <input id="testMessagePhone" placeholder="Phone +15551234567" />
+                <input id="testMessageBody" placeholder="Type a text message" />
+                <button id="sendTestMessageButton" type="button">Send text</button>
+              </div>
+            </details>
             <div class="data-list" id="messageList"></div>
           </section>
 
@@ -856,13 +948,16 @@
       </section>
     </main>
 
+    <div class="mobile-more-menu" id="mobileMoreMenu" hidden>
+      <button data-mobile-page="receptionist" data-mobile-tab="setup" type="button"><i data-lucide="headphones"></i><span><strong>Receptionist</strong><small>Business knowledge and call handling</small></span></button>
+      <button data-mobile-page="settings" data-mobile-tab="notifications" type="button"><i data-lucide="settings-2"></i><span><strong>Settings</strong><small>Notifications, advanced controls, and billing</small></span></button>
+      <button data-mobile-page="home" data-mobile-action="test" type="button"><i data-lucide="phone-call"></i><span><strong>Test receptionist</strong><small>Start a browser practice call</small></span></button>
+    </div>
     <nav class="mobile-nav" aria-label="App navigation">
-      <button class="mobile-nav-item active" data-mobile-target="call" type="button"><i data-lucide="phone"></i><span>Call</span></button>
-      <button class="mobile-nav-item" data-mobile-target="business" type="button"><i data-lucide="building-2"></i><span>Business</span></button>
-      <button class="mobile-nav-item" data-mobile-target="crm" type="button"><i data-lucide="list"></i><span>CRM</span></button>
-      <button class="mobile-nav-item" data-mobile-target="messages" type="button"><i data-lucide="message-square"></i><span>Messages</span></button>
-      <button class="mobile-nav-item" data-mobile-target="calendar" type="button"><i data-lucide="calendar-days"></i><span>Calendar</span></button>
-      <button class="mobile-nav-item" data-mobile-target="setup" type="button"><i data-lucide="settings-2"></i><span>Setup</span></button>
+      <button class="mobile-nav-item active" data-mobile-target="home" type="button"><i data-lucide="house"></i><span>Home</span></button>
+      <button class="mobile-nav-item" data-mobile-target="inbox" type="button"><i data-lucide="inbox"></i><span>Inbox</span></button>
+      <button class="mobile-nav-item" data-mobile-target="appointments" type="button"><i data-lucide="calendar-days"></i><span>Appointments</span></button>
+      <button class="mobile-nav-item" data-mobile-target="more" type="button" aria-expanded="false"><i data-lucide="menu"></i><span>More</span></button>
     </nav>
 
     <script src="/vendor/lucide/lucide.min.js"></script>
