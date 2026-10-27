@@ -177,6 +177,8 @@ let bookingFollowupWorkerTimer = null;
 let bookingFollowupWorkerRunning = false;
 let trialPhoneNumberCleanupInterval = null;
 let trialPhoneNumberCleanupRunning = false;
+let trialReminderWorkerTimer = null;
+let trialReminderWorkerRunning = false;
 const aiRateLimitHits = new Map();
 let prismaReconnectPromise = null;
 
@@ -2271,6 +2273,143 @@ const DEFAULT_PLATFORM_BUSINESS_RULES =
   "Use only the language configured for the business agent. Do not switch languages automatically when the caller speaks another language. If the caller asks for another language, explain briefly in the configured language that the receptionist is set to use only that language unless the business changes settings.";
 const DEFAULT_ONBOARDING_INSTRUCTIONS =
   "You are the RingPort platform onboarding specialist. Collect the company name and website, text those details to the caller for confirmation, build the agent only after confirmation, and send the secure setup link when it is ready. Keep the call brief.";
+const DEFAULT_TRIAL_REMINDER_STEPS = [
+  {
+    key: "before_7_days",
+    label: "One week before",
+    offsetDays: -7,
+    enabled: true,
+    emailEnabled: true,
+    textEnabled: true,
+    subject: "A quick heads-up about your RingPort trial",
+    emailBody:
+      "Hi {{owner_name}},\n\nThe RingPort trial for {{business_name}} ends on {{trial_end_date}}. Nothing needs attention today—we just wanted to give you time to review the account before then.\n\nAccount: {{billing_url}}",
+    textBody:
+      "Hi {{owner_name}}, a quick heads-up: the RingPort trial for {{business_name}} ends on {{trial_end_date}}. Account: {{billing_url}}",
+  },
+  {
+    key: "before_3_days",
+    label: "Three days before",
+    offsetDays: -3,
+    enabled: true,
+    emailEnabled: true,
+    textEnabled: true,
+    subject: "Your RingPort trial ends in a few days",
+    emailBody:
+      "Hi {{owner_name}},\n\nA brief reminder that the RingPort trial for {{business_name}} ends on {{trial_end_date}}. Your current setup and activity remain available in the business portal.\n\nAccount: {{billing_url}}",
+    textBody:
+      "Reminder: the RingPort trial for {{business_name}} ends on {{trial_end_date}}. Your setup remains available here: {{billing_url}}",
+  },
+  {
+    key: "before_1_day",
+    label: "One day before",
+    offsetDays: -1,
+    enabled: true,
+    emailEnabled: true,
+    textEnabled: true,
+    subject: "Your RingPort trial ends tomorrow",
+    emailBody:
+      "Hi {{owner_name}},\n\nThe RingPort trial for {{business_name}} ends tomorrow. If you are still evaluating it, your setup will remain saved and can be reactivated from the account page.\n\nAccount: {{billing_url}}",
+    textBody:
+      "The RingPort trial for {{business_name}} ends tomorrow. Your setup stays saved and can be reactivated here: {{billing_url}}",
+  },
+  {
+    key: "after_1_day",
+    label: "One day after",
+    offsetDays: 1,
+    enabled: true,
+    emailEnabled: true,
+    textEnabled: true,
+    subject: "Your RingPort trial has ended",
+    emailBody:
+      "Hi {{owner_name}},\n\nThe trial for {{business_name}} has ended, so the receptionist is currently paused. Your business setup and call history are still saved. You can review the account whenever the timing is right.\n\nAccount: {{billing_url}}",
+    textBody:
+      "The RingPort trial for {{business_name}} has ended. Your receptionist is paused, but the setup remains saved: {{billing_url}}",
+  },
+  {
+    key: "after_3_days",
+    label: "Three days after",
+    offsetDays: 3,
+    enabled: true,
+    emailEnabled: true,
+    textEnabled: true,
+    subject: "Your RingPort setup is still saved",
+    emailBody:
+      "Hi {{owner_name}},\n\nJust a reminder that the RingPort setup for {{business_name}} is still available even though the trial has ended. Nothing has been deleted, and you can return to it at any time.\n\nAccount: {{billing_url}}",
+    textBody:
+      "Just a reminder: your {{business_name}} RingPort setup is still saved after the trial. View it anytime: {{billing_url}}",
+  },
+  {
+    key: "after_7_days",
+    label: "One week after",
+    offsetDays: 7,
+    enabled: true,
+    emailEnabled: true,
+    textEnabled: true,
+    subject: "Checking in on your RingPort trial",
+    emailBody:
+      "Hi {{owner_name}},\n\nIt has been about a week since the RingPort trial for {{business_name}} ended. If the timing was not right, that is completely fine—your receptionist setup remains ready in the account.\n\nAccount: {{billing_url}}",
+    textBody:
+      "Checking in: your {{business_name}} receptionist setup is still available if you want to return to it: {{billing_url}}",
+  },
+  {
+    key: "after_14_days",
+    label: "Two weeks after",
+    offsetDays: 14,
+    enabled: true,
+    emailEnabled: true,
+    textEnabled: true,
+    subject: "Your RingPort receptionist remains available",
+    emailBody:
+      "Hi {{owner_name}},\n\nYour RingPort trial has been paused for two weeks. We are keeping the setup for {{business_name}} available so you do not have to start over if you decide to return.\n\nAccount: {{billing_url}}",
+    textBody:
+      "Your {{business_name}} RingPort setup remains saved, so you will not need to start over if you return: {{billing_url}}",
+  },
+  {
+    key: "after_30_days",
+    label: "One month after",
+    offsetDays: 30,
+    enabled: true,
+    emailEnabled: true,
+    textEnabled: true,
+    subject: "A final note about your RingPort trial",
+    emailBody:
+      "Hi {{owner_name}},\n\nThis is our final reminder about the ended RingPort trial for {{business_name}}. Your account remains available if you need it later, and we will stop sending trial reminders after this message.\n\nAccount: {{billing_url}}",
+    textBody:
+      "Final trial reminder for {{business_name}}: your RingPort setup remains available, and we will not send more trial reminders after this. {{billing_url}}",
+  },
+];
+
+function normalizeTrialReminderSteps(value, fallback = DEFAULT_TRIAL_REMINDER_STEPS) {
+  const source = Array.isArray(value) ? value : fallback;
+  const seen = new Set();
+  return source.slice(0, 20).map((raw, index) => {
+    const item = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const baseKey = String(item.key || `trial_step_${index + 1}`)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 80) || `trial_step_${index + 1}`;
+    let key = baseKey;
+    let suffix = 2;
+    while (seen.has(key)) key = `${baseKey}_${suffix++}`.slice(0, 80);
+    seen.add(key);
+    const parsedOffset = Number(item.offsetDays ?? 0);
+    const offsetDays = Math.max(-90, Math.min(180, Math.round(Number.isFinite(parsedOffset) ? parsedOffset : 0)));
+    return {
+      key,
+      label: String(item.label || `Trial reminder ${index + 1}`).trim().slice(0, 120) || `Trial reminder ${index + 1}`,
+      offsetDays,
+      enabled: item.enabled !== false,
+      emailEnabled: item.emailEnabled !== false,
+      textEnabled: item.textEnabled !== false,
+      subject: String(item.subject || "RingPort trial reminder").trim().slice(0, 200),
+      emailBody: String(item.emailBody || "").trim().slice(0, 5000),
+      textBody: String(item.textBody || "").trim().slice(0, 1200),
+    };
+  });
+}
 
 function onboardingInstructionsForPrompt(value) {
   const text = String(value || "").trim();
@@ -2652,6 +2791,16 @@ function callerTranscriptText(transcript) {
   return callerLines.join(" ");
 }
 
+function recentCallerMessage(transcript, limit = 800) {
+  const callerLines = String(transcript || "")
+    .split(/\n+/)
+    .filter((line) => /^\s*\[Caller\]/i.test(line))
+    .map((line) => line.replace(/^\s*\[Caller\]\s*/i, "").trim())
+    .filter(Boolean)
+    .slice(-4);
+  return callerLines.join(" ").slice(0, limit);
+}
+
 function cleanCallerNameCandidate(value) {
   const stopWords = new Set([
     "calling",
@@ -2701,26 +2850,44 @@ function extractCallerNameFromTranscript(transcript) {
 
 function extractLeadFieldsFromTranscript(transcript, fallback = {}) {
   const text = String(transcript || "");
+  const callerText = callerTranscriptText(text);
   const name = usableCallerName(fallback.name) || extractCallerNameFromTranscript(text) || null;
   const phone = fallback.phone || text.match(/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/)?.[0] || null;
   const email = fallback.email || text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || null;
   const appointmentIntent = keywordMatch(text, ["appointment", "book", "schedule", "reservation", "consultation", "callback"]);
   const complaintIntent = keywordMatch(text, ["complaint", "not happy", "unhappy", "bad service", "problem", "issue", "manager"]);
+  const ownerMessageIntent = keywordMatch(callerText, [
+    "tell them",
+    "let them know",
+    "pass that along",
+    "pass it along",
+    "running late",
+    "be late",
+    "late for",
+    "cancel my",
+    "need to cancel",
+    "reschedule",
+    "call me back",
+    "message for",
+    "notify them",
+  ]);
   const satisfaction =
     keywordMatch(text, ["happy", "great service", "excellent", "perfect", "satisfied", "thank you"]) && !complaintIntent
       ? "happy"
       : complaintIntent
         ? "unhappy"
         : "unknown";
-  const urgency = keywordMatch(text, ["emergency", "urgent", "as soon as possible", "asap", "today", "right away"])
+  const urgency = keywordMatch(callerText, ["emergency", "urgent", "as soon as possible", "asap", "right away"])
     ? "urgent"
-    : keywordMatch(text, ["tomorrow", "this week", "soon"])
+    : ownerMessageIntent || keywordMatch(callerText, ["tomorrow", "this week", "soon"])
       ? "soon"
       : "normal";
   const outcome = appointmentIntent
     ? "appointment_intent"
     : complaintIntent
       ? "complaint"
+      : ownerMessageIntent
+        ? "message_for_business"
       : keywordMatch(text, ["price", "quote", "estimate"])
         ? "quote_requested"
         : keywordMatch(text, ["message", "call me back", "follow up"])
@@ -2733,10 +2900,14 @@ function extractLeadFieldsFromTranscript(transcript, fallback = {}) {
     urgency,
     outcome,
     appointmentIntent,
+    requiresOwnerAttention: complaintIntent || ownerMessageIntent,
+    ownerMessage: ownerMessageIntent || complaintIntent ? recentCallerMessage(text) || null : null,
     satisfaction,
     nextStep:
       outcome === "complaint"
         ? "Management follow-up"
+        : ownerMessageIntent
+          ? "Review the caller message and follow up if needed"
         : appointmentIntent
           ? "Confirm appointment or callback details"
           : "Review transcript and follow up if needed",
@@ -2771,6 +2942,8 @@ function fallbackCallCrmInsight(voiceCall, fallback = {}) {
     appointmentIntent: Boolean(fields.appointmentIntent),
     appointmentResult: "unknown",
     satisfaction: fields.satisfaction || "unknown",
+    requiresOwnerAttention: Boolean(fields.requiresOwnerAttention),
+    ownerMessage: fields.ownerMessage || null,
     nextStep: fields.nextStep || "Review transcript and follow up if needed",
     extractedFields: fields,
     source: "deterministic",
@@ -2798,6 +2971,7 @@ function sanitizeCallCrmInsight(value, fallback) {
         "appointment_booked",
         "quote_requested",
         "complaint",
+        "message_for_business",
         "transferred",
         "resolved",
         "missed_call",
@@ -2812,6 +2986,9 @@ function sanitizeCallCrmInsight(value, fallback) {
       "unknown",
     ),
     satisfaction: normalizeSentiment(raw.satisfaction || fallback.satisfaction),
+    requiresOwnerAttention:
+      Boolean(fallback.requiresOwnerAttention) || raw.requiresOwnerAttention === true || raw.requiresOwnerAttention === "true" || raw.requiresOwnerAttention === 1,
+    ownerMessage: String(raw.ownerMessage || fallback.ownerMessage || "").trim().slice(0, 1000) || null,
     nextStep: String(raw.nextStep || fallback.nextStep || "Review transcript and follow up if needed").trim().slice(0, 700),
     extractedFields: { ...fallback.extractedFields, ...extractedFields },
     source: raw.source || "ai",
@@ -2821,6 +2998,7 @@ function sanitizeCallCrmInsight(value, fallback) {
 function leadStatusFromCallInsight(existingStatus, insight) {
   if (existingStatus && !["new", "callback"].includes(existingStatus)) return existingStatus;
   if (insight.outcome === "complaint" || insight.outcome === "transferred" || insight.satisfaction === "unhappy") return "transferred";
+  if (insight.outcome === "message_for_business" || insight.requiresOwnerAttention) return "needs_reply";
   if (insight.appointmentResult === "booked" || insight.outcome === "appointment_booked") return "appointment";
   if (insight.outcome === "qualified_lead" || insight.outcome === "captured_lead") return "qualified";
   if (insight.appointmentIntent || ["appointment_intent", "appointment_requested", "quote_requested"].includes(insight.outcome)) return "callback";
@@ -2853,10 +3031,12 @@ Return this exact JSON shape:
   "callerEmail": "email if known, otherwise null",
   "need": "service/request/problem in one short phrase or null",
   "urgency": "urgent|soon|normal|low|unknown",
-  "outcome": "conversation|captured_lead|qualified_lead|appointment_intent|appointment_requested|appointment_booked|quote_requested|complaint|transferred|resolved|missed_call|unknown",
+  "outcome": "conversation|captured_lead|qualified_lead|appointment_intent|appointment_requested|appointment_booked|quote_requested|complaint|message_for_business|transferred|resolved|missed_call|unknown",
   "appointmentIntent": false,
   "appointmentResult": "none|requested|booked|callback|unknown",
   "satisfaction": "happy|unhappy|neutral|unknown",
+  "requiresOwnerAttention": false,
+  "ownerMessage": "the final message or operational update the caller asked the business to receive, otherwise null",
   "nextStep": "short operational next action",
   "extractedFields": {
     "caller_need": "string or null",
@@ -2868,7 +3048,7 @@ Return this exact JSON shape:
   }
 }
 
-If the transcript does not support a field, use null or "unknown". Do not invent details.
+Set requiresOwnerAttention=true for messages the caller expects the business to act on or know promptly, including running late, cancellations, rescheduling, access instructions, urgent updates, complaints, and callback requests. If the caller corrects a detail, ownerMessage must contain the final corrected version. If the transcript does not support a field, use null or "unknown". Do not invent details.
 Deterministic fallback context: ${JSON.stringify(fallback)}
 `.trim();
 }
@@ -2897,6 +3077,7 @@ async function generateCallCrmInsight({ voiceCall, profile, fallback }) {
 function leadStatusFromExtractedFields(existingStatus, fields) {
   if (existingStatus && existingStatus !== "new") return existingStatus;
   if (fields?.outcome === "complaint") return "transferred";
+  if (fields?.requiresOwnerAttention || fields?.outcome === "message_for_business") return "needs_reply";
   if (fields?.appointmentIntent) return "callback";
   return existingStatus || "new";
 }
@@ -3211,6 +3392,26 @@ function businessAppointmentSummaryText(args) {
 function businessAppointmentSummaryHtml(args) {
   const rows = businessAppointmentSummaryLines(args).map((line) => `<li>${htmlEscape(line)}</li>`);
   return `<p>A new appointment was booked for <strong>${htmlEscape(args.profile.businessName)}</strong>.</p><ul>${rows.join("")}</ul>`;
+}
+
+function businessCallMessageLines({ profile, customerName = "", customerPhone = "", message = "", urgency = "normal" }) {
+  const normalizedUrgency = normalizeKnownValue(urgency, ["urgent", "soon", "normal", "low", "unknown"], "normal");
+  return [
+    `${normalizedUrgency === "urgent" ? "URGENT " : ""}Caller message for ${profile.businessName}`,
+    `Priority: ${normalizedUrgency}`,
+    customerName ? `Caller: ${customerName}` : "",
+    customerPhone ? `Phone: ${customerPhone}` : "",
+    `Message: ${String(message || "Caller requested business follow-up").trim().slice(0, 1200)}`,
+  ].filter(Boolean);
+}
+
+function businessCallMessageText(args) {
+  return businessCallMessageLines(args).join("\n");
+}
+
+function businessCallMessageHtml(args) {
+  const rows = businessCallMessageLines(args).map((line) => `<li>${htmlEscape(line)}</li>`);
+  return `<p>A caller left a message for <strong>${htmlEscape(args.profile.businessName)}</strong>.</p><ul>${rows.join("")}</ul>`;
 }
 
 function complaintEscalationMessage({ config, profile, customerName = "", customerPhone = "", complaint = "" }) {
@@ -3924,6 +4125,21 @@ async function enrichBusinessCallCrm(voiceCallId) {
     leadId: updated.id,
     status: updated.status,
   });
+  try {
+    const config = await ensureBusinessConfig(voiceCall.businessProfile);
+    await maybeSendBusinessCallAttentionSummary({
+      profile: voiceCall.businessProfile,
+      config,
+      lead: updated,
+      voiceCall,
+      insight,
+    });
+  } catch (error) {
+    await logVoiceCallEvent(voiceCall.callControlId, "owner_notification.failed", {
+      source: "post_call_attention_fallback",
+      message: error.message,
+    });
+  }
   return updated;
 }
 
@@ -4747,6 +4963,7 @@ async function getSettings() {
       trialPhoneNumberGraceDays: 7,
       callSilenceWarningSeconds: 20,
       callSilenceHangupSeconds: 15,
+      trialReminderSteps: DEFAULT_TRIAL_REMINDER_STEPS,
     },
     update: {},
   });
@@ -4805,7 +5022,8 @@ Receptionist behavior:
 - Collect name, phone, and email whenever booking an appointment, capturing a lead, or escalating.
 - Use schedule_appointment when the caller wants an appointment, reservation, consultation, demo, or callback at a specific time.
 - Use capture_lead when the caller is interested but not ready to schedule.
-- Use transfer_message when the caller asks for a person, wants a transfer, has a complaint, or needs human follow-up.
+- Use transfer_message when the caller asks for a person, wants a transfer, has a complaint, needs human follow-up, or asks you to pass along an operational update such as running late, cancelling, rescheduling, or access instructions.
+- Confirm the caller's final corrected message, then call transfer_message before saying it was recorded or sent. Only say the business was notified or the message was passed along when the tool result has notified=true. If notified=false, say the message was recorded for follow-up without claiming anyone was alerted.
 - ${toolWaitNoticeInstruction()}
 - Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, asks to disconnect, or the conversation is clearly complete. Do not keep talking after a hangup request.
 - Confirm important details before using a tool.
@@ -5417,6 +5635,305 @@ function scheduleTrialPhoneNumberCleanupWorker(delayMs = 15000) {
     60 * 60 * 1000,
   );
   if (typeof trialPhoneNumberCleanupInterval.unref === "function") trialPhoneNumberCleanupInterval.unref();
+}
+
+function trialReminderScheduledAt(trialEndsAt, offsetDays, timezone = "America/Chicago") {
+  const zone = normalizeTimezone(timezone || "America/Chicago");
+  const trialEnd = DateTime.fromJSDate(new Date(trialEndsAt), { zone: "utc" }).setZone(zone);
+  if (!trialEnd.isValid) return null;
+  const scheduled = trialEnd.startOf("day").plus({ days: Number(offsetDays || 0) }).set({ hour: 10 });
+  return scheduled.toUTC().toJSDate();
+}
+
+function trialReminderBillingUrl(settings) {
+  const baseUrl = configuredPublicBaseUrl(settings);
+  return baseUrl ? `${baseUrl}/?billing=1` : "";
+}
+
+function trialReminderContact(profile) {
+  const config = profile?.config || {};
+  const owner = profile?.users?.[0] || null;
+  const onboarding = profile?.onboardingSessions?.[0] || null;
+  const savedEmail = String(config.appointmentNotificationEmail || "").trim().toLowerCase();
+  const accountEmail = String(owner?.email || "").trim().toLowerCase();
+  const email =
+    config.appointmentNotificationEmailEnabled && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(savedEmail)
+      ? savedEmail
+      : /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(accountEmail)
+        ? accountEmail
+        : "";
+  const savedPhone = normalizeE164Phone(config.appointmentNotificationPhone);
+  const onboardingPhone = normalizeE164Phone(onboarding?.callerPhone);
+  const textPhone = config.appointmentNotificationTextEnabled ? savedPhone || onboardingPhone : "";
+  const ownerName = String(owner?.name || "").trim().split(/\s+/)[0] || "there";
+  return { email, textPhone, ownerName };
+}
+
+function trialReminderVariables({ profile, contact, trialEndsAt, settings }) {
+  const timezone = normalizeTimezone(profile?.config?.timezone || "America/Chicago");
+  const trialEndDate = DateTime.fromJSDate(new Date(trialEndsAt), { zone: "utc" })
+    .setZone(timezone)
+    .toFormat("LLLL d, yyyy");
+  return {
+    owner_name: contact.ownerName,
+    business_name: profile.businessName,
+    trial_end_date: trialEndDate,
+    billing_url: trialReminderBillingUrl(settings),
+  };
+}
+
+async function claimTrialReminderDelivery({ profile, step, scheduledAt, contact, now = new Date() }) {
+  const emailPending = Boolean(step.emailEnabled && step.emailBody && contact.email);
+  const textPending = Boolean(step.textEnabled && step.textBody && contact.textPhone);
+  const createData = {
+    businessProfileId: profile.id,
+    trialEndsAt: profile.trialEndsAt,
+    stepKey: step.key,
+    offsetDays: step.offsetDays,
+    scheduledAt,
+    status: emailPending || textPending ? "processing" : "completed",
+    emailStatus: emailPending ? "pending" : "skipped",
+    textStatus: textPending ? "pending" : "skipped",
+    completedAt: emailPending || textPending ? null : now,
+    lastAttemptAt: now,
+  };
+  try {
+    return await prisma.trialReminderDelivery.create({ data: createData });
+  } catch (error) {
+    if (error?.code !== "P2002") throw error;
+  }
+
+  const existing = await prisma.trialReminderDelivery.findUnique({
+    where: {
+      businessProfileId_trialEndsAt_stepKey: {
+        businessProfileId: profile.id,
+        trialEndsAt: profile.trialEndsAt,
+        stepKey: step.key,
+      },
+    },
+  });
+  if (!existing || ["completed", "stopped"].includes(existing.status) || existing.attempts >= 3) return null;
+  const retryBefore = new Date(now.getTime() - 60 * 60 * 1000);
+  if (existing.lastAttemptAt > retryBefore) return null;
+  const claimed = await prisma.trialReminderDelivery.updateMany({
+    where: {
+      id: existing.id,
+      status: { in: ["failed", "processing"] },
+      attempts: existing.attempts,
+      lastAttemptAt: { lte: retryBefore },
+    },
+    data: {
+      status: "processing",
+      attempts: { increment: 1 },
+      lastAttemptAt: now,
+      lastError: null,
+    },
+  });
+  if (!claimed.count) return null;
+  return prisma.trialReminderDelivery.findUnique({ where: { id: existing.id } });
+}
+
+function trialReminderEmailHtml(text) {
+  return String(text || "")
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${htmlEscape(paragraph).replace(/\n/g, "<br />")}</p>`)
+    .join("");
+}
+
+async function deliverTrialReminderStep({ delivery, profile, step, settings }) {
+  const latestProfile = await prisma.businessProfile.findUnique({
+    where: { id: profile.id },
+    include: {
+      config: true,
+      users: {
+        where: { active: true, role: "business" },
+        orderBy: { createdAt: "asc" },
+        take: 1,
+        select: { email: true, name: true },
+      },
+      onboardingSessions: {
+        where: { claimLinkSentAt: { not: null } },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { callerPhone: true },
+      },
+    },
+  });
+  const expectedStatus = step.offsetDays < 0 ? "trial" : "expired";
+  if (
+    !latestProfile ||
+    latestProfile.archivedAt ||
+    latestProfile.stripeSubscriptionId ||
+    latestProfile.accountStatus !== expectedStatus
+  ) {
+    return prisma.trialReminderDelivery.update({
+      where: { id: delivery.id },
+      data: {
+        status: "stopped",
+        emailStatus: delivery.emailStatus === "sent" ? "sent" : "skipped",
+        textStatus: delivery.textStatus === "sent" ? "sent" : "skipped",
+        completedAt: new Date(),
+        lastError: null,
+      },
+    });
+  }
+
+  const contact = trialReminderContact(latestProfile);
+  const variables = trialReminderVariables({
+    profile: latestProfile,
+    contact,
+    trialEndsAt: delivery.trialEndsAt,
+    settings,
+  });
+  const errors = [];
+  let current = delivery;
+
+  if (!["sent", "skipped"].includes(current.emailStatus)) {
+    const emailText = templateText(step.emailBody, variables).trim();
+    const subject = templateText(step.subject, variables).trim();
+    if (!step.emailEnabled || !emailText || !contact.email) {
+      current = await prisma.trialReminderDelivery.update({
+        where: { id: delivery.id },
+        data: { emailStatus: "skipped" },
+      });
+    } else {
+      try {
+        const result = await sendTrackedEmail({
+          settings,
+          profile: latestProfile,
+          toEmail: contact.email,
+          subject: subject || "RingPort trial reminder",
+          text: emailText,
+          html: trialReminderEmailHtml(emailText),
+          purpose: "trial_lifecycle_reminder",
+          metadata: { trialReminderDeliveryId: delivery.id, stepKey: step.key, offsetDays: step.offsetDays },
+        });
+        current = await prisma.trialReminderDelivery.update({
+          where: { id: delivery.id },
+          data: { emailStatus: "sent", emailDeliveryId: result.delivery.id },
+        });
+      } catch (error) {
+        errors.push(`Email: ${error.message}`);
+        current = await prisma.trialReminderDelivery.update({
+          where: { id: delivery.id },
+          data: { emailStatus: "failed" },
+        });
+      }
+    }
+  }
+
+  if (!["sent", "skipped"].includes(current.textStatus)) {
+    const textMessage = templateText(step.textBody, variables).trim();
+    if (!step.textEnabled || !textMessage || !contact.textPhone) {
+      current = await prisma.trialReminderDelivery.update({
+        where: { id: delivery.id },
+        data: { textStatus: "skipped" },
+      });
+    } else {
+      try {
+        const result = await deliverBusinessMessage({
+          settings,
+          profile: latestProfile,
+          toPhone: contact.textPhone,
+          message: textMessage,
+          purpose: "trial_lifecycle_reminder",
+          metadata: { trialReminderDeliveryId: delivery.id, stepKey: step.key, offsetDays: step.offsetDays },
+          recordUsage: false,
+        });
+        current = await prisma.trialReminderDelivery.update({
+          where: { id: delivery.id },
+          data: { textStatus: "sent", textDeliveryId: result.delivery.id },
+        });
+      } catch (error) {
+        errors.push(`Text: ${error.message}`);
+        current = await prisma.trialReminderDelivery.update({
+          where: { id: delivery.id },
+          data: { textStatus: "failed" },
+        });
+      }
+    }
+  }
+
+  const failed = [current.emailStatus, current.textStatus].includes("failed");
+  return prisma.trialReminderDelivery.update({
+    where: { id: delivery.id },
+    data: {
+      status: failed ? "failed" : "completed",
+      completedAt: failed ? null : new Date(),
+      lastError: errors.length ? errors.join("; ").slice(0, 1000) : null,
+    },
+  });
+}
+
+async function processTrialReminderQueue({ now = new Date() } = {}) {
+  if (trialReminderWorkerRunning) return { skipped: true, reason: "already_running" };
+  trialReminderWorkerRunning = true;
+  try {
+    const settings = await getSettings();
+    const steps = normalizeTrialReminderSteps(settings.trialReminderSteps).filter((step) => step.enabled);
+    if (!steps.length) return { checked: 0, sent: 0 };
+    await expireEndedBusinessTrials(now);
+    const minOffset = Math.min(...steps.map((step) => step.offsetDays));
+    const maxOffset = Math.max(...steps.map((step) => step.offsetDays));
+    const candidates = await prisma.businessProfile.findMany({
+      where: {
+        archivedAt: null,
+        accountStatus: { in: ["trial", "expired"] },
+        stripeSubscriptionId: null,
+        trialEndsAt: {
+          gte: new Date(now.getTime() - (maxOffset + 3) * 86400000),
+          lte: new Date(now.getTime() - (minOffset - 3) * 86400000),
+        },
+        users: { some: { active: true, role: "business" } },
+      },
+      include: {
+        config: true,
+        users: {
+          where: { active: true, role: "business" },
+          orderBy: { createdAt: "asc" },
+          take: 1,
+          select: { email: true, name: true },
+        },
+        onboardingSessions: {
+          where: { claimLinkSentAt: { not: null } },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { callerPhone: true },
+        },
+      },
+      orderBy: { trialEndsAt: "asc" },
+      take: 500,
+    });
+    let claimedCount = 0;
+    for (const profile of candidates) {
+      const contact = trialReminderContact(profile);
+      for (const step of steps) {
+        if (step.offsetDays < 0 && profile.accountStatus !== "trial") continue;
+        if (step.offsetDays >= 0 && profile.accountStatus !== "expired") continue;
+        const scheduledAt = trialReminderScheduledAt(profile.trialEndsAt, step.offsetDays, profile.config?.timezone);
+        if (!scheduledAt || scheduledAt > now || scheduledAt < new Date(now.getTime() - 30 * 60 * 60 * 1000)) continue;
+        const delivery = await claimTrialReminderDelivery({ profile, step, scheduledAt, contact, now });
+        if (!delivery || delivery.status === "completed") continue;
+        claimedCount += 1;
+        await deliverTrialReminderStep({ delivery, profile, step, settings });
+      }
+    }
+    if (claimedCount) console.log(`[trial-reminders] businesses=${candidates.length} deliveries=${claimedCount}`);
+    return { checked: candidates.length, sent: claimedCount };
+  } finally {
+    trialReminderWorkerRunning = false;
+  }
+}
+
+function scheduleTrialReminderWorker(delayMs = 15000) {
+  if (trialReminderWorkerTimer) return;
+  trialReminderWorkerTimer = setTimeout(() => {
+    trialReminderWorkerTimer = null;
+    processTrialReminderQueue()
+      .catch((error) => console.warn(`[trial-reminders] worker failed: ${error.message}`))
+      .finally(() => scheduleTrialReminderWorker(15 * 60 * 1000));
+  }, delayMs);
+  if (typeof trialReminderWorkerTimer.unref === "function") trialReminderWorkerTimer.unref();
 }
 
 async function allocateDemoNumber(profile, settings) {
@@ -7667,6 +8184,130 @@ async function sendBusinessAppointmentSummary({ settings, profile, config, appoi
   return result;
 }
 
+async function sendBusinessCallMessageNotification({
+  settings,
+  profile,
+  config,
+  lead = null,
+  voiceCallId = null,
+  transferMessageId = null,
+  customerName = "",
+  customerPhone = "",
+  message = "",
+  urgency = "normal",
+  source = "agent_tool",
+}) {
+  const textEnabled = Boolean(config.appointmentNotificationTextEnabled);
+  const emailEnabled = Boolean(config.appointmentNotificationEmailEnabled);
+  const notification = businessCallMessageText({ profile, customerName, customerPhone, message, urgency });
+  const metadata = {
+    source,
+    urgency,
+    transferMessageId,
+    customerName: customerName || null,
+    customerPhone: customerPhone || null,
+  };
+  const result = {
+    textEnabled,
+    emailEnabled,
+    textSent: false,
+    emailSent: false,
+    textError: null,
+    emailError: null,
+    textDeliveryId: null,
+    emailDeliveryId: null,
+    notified: false,
+    channels: [],
+  };
+  if (textEnabled) {
+    try {
+      await ensureConfigEntitlements(profile, config);
+      if (!entitlementFeatureEnabled(config, "messageInboxEnabled")) {
+        throw new Error(`${planFeatureLabel("messageInboxEnabled")} is not included in this plan`);
+      }
+      const textDelivery = await deliverBusinessMessage({
+        settings,
+        profile,
+        toPhone: config.appointmentNotificationPhone,
+        message: notification,
+        purpose: "business_call_message",
+        leadId: lead?.id || null,
+        voiceCallId,
+        metadata,
+      });
+      result.textSent = true;
+      result.textDeliveryId = textDelivery.delivery.id;
+      result.textProvider = textDelivery.provider;
+      result.channels.push("text");
+    } catch (error) {
+      result.textError = error.message;
+    }
+  }
+  if (emailEnabled) {
+    try {
+      const emailDelivery = await sendTrackedEmail({
+        settings,
+        profile,
+        toEmail: config.appointmentNotificationEmail,
+        subject: `${String(urgency).toLowerCase() === "urgent" ? "Urgent " : ""}caller message for ${profile.businessName}`,
+        text: notification,
+        html: businessCallMessageHtml({ profile, customerName, customerPhone, message, urgency }),
+        purpose: "business_call_message",
+        leadId: lead?.id || null,
+        voiceCallId,
+        metadata,
+      });
+      result.emailSent = true;
+      result.emailDeliveryId = emailDelivery.delivery.id;
+      result.channels.push("email");
+    } catch (error) {
+      result.emailError = error.message;
+    }
+  }
+  result.notified = result.textSent || result.emailSent;
+  result.agentInstruction = result.notified
+    ? `The business notification was sent by ${result.channels.join(" and ")}. You may tell the caller it was sent.`
+    : textEnabled || emailEnabled
+      ? "The message was recorded, but the owner notification failed. Do not tell the caller it was sent or that the owner was notified."
+      : "The message was recorded, but owner notifications are disabled. Do not tell the caller it was sent or that the owner was notified.";
+  return result;
+}
+
+async function maybeSendBusinessCallAttentionSummary({ profile, config, lead, voiceCall, insight }) {
+  if (!voiceCall?.id || !insight?.requiresOwnerAttention) return null;
+  if (!config.appointmentNotificationTextEnabled && !config.appointmentNotificationEmailEnabled) return null;
+  const existing = await prisma.messageDelivery.findFirst({
+    where: {
+      voiceCallId: voiceCall.id,
+      purpose: "business_call_message",
+      status: { in: ["queued", "sending", "delivery_pending", "sent"] },
+    },
+    select: { id: true, status: true },
+  });
+  if (existing) return { skipped: true, reason: "already_notified", deliveryId: existing.id };
+  const settings = await getSettings();
+  const result = await sendBusinessCallMessageNotification({
+    settings,
+    profile,
+    config,
+    lead,
+    voiceCallId: voiceCall.id,
+    customerName: insight.callerName || lead?.name || "",
+    customerPhone: insight.callerPhone || lead?.phone || voiceCall.fromNumber || "",
+    message: insight.ownerMessage || insight.summary || "Caller requested business follow-up.",
+    urgency: insight.urgency || "normal",
+    source: "post_call_attention_fallback",
+  });
+  await logVoiceCallEvent(voiceCall.callControlId, result.notified ? "owner_notification.sent" : "owner_notification.not_sent", {
+    source: "post_call_attention_fallback",
+    leadId: lead?.id || null,
+    channels: result.channels,
+    textError: result.textError,
+    emailError: result.emailError,
+  });
+  return result;
+}
+
 function textMatches(left, right) {
   const a = String(left || "").trim().toLowerCase();
   const b = String(right || "").trim().toLowerCase();
@@ -8809,6 +9450,7 @@ async function deliverBusinessMessage({
   setupUrl = "",
   providerOverride = "",
   metadata = {},
+  recordUsage = true,
 }) {
   const target = normalizeE164Phone(toPhone);
   const providerForFailure = String(providerOverride || settings.messagePrimaryProvider || "none").trim().toLowerCase() || "none";
@@ -8907,20 +9549,22 @@ async function deliverBusinessMessage({
         providerMessageId: result.providerMessageId || null,
         blueBubblesAttempt: result.detail?.blueBubblesAttempt || null,
       });
-      const messageCredits = Math.max(0, Number(settings.messageCredits || 0));
-      await recordUsageEventOnce({
-        businessProfileId: profile?.id,
-        leadId,
-        voiceCallId,
-        messageDeliveryId: updated.id,
-        category: "message_send",
-        provider,
-        quantity: 1,
-        unit: "message",
-        credits: messageCredits,
-        note: `${purpose} message`,
-        metadata: { purpose, toPhone: target },
-      }).catch((error) => console.warn(`[usage] message usage skipped: ${error.message}`));
+      if (recordUsage) {
+        const messageCredits = Math.max(0, Number(settings.messageCredits || 0));
+        await recordUsageEventOnce({
+          businessProfileId: profile?.id,
+          leadId,
+          voiceCallId,
+          messageDeliveryId: updated.id,
+          category: "message_send",
+          provider,
+          quantity: 1,
+          unit: "message",
+          credits: messageCredits,
+          note: `${purpose} message`,
+          metadata: { purpose, toPhone: target },
+        }).catch((error) => console.warn(`[usage] message usage skipped: ${error.message}`));
+      }
       return { provider, delivery: updated, ...result };
     } catch (error) {
       errors.push(`${provider}: ${error.message}`);
@@ -9667,6 +10311,8 @@ ${externalBooking ? "- For questions about Vagaro services, categories, prices, 
 }
 - Do not repeat the same confirmation question after the caller already answered it.
 - If the caller asks for a person, department, manager, or topic you cannot answer from the configured knowledge, ${transferTargets.length ? "offer the best matching call transfer target. Only call transfer_call after the caller agrees to be transferred. After calling transfer_call, do not call end_call." : "record a transfer_message for human follow-up."} If no transfer target fits, record a transfer_message instead.
+- If the caller asks you to tell the business something or gives an operational update such as running late, a changed arrival time, cancellation, reschedule request, access instructions, urgent issue, or callback request, confirm the final corrected detail and call transfer_message immediately. Do not merely promise to pass it along.
+- Only tell the caller the business was notified, updated, or sent their message when transfer_message returns notified=true. If it returns recorded=true and notified=false, say it was recorded for follow-up and do not claim the owner received an alert.
 
 ${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? "For Vagaro, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to confirm through the link." : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
@@ -9841,7 +10487,8 @@ function toolDeclarations(config) {
     },
     {
       name: "transfer_message",
-      description: "Record a message that needs human follow-up, transfer, escalation, or complaint handling.",
+      description:
+        "Record and, when owner notifications are enabled, immediately send a message that needs human attention. Always use this when a caller asks to pass something along, including running late, corrected arrival time, cancellation, rescheduling, access instructions, callback requests, escalation, or complaints. Check notified in the result before saying the business was alerted.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -10280,18 +10927,71 @@ async function runToolCall(profile, config, functionCall, context = {}) {
   }
 
   if (functionCall.name === "transfer_message") {
-    const message = await prisma.transferMessage.create({
+    const messageText = String(args.message || "").trim();
+    if (!messageText) throw new Error("A caller message is required");
+    const customerName = usableCallerName(args.name) || usableCallerName(contextLead?.name) || "";
+    const customerPhone = normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null;
+    const urgency = normalizeKnownValue(args.urgency, ["urgent", "soon", "normal", "low", "unknown"], "normal");
+    const transferMessage = await prisma.transferMessage.create({
       data: {
         businessName: profile.businessName,
         website: profile.website,
-        name: args.name ? String(args.name) : null,
-        phone: args.phone ? String(args.phone) : null,
+        name: customerName || null,
+        phone: customerPhone,
         email: args.email ? String(args.email) : null,
-        message: String(args.message || ""),
-        urgency: args.urgency ? String(args.urgency) : null,
+        message: messageText,
+        urgency,
       },
     });
-    return { ok: true, messageId: message.id };
+    let messageLead = await updateLeadContactFromTool({
+      lead: contextLead,
+      args: { ...args, name: customerName, phone: customerPhone, need: messageText },
+      config,
+      fallbackPhone: context.fromNumber,
+    });
+    if (messageLead?.id) {
+      messageLead = await prisma.lead.update({
+        where: { id: messageLead.id },
+        data: {
+          status: "needs_reply",
+          summary: `Caller message: ${messageText}`.slice(0, 1600),
+          notes: [messageLead.notes, `Caller message (${urgency}): ${messageText}`].filter(Boolean).join("\n\n"),
+          extractedFields: {
+            ...(messageLead.extractedFields && typeof messageLead.extractedFields === "object" ? messageLead.extractedFields : {}),
+            latestCallerMessage: {
+              message: messageText,
+              urgency,
+              transferMessageId: transferMessage.id,
+              capturedAt: new Date().toISOString(),
+            },
+          },
+        },
+      });
+    }
+    const settings = await getSettings();
+    const notification = await sendBusinessCallMessageNotification({
+      settings,
+      profile,
+      config,
+      lead: messageLead,
+      voiceCallId: context.voiceCallId || null,
+      transferMessageId: transferMessage.id,
+      customerName,
+      customerPhone,
+      message: messageText,
+      urgency,
+      source: "agent_transfer_message",
+    });
+    return {
+      ok: true,
+      recorded: true,
+      messageId: transferMessage.id,
+      leadId: messageLead?.id || null,
+      notified: notification.notified,
+      channels: notification.channels,
+      notification,
+      agentInstruction: notification.agentInstruction,
+    };
   }
 
   if (functionCall.name === "transfer_call") {
@@ -12481,7 +13181,8 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
     hint: stored.get(key)?.hint || null,
   });
   res.json({
-    settings,
+    settings: { ...settings, trialReminderSteps: normalizeTrialReminderSteps(settings.trialReminderSteps) },
+    trialReminderDefaults: DEFAULT_TRIAL_REMINDER_STEPS,
     secrets: {
       geminiApiKey: secretState("gemini_api_key", "GEMINI_API_KEY"),
       placesApiKey: secretState("places_api_key", "PLACES_API_KEY"),
@@ -12696,6 +13397,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         postbackIncludeAllParams: Boolean(req.body.postbackIncludeAllParams),
         postbackIncludeEmail: req.body.postbackIncludeEmail !== false,
         postbackIncludePhone: Boolean(req.body.postbackIncludePhone),
+        trialReminderSteps: normalizeTrialReminderSteps(req.body.trialReminderSteps),
       },
       update: {
         researchModel: req.body.researchModel || undefined,
@@ -12793,6 +13495,8 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
           typeof req.body.postbackIncludeEmail === "boolean" ? req.body.postbackIncludeEmail : undefined,
         postbackIncludePhone:
           typeof req.body.postbackIncludePhone === "boolean" ? req.body.postbackIncludePhone : undefined,
+        trialReminderSteps:
+          req.body.trialReminderSteps === undefined ? undefined : normalizeTrialReminderSteps(req.body.trialReminderSteps, []),
       },
     });
     await Promise.all([
@@ -13541,7 +14245,7 @@ async function businessPhoneNumbers(profileId) {
 }
 
 async function businessAdminResponse(profile, config) {
-  const [phoneNumbers, reviewLinks, userCount, entitlements] = await Promise.all([
+  const [phoneNumbers, reviewLinks, userCount, entitlements, ownerUser, phoneOnboarding] = await Promise.all([
     businessPhoneNumbers(profile.id),
     prisma.businessReviewLink.findMany({
       where: { businessProfileId: profile.id },
@@ -13549,6 +14253,16 @@ async function businessAdminResponse(profile, config) {
     }),
     prisma.user.count({ where: { businessProfileId: profile.id, role: "business" } }),
     businessEntitlements(profile.id),
+    prisma.user.findFirst({
+      where: { businessProfileId: profile.id, role: "business", active: true },
+      orderBy: { createdAt: "asc" },
+      select: { email: true },
+    }),
+    prisma.onboardingSession.findFirst({
+      where: { businessProfileId: profile.id, claimLinkSentAt: { not: null } },
+      orderBy: { claimLinkSentAt: "desc" },
+      select: { callerPhone: true },
+    }),
   ]);
   attachEntitlements(config, entitlements);
   return {
@@ -13556,6 +14270,10 @@ async function businessAdminResponse(profile, config) {
     config,
     phoneNumbers,
     reviewLinks,
+    ownerContactDefaults: {
+      email: ownerUser?.email || "",
+      phone: normalizeE164Phone(phoneOnboarding?.callerPhone) || "",
+    },
     entitlements,
     planUsage: {
       phoneNumbers: phoneNumbers.length,
@@ -19401,6 +20119,7 @@ scheduleQualificationWorker(1000);
 scheduleBlueBubblesPendingDeliveryWorker(10000);
 scheduleBookingFollowupWorker(5000);
 scheduleTrialPhoneNumberCleanupWorker(15000);
+scheduleTrialReminderWorker(20000);
 
 server.listen(PORT, () => {
   const protocol = USE_HTTPS ? "https" : "http";

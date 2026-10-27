@@ -65,6 +65,7 @@ model BusinessProfile {
   bookingLinkSends             BookingLinkSend[]
   bookingLinkClicks            BookingLinkClick[]
   bookingWebhookEvents         BookingWebhookEvent[]
+  trialReminderDeliveries      TrialReminderDelivery[]
 }
 
 model SubscriptionPlan {
@@ -653,7 +654,33 @@ model AppSettings {
   postbackIncludeAllParams    Boolean  @default(false)
   postbackIncludeEmail        Boolean  @default(true)
   postbackIncludePhone        Boolean  @default(false)
+  trialReminderSteps          Json?
   updatedAt                   DateTime @updatedAt
+}
+
+model TrialReminderDelivery {
+  id                Int             @id @default(autoincrement())
+  businessProfileId Int
+  businessProfile   BusinessProfile @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  trialEndsAt       DateTime
+  stepKey           String
+  offsetDays        Int
+  scheduledAt       DateTime
+  status            String          @default("processing")
+  emailStatus       String          @default("skipped")
+  textStatus        String          @default("skipped")
+  emailDeliveryId   Int?
+  textDeliveryId    Int?
+  attempts          Int             @default(1)
+  lastError         String?
+  lastAttemptAt     DateTime        @default(now())
+  completedAt       DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([businessProfileId, trialEndsAt, stepKey])
+  @@index([status, scheduledAt])
+  @@index([businessProfileId, createdAt])
 }
 
 model AdPlatformEvent {

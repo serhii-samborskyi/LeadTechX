@@ -51,6 +51,7 @@
           <button data-system-tab="rules" type="button"><i data-lucide="list-checks"></i> Rules</button>
           <button data-system-tab="credentials" type="button"><i data-lucide="key-round"></i> Credentials</button>
           <button data-system-tab="credits" type="button"><i data-lucide="coins"></i> Credits</button>
+          <button data-system-tab="trial-reminders" type="button"><i data-lucide="bell-ring"></i> Trial reminders</button>
           <button data-system-tab="messaging" type="button"><i data-lucide="message-square"></i> Messaging</button>
           <button data-system-tab="ad-platforms" type="button"><i data-lucide="megaphone"></i> Ad platforms</button>
           <button data-system-tab="billing" type="button"><i data-lucide="credit-card"></i> Stripe</button>
@@ -117,6 +118,26 @@
               <label>Expired trial number grace (days)<input id="trialPhoneNumberGraceDays" type="number" min="0" required /><small>Release auto-bought numbers after this delay unless the business subscribes.</small></label>
               <label class="check-label"><input id="autoBuyTrialPhoneNumber" type="checkbox" /> Auto-buy phone number after confirmed trial claim</label>
             </div>
+          </section>
+          <section class="system-panel" data-system-panel="trial-reminders">
+            <div class="system-panel-heading trial-reminder-heading">
+              <div>
+                <h3>Trial reminder chain</h3>
+                <p>Gentle owner reminders are sent at 10:00 AM in the business timezone and stop as soon as a plan is activated.</p>
+              </div>
+              <div class="trial-reminder-toolbar">
+                <button id="addTrialReminderStep" type="button"><i data-lucide="plus"></i> Add reminder</button>
+                <button id="restoreTrialReminderDefaults" type="button"><i data-lucide="rotate-ccw"></i> Restore defaults</button>
+              </div>
+            </div>
+            <div class="trial-reminder-note">
+              <strong>Delivery rules</strong>
+              <span>Email uses the saved notification address or the owner’s account email. Texts are sent only when the owner enabled text notifications. These platform reminders do not use business credits.</span>
+            </div>
+            <div class="trial-reminder-variables">
+              Available variables: <code>{{owner_name}}</code> <code>{{business_name}}</code> <code>{{trial_end_date}}</code> <code>{{billing_url}}</code>
+            </div>
+            <div id="trialReminderSteps" class="trial-reminder-steps"></div>
           </section>
           <section class="system-panel" data-system-panel="messaging">
             <div class="system-panel-heading"><h3>Text delivery</h3><p>Platform messaging providers, outbound send settings, and inbound reply webhooks.</p></div>

@@ -1269,6 +1269,150 @@ body {
   resize: vertical;
 }
 
+.trial-reminder-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.trial-reminder-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.trial-reminder-note {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  border: 1px solid #b9ddce;
+  border-radius: 8px;
+  background: #f2faf6;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.trial-reminder-note strong {
+  color: var(--ink);
+}
+
+.trial-reminder-variables {
+  margin-bottom: 16px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.trial-reminder-variables code {
+  display: inline-block;
+  margin: 3px 2px 0;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #f7f9f8;
+  color: var(--accent-dark);
+}
+
+.trial-reminder-steps {
+  display: grid;
+  gap: 10px;
+}
+
+.trial-reminder-step {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.trial-reminder-step.disabled {
+  background: #fafbfa;
+}
+
+.trial-reminder-step > summary {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.trial-reminder-step > summary::-webkit-details-marker {
+  display: none;
+}
+
+.trial-reminder-step > summary > span:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.trial-reminder-step > summary strong {
+  color: var(--ink);
+}
+
+.trial-reminder-step > summary [data-reminder-timing] {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.trial-reminder-step-status {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.trial-reminder-step.disabled .trial-reminder-step-status {
+  background: #eef1ef;
+  color: var(--muted);
+}
+
+.trial-reminder-step-body {
+  padding: 16px;
+  border-top: 1px solid var(--line);
+  background: #fbfcfb;
+}
+
+.trial-reminder-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  margin-bottom: 16px;
+}
+
+.trial-reminder-toggle {
+  min-height: 32px;
+}
+
+.trial-reminder-grid textarea {
+  min-height: 0;
+}
+
+.trial-reminder-timing-field {
+  display: grid;
+  gap: 8px;
+  font-weight: 750;
+}
+
+.trial-reminder-timing-field > div {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.trial-reminder-step-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
 .model-settings-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -5741,6 +5885,20 @@ a.appointment-field-value {
   .system-subtabs button {
     justify-content: flex-start;
     min-width: 0;
+  }
+
+  .trial-reminder-heading,
+  .trial-reminder-toolbar {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .trial-reminder-toolbar button {
+    width: 100%;
+  }
+
+  .trial-reminder-timing-field > div {
+    grid-template-columns: 80px minmax(0, 1fr);
   }
 
   .ad-event-row {

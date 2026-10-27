@@ -103,6 +103,9 @@ const el = {
   callSilenceWarningSeconds: document.querySelector("#callSilenceWarningSeconds"),
   callSilenceHangupSeconds: document.querySelector("#callSilenceHangupSeconds"),
   autoBuyTrialPhoneNumber: document.querySelector("#autoBuyTrialPhoneNumber"),
+  trialReminderSteps: document.querySelector("#trialReminderSteps"),
+  addTrialReminderStep: document.querySelector("#addTrialReminderStep"),
+  restoreTrialReminderDefaults: document.querySelector("#restoreTrialReminderDefaults"),
   smtpHost: document.querySelector("#smtpHost"),
   smtpPort: document.querySelector("#smtpPort"),
   smtpSecure: document.querySelector("#smtpSecure"),
@@ -178,6 +181,7 @@ let businesses = [];
 let subscriptionPlans = [];
 let savedBlueBubblesWebhookPassword = "";
 let modelRateLimits = [];
+let trialReminderDefaults = [];
 let adEventDefinitions = [];
 let adEventConfig = {};
 let businessProfileRange = "all";
@@ -458,6 +462,167 @@ async function loadModelOptions() {
   }
 }
 
+function trialReminderTimingLabel(offsetDays) {
+  const days = Math.abs(Number(offsetDays || 0));
+  if (!days) return "On the trial end date";
+  return `${days} day${days === 1 ? "" : "s"} ${Number(offsetDays) < 0 ? "before" : "after"} trial end`;
+}
+
+function trialReminderInput(labelText, field, value, options = {}) {
+  const label = document.createElement("label");
+  if (options.wide) label.classList.add("wide-field");
+  label.append(document.createTextNode(labelText));
+  const input = options.textarea ? document.createElement("textarea") : document.createElement("input");
+  input.dataset.field = field;
+  if (options.textarea) input.rows = options.rows || 4;
+  else input.type = options.type || "text";
+  if (options.min !== undefined) input.min = String(options.min);
+  if (options.max !== undefined) input.max = String(options.max);
+  input.value = value ?? "";
+  label.appendChild(input);
+  if (options.help) {
+    const help = document.createElement("small");
+    help.textContent = options.help;
+    label.appendChild(help);
+  }
+  return label;
+}
+
+function trialReminderToggle(labelText, field, checked) {
+  const label = document.createElement("label");
+  label.className = "check-label trial-reminder-toggle";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.dataset.field = field;
+  input.checked = Boolean(checked);
+  label.append(input, document.createTextNode(labelText));
+  return label;
+}
+
+function updateTrialReminderStepSummary(stepElement) {
+  const label = stepElement.querySelector('[data-field="label"]')?.value.trim() || "Untitled reminder";
+  const amount = Math.max(0, Number(stepElement.querySelector('[data-field="offsetAmount"]')?.value || 0));
+  const direction = stepElement.querySelector('[data-field="offsetDirection"]')?.value || "after";
+  const offsetDays = amount === 0 ? 0 : direction === "before" ? -amount : amount;
+  stepElement.querySelector("[data-reminder-title]").textContent = label;
+  stepElement.querySelector("[data-reminder-timing]").textContent = trialReminderTimingLabel(offsetDays);
+  stepElement.classList.toggle("disabled", !stepElement.querySelector('[data-field="enabled"]')?.checked);
+}
+
+function createTrialReminderStep(step = {}, index = 0) {
+  const details = document.createElement("details");
+  details.className = "trial-reminder-step";
+  details.dataset.key = String(step.key || `trial_step_${Date.now()}_${index + 1}`);
+
+  const summary = document.createElement("summary");
+  const summaryText = document.createElement("span");
+  const title = document.createElement("strong");
+  title.dataset.reminderTitle = "";
+  const timing = document.createElement("span");
+  timing.dataset.reminderTiming = "";
+  summaryText.append(title, timing);
+  const status = document.createElement("span");
+  status.className = "trial-reminder-step-status";
+  status.textContent = step.enabled === false ? "Off" : "Active";
+  summary.append(summaryText, status);
+
+  const body = document.createElement("div");
+  body.className = "trial-reminder-step-body";
+  const toggles = document.createElement("div");
+  toggles.className = "trial-reminder-toggles";
+  toggles.append(
+    trialReminderToggle("Enable reminder", "enabled", step.enabled !== false),
+    trialReminderToggle("Send email", "emailEnabled", step.emailEnabled !== false),
+    trialReminderToggle("Send text when owner opted in", "textEnabled", step.textEnabled !== false),
+  );
+
+  const grid = document.createElement("div");
+  grid.className = "form-grid trial-reminder-grid";
+  const labelInput = trialReminderInput("Admin label", "label", step.label || `Trial reminder ${index + 1}`);
+  const timingField = document.createElement("div");
+  timingField.className = "trial-reminder-timing-field";
+  const timingLabel = document.createElement("span");
+  timingLabel.textContent = "Send timing";
+  const timingControls = document.createElement("div");
+  const amount = document.createElement("input");
+  amount.type = "number";
+  amount.min = "0";
+  amount.max = "180";
+  amount.dataset.field = "offsetAmount";
+  amount.value = String(Math.abs(Number(step.offsetDays || 0)));
+  const direction = document.createElement("select");
+  direction.dataset.field = "offsetDirection";
+  direction.innerHTML = '<option value="before">days before trial end</option><option value="after">days after trial end</option>';
+  direction.value = Number(step.offsetDays || 0) < 0 ? "before" : "after";
+  timingControls.append(amount, direction);
+  timingField.append(timingLabel, timingControls);
+  grid.append(
+    labelInput,
+    timingField,
+    trialReminderInput("Email subject", "subject", step.subject || "RingPort trial reminder", { wide: true }),
+    trialReminderInput("Email message", "emailBody", step.emailBody || "", { textarea: true, rows: 6, wide: true }),
+    trialReminderInput("Text message", "textBody", step.textBody || "", {
+      textarea: true,
+      rows: 3,
+      wide: true,
+      help: "Keep this concise. The messaging provider may split longer texts.",
+    }),
+  );
+
+  const actions = document.createElement("div");
+  actions.className = "trial-reminder-step-actions";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "danger-button";
+  remove.dataset.removeTrialReminder = "";
+  remove.innerHTML = '<i data-lucide="trash-2"></i> Remove reminder';
+  actions.appendChild(remove);
+  body.append(toggles, grid, actions);
+  details.append(summary, body);
+  details.addEventListener("input", () => {
+    status.textContent = details.querySelector('[data-field="enabled"]')?.checked ? "Active" : "Off";
+    updateTrialReminderStepSummary(details);
+  });
+  details.addEventListener("change", () => {
+    status.textContent = details.querySelector('[data-field="enabled"]')?.checked ? "Active" : "Off";
+    updateTrialReminderStepSummary(details);
+  });
+  updateTrialReminderStepSummary(details);
+  return details;
+}
+
+function renderTrialReminderSteps(steps = []) {
+  if (!el.trialReminderSteps) return;
+  el.trialReminderSteps.innerHTML = "";
+  steps.forEach((step, index) => el.trialReminderSteps.appendChild(createTrialReminderStep(step, index)));
+  if (!steps.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No trial reminders are configured. Add a reminder or restore the default chain.";
+    el.trialReminderSteps.appendChild(empty);
+  }
+  window.lucide?.createIcons();
+}
+
+function collectTrialReminderSteps() {
+  return Array.from(el.trialReminderSteps?.querySelectorAll(".trial-reminder-step") || []).map((step, index) => {
+    const value = (field) => step.querySelector(`[data-field="${field}"]`);
+    const amount = Math.max(0, Math.min(180, Math.round(Number(value("offsetAmount")?.value || 0))));
+    const direction = value("offsetDirection")?.value || "after";
+    return {
+      key: step.dataset.key || `trial_step_${Date.now()}_${index + 1}`,
+      label: value("label")?.value.trim() || `Trial reminder ${index + 1}`,
+      offsetDays: amount === 0 ? 0 : direction === "before" ? -amount : amount,
+      enabled: Boolean(value("enabled")?.checked),
+      emailEnabled: Boolean(value("emailEnabled")?.checked),
+      textEnabled: Boolean(value("textEnabled")?.checked),
+      subject: value("subject")?.value.trim() || "RingPort trial reminder",
+      emailBody: value("emailBody")?.value.trim() || "",
+      textBody: value("textBody")?.value.trim() || "",
+    };
+  });
+}
+
 async function loadSystem() {
   const [data] = await Promise.all([api("/api/admin/settings"), loadPlans()]);
   el.researchModel.value = data.settings.researchModel;
@@ -514,6 +679,8 @@ async function loadSystem() {
   renderAdEventRows(data.adEvents?.definitions || [], data.adEvents?.config || {});
   el.smtpSecure.checked = Boolean(data.settings.smtpSecure);
   el.autoBuyTrialPhoneNumber.checked = Boolean(data.settings.autoBuyTrialPhoneNumber);
+  trialReminderDefaults = Array.isArray(data.trialReminderDefaults) ? data.trialReminderDefaults : [];
+  renderTrialReminderSteps(data.settings.trialReminderSteps || trialReminderDefaults);
   el.postbackEnabled.checked = Boolean(data.settings.postbackEnabled);
   el.postbackIncludeAllParams.checked = Boolean(data.settings.postbackIncludeAllParams);
   el.postbackIncludeEmail.checked = data.settings.postbackIncludeEmail !== false;
@@ -1900,6 +2067,7 @@ el.systemForm.addEventListener("submit", async (event) => {
         callSilenceWarningSeconds: Number(el.callSilenceWarningSeconds.value),
         callSilenceHangupSeconds: Number(el.callSilenceHangupSeconds.value),
         autoBuyTrialPhoneNumber: el.autoBuyTrialPhoneNumber.checked,
+        trialReminderSteps: collectTrialReminderSteps(),
         smtpHost: el.smtpHost.value,
         smtpPort: Number(el.smtpPort.value),
         smtpSecure: el.smtpSecure.checked,
@@ -1965,6 +2133,36 @@ el.planForm.addEventListener("submit", async (event) => {
 
 el.resetPlanButton.addEventListener("click", resetPlanForm);
 el.installDefaultPlansButton.addEventListener("click", installDefaultPlans);
+el.addTrialReminderStep?.addEventListener("click", () => {
+  el.trialReminderSteps.querySelector(".empty-state")?.remove();
+  const step = createTrialReminderStep(
+    {
+      key: `trial_step_${Date.now()}`,
+      label: "New trial reminder",
+      offsetDays: 1,
+      enabled: true,
+      emailEnabled: true,
+      textEnabled: true,
+      subject: "A note about your RingPort trial",
+      emailBody: "Hi {{owner_name}},\n\nA quick reminder about the RingPort trial for {{business_name}}. You can review the account here: {{billing_url}}",
+      textBody: "A quick reminder about the RingPort trial for {{business_name}}: {{billing_url}}",
+    },
+    el.trialReminderSteps.children.length,
+  );
+  step.open = true;
+  el.trialReminderSteps.appendChild(step);
+  window.lucide?.createIcons();
+});
+el.restoreTrialReminderDefaults?.addEventListener("click", () => {
+  renderTrialReminderSteps(trialReminderDefaults);
+  el.systemStatus.textContent = "Default reminder chain restored. Save system settings to apply it.";
+});
+el.trialReminderSteps?.addEventListener("click", (event) => {
+  const remove = event.target.closest("[data-remove-trial-reminder]");
+  if (!remove) return;
+  remove.closest(".trial-reminder-step")?.remove();
+  if (!el.trialReminderSteps.querySelector(".trial-reminder-step")) renderTrialReminderSteps([]);
+});
 el.publicBaseUrl.addEventListener("input", refreshSystemWebhookUrls);
 el.blueBubblesPassword.addEventListener("input", refreshBlueBubblesWebhookUrl);
 el.copyStripeWebhookUrl.addEventListener("click", () => copyStripeWebhookUrl().catch((error) => (el.systemStatus.textContent = error.message)));

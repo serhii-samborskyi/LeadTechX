@@ -1888,8 +1888,8 @@ function applyAdminData(data) {
   el.complaintEscalationTemplate.value = data.config.complaintEscalationTemplate || "";
   el.appointmentNotificationTextEnabled.checked = Boolean(data.config.appointmentNotificationTextEnabled);
   el.appointmentNotificationEmailEnabled.checked = Boolean(data.config.appointmentNotificationEmailEnabled);
-  el.appointmentNotificationPhone.value = data.config.appointmentNotificationPhone || "";
-  el.appointmentNotificationEmail.value = data.config.appointmentNotificationEmail || "";
+  el.appointmentNotificationPhone.value = data.config.appointmentNotificationPhone || data.ownerContactDefaults?.phone || "";
+  el.appointmentNotificationEmail.value = data.config.appointmentNotificationEmail || data.ownerContactDefaults?.email || "";
   updateAppointmentNotificationUi();
   updateReviewFlowUi();
   el.missedCallFollowupTemplate.value = data.config.missedCallFollowupTemplate || "";
