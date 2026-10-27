@@ -3647,7 +3647,9 @@ function planBillingForPeriod(plan, settings, period) {
 }
 
 function planWaitlistedForBusiness(plan, currentPlan = null) {
-  return Boolean(plan?.signupWaitlist && Number(currentPlan?.id || 0) !== Number(plan.id || 0));
+  return Boolean(
+    (plan?.signupUnavailable || plan?.signupWaitlist) && Number(currentPlan?.id || 0) !== Number(plan.id || 0),
+  );
 }
 
 function billingAccountPresentation(data) {
@@ -3803,7 +3805,7 @@ function selectBillingPlan(data, planId, { keyboard = false, focus = false } = {
     const choice = card.querySelector(".billing-plan-choice");
     if (choice) {
       choice.textContent = waitlisted
-        ? "Waitlist"
+        ? "Unavailable"
         : currentPlan?.id === cardPlan?.id
           ? "Current plan"
           : selected
@@ -3928,7 +3930,7 @@ function renderBilling(data) {
     const choice = document.createElement("span");
     choice.className = "billing-plan-choice";
     choice.textContent = waitlisted
-      ? "Waitlist"
+      ? "Unavailable"
       : currentPlan?.id === plan.id
         ? "Current plan"
         : selected
@@ -3954,9 +3956,13 @@ function renderBilling(data) {
       features.appendChild(feature);
     }
     const slotLabel = planWaitlistedForBusiness(plan, currentPlan)
-      ? "Join the waitlist to be notified when this plan opens."
+      ? plan.signupUnavailableReason === "window_ended"
+        ? "This limited signup window has ended."
+        : "All signup spots have been taken."
       : plan.signupLimit
-        ? `${plan.signupSlotsRemaining ?? 0} signup slots left.`
+        ? `${plan.signupSlotsRemaining ?? 0} signup slots left${
+            plan.signupWindowEndsAt ? ` until ${new Date(plan.signupWindowEndsAt).toLocaleDateString()}` : ""
+          }.`
         : null;
     card.append(heading, price, credits, description, features);
     if (slotLabel) {

@@ -1714,6 +1714,20 @@ function planInputData(body, existing = null) {
     body.monthlyPriceCents !== undefined
       ? planPriceCentsFromInput(body.monthlyPriceCents, existing?.monthlyPriceCents ?? 0)
       : Math.max(0, Math.round(Number(body.monthlyPriceDollars ?? (existing?.monthlyPriceCents || 0) / 100) * 100));
+  const signupLimit = entitlementNumber("signupLimit", 0, 0);
+  const signupWindowEnabled = entitlementFlag("signupWindowEnabled", false);
+  const signupWindowDays = Math.min(365, entitlementNumber("signupWindowDays", 10, 1));
+  if (signupWindowEnabled && signupLimit <= 0) {
+    throw new Error("A timed signup window requires at least one signup slot");
+  }
+  const shouldStartSignupWindow =
+    signupWindowEnabled &&
+    (body.restartSignupWindow === true || !existing?.signupWindowEnabled || !existing?.signupWindowStartsAt);
+  const signupWindowStartsAt = signupWindowEnabled
+    ? shouldStartSignupWindow
+      ? new Date()
+      : existing.signupWindowStartsAt
+    : null;
   return {
     name,
     slug: normalizePlanSlug(body.slug ?? existing?.slug, name),
@@ -1733,7 +1747,10 @@ function planInputData(body, existing = null) {
     allowCreditTopups: entitlementFlag("allowCreditTopups", true),
     supportLevel: String(body.supportLevel ?? existing?.supportLevel ?? "standard").trim() || "standard",
     stripePriceId: String(body.stripePriceId ?? existing?.stripePriceId ?? "").trim() || null,
-    signupLimit: entitlementNumber("signupLimit", 0, 0),
+    signupLimit,
+    signupWindowEnabled,
+    signupWindowDays,
+    signupWindowStartsAt,
     active: typeof body.active === "boolean" ? body.active : existing?.active ?? true,
     sortOrder: Math.round(Number(body.sortOrder ?? existing?.sortOrder ?? 0)),
   };
@@ -1851,6 +1868,10 @@ async function installDefaultRingPortPlans() {
       update: {
         ...planData,
         stripePriceId: existing?.stripePriceId || undefined,
+        signupLimit: existing?.signupLimit ?? planData.signupLimit,
+        signupWindowEnabled: existing?.signupWindowEnabled ?? false,
+        signupWindowDays: existing?.signupWindowDays ?? 10,
+        signupWindowStartsAt: existing?.signupWindowStartsAt || undefined,
       },
       include: { _count: { select: { businessProfiles: true } } },
     });
@@ -1859,8 +1880,26 @@ async function installDefaultRingPortPlans() {
   return plans;
 }
 
+function subscriptionPlanSignupWindow(plan, now = new Date()) {
+  const enabled = Boolean(plan?.signupWindowEnabled);
+  const days = Math.max(1, Math.round(Number(plan?.signupWindowDays || 10)));
+  const startsAt = plan?.signupWindowStartsAt ? new Date(plan.signupWindowStartsAt) : null;
+  const validStart = startsAt && !Number.isNaN(startsAt.getTime());
+  const endsAt = enabled && validStart ? new Date(startsAt.getTime() + days * 86400000) : null;
+  const open = Boolean(enabled && validStart && endsAt > now);
+  return {
+    enabled,
+    days,
+    startsAt: validStart ? startsAt : null,
+    endsAt,
+    open,
+    status: !enabled ? "disabled" : !validStart ? "not_started" : open ? "open" : "expired",
+  };
+}
+
 function publicSubscriptionPlan(plan) {
   if (!plan) return null;
+  const signupWindow = subscriptionPlanSignupWindow(plan);
   const signupLimit = Math.max(0, Math.round(Number(plan.signupLimit || 0)));
   const signupSlotsUsed =
     plan.signupSlotsUsed === undefined || plan.signupSlotsUsed === null
@@ -1868,6 +1907,13 @@ function publicSubscriptionPlan(plan) {
       : Math.max(0, Math.round(Number(plan.signupSlotsUsed || 0)));
   const signupSlotsRemaining =
     signupLimit > 0 && signupSlotsUsed !== null ? Math.max(0, signupLimit - signupSlotsUsed) : null;
+  const signupLimitReached = signupLimit > 0 && signupSlotsUsed !== null && signupSlotsRemaining <= 0;
+  const signupUnavailableReason =
+    signupWindow.enabled && !signupWindow.open
+      ? "window_ended"
+      : signupLimitReached
+        ? "limit_reached"
+        : null;
   return {
     id: plan.id,
     name: plan.name,
@@ -1891,7 +1937,14 @@ function publicSubscriptionPlan(plan) {
     signupLimit,
     signupSlotsUsed,
     signupSlotsRemaining,
-    signupWaitlist: signupLimit > 0 && signupSlotsUsed !== null && signupSlotsRemaining <= 0,
+    signupWindowEnabled: signupWindow.enabled,
+    signupWindowDays: signupWindow.days,
+    signupWindowStartsAt: signupWindow.startsAt,
+    signupWindowEndsAt: signupWindow.endsAt,
+    signupWindowStatus: signupWindow.status,
+    signupUnavailable: Boolean(signupUnavailableReason),
+    signupUnavailableReason,
+    signupWaitlist: Boolean(signupUnavailableReason),
     active: plan.active,
     sortOrder: plan.sortOrder,
     createdAt: plan.createdAt,
@@ -1939,8 +1992,22 @@ function planSignupWhere(planId, excludeBusinessProfileId = null) {
   };
 }
 
-async function subscriptionPlanSignupUsage(planId, options = {}) {
+async function subscriptionPlanSignupUsage(planOrId, options = {}) {
+  const plan = typeof planOrId === "object" ? planOrId : null;
+  const planId = Number(plan?.id || planOrId || 0);
   if (!planId) return 0;
+  const signupWindow = subscriptionPlanSignupWindow(plan);
+  if (signupWindow.enabled && signupWindow.startsAt) {
+    return prisma.subscriptionPlanSignupWindowEntry.count({
+      where: {
+        subscriptionPlanId: planId,
+        windowStartsAt: signupWindow.startsAt,
+        ...(options.excludeBusinessProfileId
+          ? { businessProfileId: { not: Number(options.excludeBusinessProfileId) } }
+          : {}),
+      },
+    });
+  }
   return prisma.businessProfile.count({
     where: planSignupWhere(planId, options.excludeBusinessProfileId),
   });
@@ -1948,7 +2015,7 @@ async function subscriptionPlanSignupUsage(planId, options = {}) {
 
 async function planWithSignupUsage(plan, options = {}) {
   if (!plan) return null;
-  const used = await subscriptionPlanSignupUsage(plan.id, options);
+  const used = await subscriptionPlanSignupUsage(plan, options);
   return { ...plan, signupSlotsUsed: used };
 }
 
@@ -1956,18 +2023,120 @@ async function plansWithSignupUsage(plans, options = {}) {
   return Promise.all((plans || []).map((plan) => planWithSignupUsage(plan, options)));
 }
 
+function planSignupUnavailableError(plan, reason = "limit_reached") {
+  const message =
+    reason === "window_ended"
+      ? `The limited signup window for ${plan.name} has ended. Choose another available plan.`
+      : reason === "window_not_started"
+        ? `${plan.name} is not open for new signups yet. Choose another available plan.`
+        : `All new-signup spots for ${plan.name} have been taken. Choose another available plan.`;
+  const error = new Error(message);
+  error.code = "PLAN_SIGNUP_UNAVAILABLE";
+  error.statusCode = 409;
+  return error;
+}
+
 async function ensurePlanSignupSlot(plan, options = {}) {
+  if (!plan) throw planSignupUnavailableError({ name: "This plan" });
+  const signupWindow = subscriptionPlanSignupWindow(plan, options.now || new Date());
+  if (signupWindow.enabled && !signupWindow.open) {
+    throw planSignupUnavailableError(plan, signupWindow.status === "not_started" ? "window_not_started" : "window_ended");
+  }
   const limit = Math.max(0, Math.round(Number(plan?.signupLimit || 0)));
-  if (!plan || limit <= 0) return { available: true, used: 0, remaining: null };
-  const used = await subscriptionPlanSignupUsage(plan.id, options);
+  if (limit <= 0) return { available: true, used: 0, remaining: null, signupWindow };
+  const used = await subscriptionPlanSignupUsage(plan, options);
   const remaining = Math.max(0, limit - used);
   if (remaining <= 0) {
-    const error = new Error(`${plan.name} is currently waitlisted. Choose another plan to start now, or check back when slots reopen.`);
-    error.code = "PLAN_WAITLISTED";
-    error.statusCode = 409;
-    throw error;
+    throw planSignupUnavailableError(plan, "limit_reached");
   }
-  return { available: true, used, remaining };
+  return { available: true, used, remaining, signupWindow };
+}
+
+async function reservePlanSignupWindowSlot(plan, businessProfileId, source = "plan_selection") {
+  const initialWindow = subscriptionPlanSignupWindow(plan);
+  if (!initialWindow.enabled) return { ...(await ensurePlanSignupSlot(plan, { excludeBusinessProfileId: businessProfileId })), reserved: false };
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await prisma.$transaction(
+        async (tx) => {
+          const currentPlan = await tx.subscriptionPlan.findUnique({ where: { id: plan.id } });
+          if (!currentPlan?.active) throw new Error("Selected subscription plan is not active");
+          const currentBusiness = await tx.businessProfile.findUnique({
+            where: { id: Number(businessProfileId) },
+            select: { accountStatus: true, subscriptionPlanId: true },
+          });
+          if (currentBusiness?.accountStatus === "paid" && currentBusiness.subscriptionPlanId === currentPlan.id) {
+            return { available: true, reserved: false, existingCustomer: true };
+          }
+          const signupWindow = subscriptionPlanSignupWindow(currentPlan);
+          if (!signupWindow.open) {
+            throw planSignupUnavailableError(
+              currentPlan,
+              signupWindow.status === "not_started" ? "window_not_started" : "window_ended",
+            );
+          }
+          const existing = await tx.subscriptionPlanSignupWindowEntry.findUnique({
+            where: {
+              subscriptionPlanId_businessProfileId_windowStartsAt: {
+                subscriptionPlanId: currentPlan.id,
+                businessProfileId: Number(businessProfileId),
+                windowStartsAt: signupWindow.startsAt,
+              },
+            },
+          });
+          if (existing) return { available: true, reserved: true, created: false, entry: existing, signupWindow };
+          const limit = Math.max(0, Math.round(Number(currentPlan.signupLimit || 0)));
+          const used = await tx.subscriptionPlanSignupWindowEntry.count({
+            where: { subscriptionPlanId: currentPlan.id, windowStartsAt: signupWindow.startsAt },
+          });
+          if (limit <= 0 || used >= limit) throw planSignupUnavailableError(currentPlan, "limit_reached");
+          const entry = await tx.subscriptionPlanSignupWindowEntry.create({
+            data: {
+              subscriptionPlanId: currentPlan.id,
+              businessProfileId: Number(businessProfileId),
+              windowStartsAt: signupWindow.startsAt,
+              source: String(source || "plan_selection").slice(0, 80),
+            },
+          });
+          return {
+            available: true,
+            reserved: true,
+            created: true,
+            entry,
+            used: used + 1,
+            remaining: Math.max(0, limit - used - 1),
+            signupWindow,
+          };
+        },
+        { isolationLevel: "Serializable" },
+      );
+    } catch (error) {
+      if (error?.code === "P2034") {
+        if (attempt < 3) continue;
+        const retryError = new Error("That signup spot was just taken. Refresh the plans and try again.");
+        retryError.code = "PLAN_SIGNUP_RETRY";
+        retryError.statusCode = 409;
+        throw retryError;
+      }
+      if (error?.code === "P2002") {
+        const signupWindow = subscriptionPlanSignupWindow(plan);
+        const existing = signupWindow.startsAt
+          ? await prisma.subscriptionPlanSignupWindowEntry.findUnique({
+              where: {
+                subscriptionPlanId_businessProfileId_windowStartsAt: {
+                  subscriptionPlanId: plan.id,
+                  businessProfileId: Number(businessProfileId),
+                  windowStartsAt: signupWindow.startsAt,
+                },
+              },
+            })
+          : null;
+        if (existing) return { available: true, reserved: true, created: false, entry: existing, signupWindow };
+      }
+      throw error;
+    }
+  }
+  throw new Error("Could not reserve a signup spot. Please try again.");
 }
 
 async function assignRequestedPlanIfAvailable(profile, requestedPlan) {
@@ -1978,9 +2147,9 @@ async function assignRequestedPlanIfAvailable(profile, requestedPlan) {
     return { profile, selectedPlan: await planWithSignupUsage(requestedPlan), planUnavailable: null };
   }
   try {
-    await ensurePlanSignupSlot(requestedPlan, { excludeBusinessProfileId: profile.id });
+    await reservePlanSignupWindowSlot(requestedPlan, profile.id, "onboarding_plan_selection");
   } catch (error) {
-    if (error.code !== "PLAN_WAITLISTED") throw error;
+    if (!["PLAN_WAITLISTED", "PLAN_SIGNUP_UNAVAILABLE"].includes(error.code)) throw error;
     return {
       profile,
       selectedPlan: await planWithSignupUsage(requestedPlan),
@@ -11652,7 +11821,7 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
       ? await prisma.subscriptionPlan.findFirst({ where: { id: selectedPlanId, active: true } })
       : null;
     if (!selectedPlan) throw new Error("Choose an active subscription plan before starting checkout");
-    await ensurePlanSignupSlot(selectedPlan, { excludeBusinessProfileId: session.businessProfileId });
+    await reservePlanSignupWindowSlot(selectedPlan, session.businessProfileId, "fastagent_checkout");
     const billing = subscriptionPlanBilling(selectedPlan, settings, req.body.period || req.body.billingPeriod || req.body.billingPeriodMonths);
 
     const email = String(req.body.email || "").trim().toLowerCase();
@@ -17797,7 +17966,7 @@ app.post("/api/business-admin/billing/checkout", async (req, res) => {
       throw new Error("Selected subscription plan is not active");
     }
     if (checkoutType === "subscription") {
-      await ensurePlanSignupSlot(selectedPlan, { excludeBusinessProfileId: profile.id });
+      await reservePlanSignupWindowSlot(selectedPlan, profile.id, "business_portal_checkout");
     }
     const billing =
       checkoutType === "subscription"

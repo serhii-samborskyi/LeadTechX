@@ -9,8 +9,8 @@ datasource db {
 }
 
 model BusinessProfile {
-  id                           Int                     @id @default(autoincrement())
-  cacheKey                     String                  @unique
+  id                           Int                                 @id @default(autoincrement())
+  cacheKey                     String                              @unique
   businessName                 String
   website                      String?
   normalized                   String
@@ -23,21 +23,21 @@ model BusinessProfile {
   systemPrompt                 String
   researchModel                String
   sourceUrls                   Json?
-  accountStatus                String                  @default("unclaimed")
+  accountStatus                String                              @default("unclaimed")
   trialStartedAt               DateTime?
   trialEndsAt                  DateTime?
-  creditBalance                Int                     @default(0)
+  creditBalance                Int                                 @default(0)
   stripeCustomerId             String?
   stripeSubscriptionId         String?
   stripeSubscriptionStatus     String?
   subscriptionCurrentPeriodEnd DateTime?
   subscriptionPlanId           Int?
-  subscriptionPlan             SubscriptionPlan?       @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
+  subscriptionPlan             SubscriptionPlan?                   @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
   archivedAt                   DateTime?
-  leadWebhookToken             String?                 @unique
-  leadWebhookEnabled           Boolean                 @default(true)
-  createdAt                    DateTime                @default(now())
-  updatedAt                    DateTime                @updatedAt
+  leadWebhookToken             String?                             @unique
+  leadWebhookEnabled           Boolean                             @default(true)
+  createdAt                    DateTime                            @default(now())
+  updatedAt                    DateTime                            @updatedAt
   config                       BusinessConfig?
   users                        User[]
   voiceNumbers                 VoiceNumber[]
@@ -66,38 +66,58 @@ model BusinessProfile {
   bookingLinkClicks            BookingLinkClick[]
   bookingWebhookEvents         BookingWebhookEvent[]
   trialReminderDeliveries      TrialReminderDelivery[]
+  signupWindowEntries          SubscriptionPlanSignupWindowEntry[]
 }
 
 model SubscriptionPlan {
-  id                           Int                     @id @default(autoincrement())
+  id                           Int                                 @id @default(autoincrement())
   name                         String
-  slug                         String                  @unique
+  slug                         String                              @unique
   description                  String?
-  monthlyPriceCents            Int                     @default(0)
-  monthlyCredits               Int                     @default(0)
-  maxPhoneNumbers              Int                     @default(1)
-  maxTransferTargets           Int                     @default(1)
-  maxUsers                     Int                     @default(1)
-  outboundQualificationEnabled Boolean                 @default(false)
-  smartReviewsEnabled          Boolean                 @default(false)
-  callTransfersEnabled         Boolean                 @default(false)
-  leadWebhookEnabled           Boolean                 @default(true)
-  messageInboxEnabled          Boolean                 @default(true)
-  appointmentRemindersEnabled  Boolean                 @default(false)
-  prioritySupport              Boolean                 @default(false)
-  allowCreditTopups            Boolean                 @default(true)
-  supportLevel                 String                  @default("standard")
+  monthlyPriceCents            Int                                 @default(0)
+  monthlyCredits               Int                                 @default(0)
+  maxPhoneNumbers              Int                                 @default(1)
+  maxTransferTargets           Int                                 @default(1)
+  maxUsers                     Int                                 @default(1)
+  outboundQualificationEnabled Boolean                             @default(false)
+  smartReviewsEnabled          Boolean                             @default(false)
+  callTransfersEnabled         Boolean                             @default(false)
+  leadWebhookEnabled           Boolean                             @default(true)
+  messageInboxEnabled          Boolean                             @default(true)
+  appointmentRemindersEnabled  Boolean                             @default(false)
+  prioritySupport              Boolean                             @default(false)
+  allowCreditTopups            Boolean                             @default(true)
+  supportLevel                 String                              @default("standard")
   stripePriceId                String?
-  signupLimit                  Int                     @default(0)
-  active                       Boolean                 @default(true)
-  sortOrder                    Int                     @default(0)
+  signupLimit                  Int                                 @default(0)
+  signupWindowEnabled          Boolean                             @default(false)
+  signupWindowDays             Int                                 @default(10)
+  signupWindowStartsAt         DateTime?
+  active                       Boolean                             @default(true)
+  sortOrder                    Int                                 @default(0)
   businessProfiles             BusinessProfile[]
   checkoutSessions             StripeCheckoutSession[]
+  signupWindowEntries          SubscriptionPlanSignupWindowEntry[]
   creditBuckets                CreditBucket[]
-  createdAt                    DateTime                @default(now())
-  updatedAt                    DateTime                @updatedAt
+  createdAt                    DateTime                            @default(now())
+  updatedAt                    DateTime                            @updatedAt
 
   @@index([active, sortOrder])
+}
+
+model SubscriptionPlanSignupWindowEntry {
+  id                 Int              @id @default(autoincrement())
+  subscriptionPlanId Int
+  subscriptionPlan   SubscriptionPlan @relation(fields: [subscriptionPlanId], references: [id], onDelete: Cascade)
+  businessProfileId  Int?
+  businessProfile    BusinessProfile? @relation(fields: [businessProfileId], references: [id], onDelete: SetNull)
+  windowStartsAt     DateTime
+  source             String           @default("plan_selection")
+  createdAt          DateTime         @default(now())
+
+  @@unique([subscriptionPlanId, businessProfileId, windowStartsAt])
+  @@index([subscriptionPlanId, windowStartsAt, createdAt])
+  @@index([businessProfileId, createdAt])
 }
 
 model BusinessConfig {

@@ -344,7 +344,11 @@
               <label>Phone numbers included<input id="planMaxPhoneNumbers" type="number" min="1" step="1" value="1" /></label>
               <label>Call transfer contacts<input id="planMaxTransferTargets" type="number" min="0" step="1" value="1" /></label>
               <label>Business users<input id="planMaxUsers" type="number" min="1" step="1" value="1" /></label>
-              <label>Signup slots<input id="planSignupLimit" type="number" min="0" step="1" value="0" /><small>0 means unlimited. Use this for limited pay-as-you-go availability.</small></label>
+              <label>Signup slots<input id="planSignupLimit" type="number" min="0" step="1" value="0" /><small>0 means unlimited. A timed window requires at least 1 slot.</small></label>
+              <label>Signup window length (days)<input id="planSignupWindowDays" type="number" min="1" max="365" step="1" value="10" /><small>The window starts when it is first enabled or manually restarted.</small></label>
+              <label class="check-label"><input id="planSignupWindowEnabled" type="checkbox" /> Limit new signups to a timed window</label>
+              <label class="check-label"><input id="planRestartSignupWindow" type="checkbox" /> Start a fresh window when saved</label>
+              <div class="plan-signup-window-status wide-field" id="planSignupWindowStatus">Timed availability is off.</div>
               <label>Support level<select id="planSupportLevel"><option value="standard">Standard</option><option value="priority">Priority</option><option value="managed">Managed</option></select></label>
               <label>Stripe price ID <span>optional</span><input id="planStripePriceId" placeholder="price_..." /></label>
               <label>Sort order<input id="planSortOrder" type="number" step="1" value="0" /></label>

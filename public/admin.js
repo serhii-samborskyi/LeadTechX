@@ -78,6 +78,10 @@ const el = {
   planMaxTransferTargets: document.querySelector("#planMaxTransferTargets"),
   planMaxUsers: document.querySelector("#planMaxUsers"),
   planSignupLimit: document.querySelector("#planSignupLimit"),
+  planSignupWindowDays: document.querySelector("#planSignupWindowDays"),
+  planSignupWindowEnabled: document.querySelector("#planSignupWindowEnabled"),
+  planRestartSignupWindow: document.querySelector("#planRestartSignupWindow"),
+  planSignupWindowStatus: document.querySelector("#planSignupWindowStatus"),
   planSupportLevel: document.querySelector("#planSupportLevel"),
   planStripePriceId: document.querySelector("#planStripePriceId"),
   planSortOrder: document.querySelector("#planSortOrder"),
@@ -868,6 +872,34 @@ function planPriceDisplay(cents) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(cents || 0) / 100);
 }
 
+function updatePlanSignupWindowControls(plan = null) {
+  const enabled = Boolean(el.planSignupWindowEnabled.checked);
+  const days = Math.max(1, Number(el.planSignupWindowDays.value || 10));
+  const restarting = Boolean(el.planRestartSignupWindow.checked);
+  el.planSignupWindowDays.disabled = !enabled;
+  el.planRestartSignupWindow.disabled = !enabled || !el.planId.value;
+  el.planSignupLimit.min = enabled ? "1" : "0";
+  if (!enabled) {
+    el.planSignupWindowStatus.textContent = "Timed availability is off. The signup-slot limit has no deadline.";
+    return;
+  }
+  if (restarting) {
+    el.planSignupWindowStatus.textContent = `A fresh ${days}-day window will begin when this plan is saved, with its signup count reset to zero.`;
+    return;
+  }
+  const endsAt = plan?.signupWindowEndsAt ? new Date(plan.signupWindowEndsAt) : null;
+  if (!endsAt || Number.isNaN(endsAt.getTime())) {
+    el.planSignupWindowStatus.textContent = `The ${days}-day window will begin when this plan is saved.`;
+    return;
+  }
+  const used = Number(plan.signupSlotsUsed || 0);
+  const limit = Number(plan.signupLimit || 0);
+  const state = plan.signupWindowStatus === "open" ? "Open" : "Closed";
+  el.planSignupWindowStatus.textContent = `${state} · ${used}/${limit} spots used · ${
+    plan.signupWindowStatus === "open" ? "ends" : "ended"
+  } ${endsAt.toLocaleString()}.`;
+}
+
 function resetPlanForm() {
   el.planId.value = "";
   el.planName.value = "";
@@ -878,6 +910,9 @@ function resetPlanForm() {
   el.planMaxTransferTargets.value = "1";
   el.planMaxUsers.value = "1";
   el.planSignupLimit.value = "0";
+  el.planSignupWindowDays.value = "10";
+  el.planSignupWindowEnabled.checked = false;
+  el.planRestartSignupWindow.checked = false;
   el.planSupportLevel.value = "standard";
   el.planStripePriceId.value = "";
   el.planSortOrder.value = "0";
@@ -892,6 +927,7 @@ function resetPlanForm() {
   el.planAllowCreditTopups.checked = true;
   el.planActive.checked = true;
   el.planMessage.textContent = "";
+  updatePlanSignupWindowControls();
 }
 
 function fillPlanForm(plan) {
@@ -904,6 +940,9 @@ function fillPlanForm(plan) {
   el.planMaxTransferTargets.value = plan.maxTransferTargets ?? 1;
   el.planMaxUsers.value = plan.maxUsers || 1;
   el.planSignupLimit.value = plan.signupLimit || 0;
+  el.planSignupWindowDays.value = plan.signupWindowDays || 10;
+  el.planSignupWindowEnabled.checked = Boolean(plan.signupWindowEnabled);
+  el.planRestartSignupWindow.checked = false;
   el.planSupportLevel.value = plan.supportLevel || "standard";
   el.planStripePriceId.value = plan.stripePriceId || "";
   el.planSortOrder.value = plan.sortOrder || 0;
@@ -918,6 +957,7 @@ function fillPlanForm(plan) {
   el.planAllowCreditTopups.checked = plan.allowCreditTopups !== false;
   el.planActive.checked = Boolean(plan.active);
   el.planMessage.textContent = `Editing ${plan.name}`;
+  updatePlanSignupWindowControls(plan);
 }
 
 function planPayload() {
@@ -931,6 +971,9 @@ function planPayload() {
     maxTransferTargets: Number(el.planMaxTransferTargets.value || 0),
     maxUsers: Number(el.planMaxUsers.value || 1),
     signupLimit: Number(el.planSignupLimit.value || 0),
+    signupWindowDays: Number(el.planSignupWindowDays.value || 10),
+    signupWindowEnabled: el.planSignupWindowEnabled.checked,
+    restartSignupWindow: el.planRestartSignupWindow.checked,
     supportLevel: el.planSupportLevel.value,
     outboundQualificationEnabled: el.planOutboundQualificationEnabled.checked,
     smartReviewsEnabled: el.planSmartReviewsEnabled.checked,
@@ -955,6 +998,13 @@ function planMetric(label, value) {
   detail.textContent = value;
   item.append(title, detail);
   return item;
+}
+
+function planSignupWindowMetric(plan) {
+  if (!plan.signupWindowEnabled) return "No deadline";
+  const end = plan.signupWindowEndsAt ? new Date(plan.signupWindowEndsAt) : null;
+  if (!end || Number.isNaN(end.getTime())) return "Not started";
+  return `${plan.signupWindowStatus === "open" ? "Until" : "Ended"} ${end.toLocaleDateString()}`;
 }
 
 function planFeatureLabels(plan) {
@@ -988,8 +1038,14 @@ function renderPlans(plans = []) {
     slug.textContent = plan.slug || "no slug";
     title.append(name, slug);
     const status = document.createElement("span");
-    status.className = `status-pill ${plan.active && !plan.signupWaitlist ? "active" : "warning"}`;
-    status.textContent = plan.active ? (plan.signupWaitlist ? "Waitlist" : "Active") : "Inactive";
+    status.className = `status-pill ${plan.active && !plan.signupUnavailable ? "active" : "warning"}`;
+    status.textContent = plan.active
+      ? plan.signupUnavailable
+        ? "Closed"
+        : plan.signupWindowEnabled
+          ? "Limited"
+          : "Active"
+      : "Inactive";
     heading.append(title, status);
     const price = document.createElement("div");
     price.className = "plan-price";
@@ -1009,6 +1065,7 @@ function renderPlans(plans = []) {
         "Signup slots",
         plan.signupLimit ? `${plan.signupSlotsUsed ?? 0}/${plan.signupLimit}` : "Unlimited",
       ),
+      planMetric("Signup window", planSignupWindowMetric(plan)),
       planMetric("Support", plan.supportLevel || "standard"),
       planMetric("Businesses", `${plan.businessCount ?? 0}`),
       planMetric("Sort order", `${plan.sortOrder ?? 0}`),
@@ -2133,6 +2190,13 @@ el.planForm.addEventListener("submit", async (event) => {
 
 el.resetPlanButton.addEventListener("click", resetPlanForm);
 el.installDefaultPlansButton.addEventListener("click", installDefaultPlans);
+const refreshPlanSignupWindowControls = () => {
+  const plan = subscriptionPlans.find((item) => String(item.id) === String(el.planId.value)) || null;
+  updatePlanSignupWindowControls(plan);
+};
+el.planSignupWindowEnabled.addEventListener("change", refreshPlanSignupWindowControls);
+el.planSignupWindowDays.addEventListener("input", refreshPlanSignupWindowControls);
+el.planRestartSignupWindow.addEventListener("change", refreshPlanSignupWindowControls);
 el.addTrialReminderStep?.addEventListener("click", () => {
   el.trialReminderSteps.querySelector(".empty-state")?.remove();
   const step = createTrialReminderStep(

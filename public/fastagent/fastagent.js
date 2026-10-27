@@ -605,7 +605,7 @@ function planHasReservedSlot(plan) {
 }
 
 function planWaitlistedForCurrent(plan) {
-  return Boolean(plan?.signupWaitlist && !planHasReservedSlot(plan));
+  return Boolean((plan?.signupUnavailable || plan?.signupWaitlist) && !planHasReservedSlot(plan));
 }
 
 function selectedPaidPlan() {
@@ -648,8 +648,12 @@ function renderPaidPlans() {
     const slot = card.querySelector(".fast-plan-slot");
     if (plan.signupLimit) {
       slot.textContent = planWaitlistedForCurrent(plan)
-        ? "Waitlist open"
-        : `${Math.max(0, Number(plan.signupSlotsRemaining ?? 0))} signup slots left`;
+        ? plan.signupUnavailableReason === "window_ended"
+          ? "Limited signup window ended"
+          : "All signup spots taken"
+        : `${Math.max(0, Number(plan.signupSlotsRemaining ?? 0))} signup slots left${
+            plan.signupWindowEndsAt ? ` until ${new Date(plan.signupWindowEndsAt).toLocaleDateString()}` : ""
+          }`;
     } else {
       slot.remove();
     }
@@ -781,7 +785,7 @@ function renderAgent(data) {
     el.claimMessage.textContent = "";
   }
   if (data.planUnavailable) {
-    el.claimMessage.textContent = `${data.planUnavailable} Starter and Professional are available now.`;
+    el.claimMessage.textContent = data.planUnavailable;
   }
   window.lucide?.createIcons();
 }
