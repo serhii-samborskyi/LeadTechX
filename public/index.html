@@ -190,6 +190,7 @@
           </nav>
           <nav class="admin-tabs" data-admin-group="settings" role="tablist" aria-label="Settings sections" hidden>
             <button class="admin-tab" data-tab="notifications" role="tab" aria-selected="false" type="button">Notifications</button>
+            <button class="admin-tab" data-tab="channels" role="tab" aria-selected="false" type="button">Channels</button>
             <button class="admin-tab" data-tab="advanced" role="tab" aria-selected="false" type="button">Advanced</button>
             <button class="admin-tab" data-tab="billing" role="tab" aria-selected="false" type="button">Plan &amp; usage</button>
           </nav>
@@ -501,6 +502,26 @@
               </div>
             </div>
             <button id="saveNotificationSettingsButton" class="primary action-button" type="button">Save notifications</button>
+          </section>
+
+          <section class="admin-view" data-view="channels">
+            <div class="admin-view-heading">
+              <h3>Facebook &amp; Instagram</h3>
+              <p>Let the RingPort receptionist reply to customers who message or comment on your connected business accounts.</p>
+            </div>
+            <div class="crm-webhook-card meta-channel-connect-card">
+              <div>
+                <h4>Meta business channels</h4>
+                <p id="metaChannelStatus">Checking connection availability…</p>
+              </div>
+              <button id="connectMetaButton" class="primary" type="button">Connect Facebook &amp; Instagram</button>
+            </div>
+            <div id="metaConnectionList" class="meta-connection-list"></div>
+            <div class="admin-view-heading meta-activity-heading">
+              <h4>Recent Meta activity</h4>
+              <p>Messages, comments, and receptionist replies from connected accounts.</p>
+            </div>
+            <div id="metaRecentMessageList" class="data-list meta-message-list"></div>
           </section>
 
           <section class="admin-view active" data-view="leads">

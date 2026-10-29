@@ -3,7 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
-const jsRoots = ["server.js", "call-silence-guard.js", "public", "scripts", "calendar"];
+const jsRoots = ["server.js", "call-silence-guard.js", "meta-platform.js", "public", "scripts", "calendar"];
 
 function run(command, args, options = {}) {
   const label = [command, ...args].join(" ");

@@ -215,6 +215,22 @@
             <div class="ad-platform-settings">
               <div class="messaging-card ad-platform-card">
                 <div class="messaging-card-heading">
+                  <h4>Meta business messaging</h4>
+                  <p>Let customers connect Facebook Pages and professional Instagram accounts to their RingPort receptionist.</p>
+                </div>
+                <div class="form-grid secret-grid messaging-card-grid">
+                  <label class="check-label"><input id="metaMessagingEnabled" type="checkbox" /> Enable Meta business messaging</label>
+                  <label>Meta App ID<input id="metaAppId" placeholder="2208359909745559" /></label>
+                  <label>Facebook Login configuration ID<input id="metaLoginConfigurationId" placeholder="Configuration ID from Meta" /></label>
+                  <label>Graph API version<input id="metaGraphApiVersion" placeholder="v24.0" /></label>
+                  <label>Meta App Secret<input id="metaAppSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="metaAppSecretState"></small></label>
+                  <label>Webhook verify token<input id="metaWebhookVerifyToken" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="metaWebhookVerifyTokenState"></small></label>
+                  <label class="wide-field">OAuth callback URL<input id="metaOAuthCallbackUrl" readonly /><small>Add this exact URL to Facebook Login for Business.</small></label>
+                  <label class="wide-field">Meta webhook URL<input id="metaMessagingWebhookUrl" readonly /><small>Use this callback for Messenger and Instagram webhooks.</small></label>
+                </div>
+              </div>
+              <div class="messaging-card ad-platform-card">
+                <div class="messaging-card-heading">
                   <h4>Meta</h4>
                   <p>Use Meta Pixel in the browser and Conversions API on the server.</p>
                 </div>

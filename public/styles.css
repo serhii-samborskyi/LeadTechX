@@ -4197,6 +4197,55 @@ dd {
   font-size: 0.84rem;
 }
 
+.meta-channel-connect-card,
+.meta-connection-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.meta-connection-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 26px;
+}
+
+.meta-connection-list .crm-webhook-card {
+  margin-bottom: 0;
+}
+
+.meta-activity-heading {
+  margin-bottom: 8px;
+}
+
+.meta-message-list {
+  border-top: 1px solid var(--line);
+}
+
+.meta-message-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 14px 2px;
+}
+
+.meta-message-row > div {
+  display: grid;
+  gap: 3px;
+}
+
+.meta-message-row small,
+.compact-empty-state {
+  color: var(--muted);
+}
+
+.compact-empty-state {
+  padding: 18px 0;
+}
+
+.status-pill.error {
+  border-color: #e8b5a8;
+  background: #fff0ec;
+  color: #9f351d;
+}
+
 .message-inbox {
   display: grid;
   grid-template-columns: minmax(280px, 0.42fr) minmax(0, 1fr);

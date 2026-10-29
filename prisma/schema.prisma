@@ -67,6 +67,9 @@ model BusinessProfile {
   bookingWebhookEvents         BookingWebhookEvent[]
   trialReminderDeliveries      TrialReminderDelivery[]
   signupWindowEntries          SubscriptionPlanSignupWindowEntry[]
+  metaConnections              MetaConnection[]
+  metaOAuthSessions            MetaOAuthSession[]
+  metaMessages                 MetaMessage[]
 }
 
 model SubscriptionPlan {
@@ -661,6 +664,10 @@ model AppSettings {
   sentDmProfileId             String   @default("")
   metaPixelId                 String   @default("")
   metaTestEventCode           String   @default("")
+  metaAppId                   String   @default("")
+  metaLoginConfigurationId    String   @default("")
+  metaGraphApiVersion         String   @default("v24.0")
+  metaMessagingEnabled        Boolean  @default(false)
   tiktokPixelId               String   @default("")
   redditPixelId               String   @default("")
   redditTestId                String   @default("")
@@ -676,6 +683,72 @@ model AppSettings {
   postbackIncludePhone        Boolean  @default(false)
   trialReminderSteps          Json?
   updatedAt                   DateTime @updatedAt
+}
+
+model MetaConnection {
+  id                       Int             @id @default(autoincrement())
+  businessProfileId        Int
+  businessProfile          BusinessProfile @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  pageId                   String          @unique
+  pageName                 String
+  instagramBusinessId      String?         @unique
+  instagramUsername        String?
+  pageAccessTokenEncrypted String
+  pageAccessTokenHint      String?
+  permissions              Json?
+  status                   String          @default("active")
+  webhookSubscribed        Boolean         @default(false)
+  connectedByUserId        Int?
+  connectedAt              DateTime        @default(now())
+  lastWebhookAt            DateTime?
+  lastError                String?
+  messages                 MetaMessage[]
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+
+  @@index([businessProfileId, status])
+  @@index([instagramBusinessId])
+}
+
+model MetaOAuthSession {
+  id                       Int              @id @default(autoincrement())
+  stateHash                String           @unique
+  businessProfileId        Int
+  businessProfile          BusinessProfile  @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  userId                   Int
+  userAccessTokenEncrypted String?
+  availablePages           Json?
+  expiresAt                DateTime
+  usedAt                   DateTime?
+  createdAt                DateTime         @default(now())
+  updatedAt                DateTime         @updatedAt
+
+  @@index([businessProfileId, expiresAt])
+  @@index([userId, expiresAt])
+}
+
+model MetaMessage {
+  id                Int             @id @default(autoincrement())
+  businessProfileId Int
+  businessProfile   BusinessProfile @relation(fields: [businessProfileId], references: [id], onDelete: Cascade)
+  connectionId      Int
+  connection        MetaConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  channel           String
+  direction         String
+  eventType         String          @default("message")
+  externalUserId    String?
+  externalMessageId String?
+  text              String?
+  status            String          @default("received")
+  raw               Json?
+  error             String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([channel, externalMessageId])
+  @@index([businessProfileId, createdAt])
+  @@index([connectionId, externalUserId, createdAt])
+  @@index([status, createdAt])
 }
 
 model TrialReminderDelivery {

@@ -45,6 +45,14 @@ const el = {
   annualPrepayDiscountPercent: document.querySelector("#annualPrepayDiscountPercent"),
   stripeWebhookUrl: document.querySelector("#stripeWebhookUrl"),
   copyStripeWebhookUrl: document.querySelector("#copyStripeWebhookUrl"),
+  metaMessagingEnabled: document.querySelector("#metaMessagingEnabled"),
+  metaAppId: document.querySelector("#metaAppId"),
+  metaLoginConfigurationId: document.querySelector("#metaLoginConfigurationId"),
+  metaGraphApiVersion: document.querySelector("#metaGraphApiVersion"),
+  metaAppSecret: document.querySelector("#metaAppSecret"),
+  metaWebhookVerifyToken: document.querySelector("#metaWebhookVerifyToken"),
+  metaOAuthCallbackUrl: document.querySelector("#metaOAuthCallbackUrl"),
+  metaMessagingWebhookUrl: document.querySelector("#metaMessagingWebhookUrl"),
   metaPixelId: document.querySelector("#metaPixelId"),
   metaAccessToken: document.querySelector("#metaAccessToken"),
   metaTestEventCode: document.querySelector("#metaTestEventCode"),
@@ -665,6 +673,9 @@ async function loadSystem() {
     "sentDmTemplateId",
     "sentDmTemplateName",
     "sentDmProfileId",
+    "metaAppId",
+    "metaLoginConfigurationId",
+    "metaGraphApiVersion",
     "metaPixelId",
     "metaTestEventCode",
     "tiktokPixelId",
@@ -686,6 +697,7 @@ async function loadSystem() {
   trialReminderDefaults = Array.isArray(data.trialReminderDefaults) ? data.trialReminderDefaults : [];
   renderTrialReminderSteps(data.settings.trialReminderSteps || trialReminderDefaults);
   el.postbackEnabled.checked = Boolean(data.settings.postbackEnabled);
+  el.metaMessagingEnabled.checked = Boolean(data.settings.metaMessagingEnabled);
   el.postbackIncludeAllParams.checked = Boolean(data.settings.postbackIncludeAllParams);
   el.postbackIncludeEmail.checked = data.settings.postbackIncludeEmail !== false;
   el.postbackIncludePhone.checked = Boolean(data.settings.postbackIncludePhone);
@@ -698,6 +710,8 @@ async function loadSystem() {
   secretState("smtpPassword", data.secrets.smtpPassword);
   secretState("stripeSecretKey", data.secrets.stripeSecretKey);
   secretState("stripeWebhookSecret", data.secrets.stripeWebhookSecret);
+  secretState("metaAppSecret", data.secrets.metaAppSecret);
+  secretState("metaWebhookVerifyToken", data.secrets.metaWebhookVerifyToken);
   secretState("metaAccessToken", data.secrets.metaAccessToken);
   secretState("tiktokAccessToken", data.secrets.tiktokAccessToken);
   secretState("redditConversionAccessToken", data.secrets.redditConversionAccessToken);
@@ -755,6 +769,9 @@ function refreshBlueBubblesWebhookUrl() {
 function refreshSystemWebhookUrls() {
   refreshStripeWebhookUrl();
   refreshBlueBubblesWebhookUrl();
+  const baseUrl = String(el.publicBaseUrl.value || "").trim().replace(/\/+$/, "");
+  el.metaOAuthCallbackUrl.value = baseUrl ? `${baseUrl}/api/meta/oauth/callback` : "";
+  el.metaMessagingWebhookUrl.value = baseUrl ? `${baseUrl}/webhooks/meta` : "";
 }
 
 async function copyWebhookUrl(input, button, emptyMessage) {
@@ -2097,6 +2114,12 @@ el.systemForm.addEventListener("submit", async (event) => {
         stripeWebhookSecret: el.stripeWebhookSecret.value,
         stripeCreditPackCredits: Number(el.stripeCreditPackCredits.value),
         annualPrepayDiscountPercent: Number(el.annualPrepayDiscountPercent.value),
+        metaMessagingEnabled: el.metaMessagingEnabled.checked,
+        metaAppId: el.metaAppId.value,
+        metaLoginConfigurationId: el.metaLoginConfigurationId.value,
+        metaGraphApiVersion: el.metaGraphApiVersion.value,
+        metaAppSecret: el.metaAppSecret.value,
+        metaWebhookVerifyToken: el.metaWebhookVerifyToken.value,
         metaPixelId: el.metaPixelId.value,
         metaAccessToken: el.metaAccessToken.value,
         metaTestEventCode: el.metaTestEventCode.value,
@@ -2153,6 +2176,8 @@ el.systemForm.addEventListener("submit", async (event) => {
       el.smtpPassword,
       el.stripeSecretKey,
       el.stripeWebhookSecret,
+      el.metaAppSecret,
+      el.metaWebhookVerifyToken,
       el.metaAccessToken,
       el.tiktokAccessToken,
       el.redditConversionAccessToken,

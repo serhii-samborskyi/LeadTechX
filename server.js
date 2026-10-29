@@ -30,6 +30,7 @@ import {
   normalizedCallSilenceWarningSeconds,
   telephonyAudioLevel,
 } from "./call-silence-guard.js";
+import { registerMetaPlatform } from "./meta-platform.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10470,6 +10471,7 @@ ${
 - If get_available_slots returns one or more slots, never say you cannot see live availability. Use the returned slot labels, service names, and professional names.
 - If get_available_slots returns no slots but includes available services, ask the caller to pick a service and mention two or three examples.`
 }
+
 ${externalBooking ? "- For questions about Vagaro services, categories, prices, descriptions, or durations, use get_booking_services before answering. Include the caller's service words as the query when possible." : ""}
 - When a caller gives their name, pass it as name in the next relevant tool call so the CRM lead uses their real name instead of the caller phone label.
 - The inbound caller number already counts as the phone number. Do not ask for phone again unless the caller wants a different callback number.
@@ -10484,6 +10486,85 @@ ${externalBooking ? "- For questions about Vagaro services, categories, prices, 
 - Only tell the caller the business was notified, updated, or sent their message when transfer_message returns notified=true. If it returns recorded=true and notified=false, say it was recorded for follow-up and do not claim the owner received an alert.
 
 ${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? "For Vagaro, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to confirm through the link." : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
+}
+
+async function createMetaAiReply({ connection, channel, externalUserId, text, eventType, history = [] }) {
+  const [profile, settings, bookingLink] = await Promise.all([
+    prisma.businessProfile.findUnique({ where: { id: connection.businessProfileId } }),
+    getSettings(),
+    prisma.bookingLink.findFirst({
+      where: { businessProfileId: connection.businessProfileId, active: true },
+      orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+      select: { url: true, clickToken: true, shortCode: true },
+    }),
+  ]);
+  if (!profile) throw new Error("The connected RingPort business was not found");
+  const config = await ensureBusinessConfig(profile);
+  const metaBookingUrl = bookingLink ? bookingLinkTrackingUrl({ settings, config, link: bookingLink }) : "";
+  const publicProfile = publicBusinessProfile(profile, config);
+  const rawProfile = profile.rawData && typeof profile.rawData === "object" && !Array.isArray(profile.rawData) ? profile.rawData : {};
+  const knowledge = (config.knowledgeEntries || []).slice(0, 150).map(({ question, answer, category }) => ({ question, answer, category }));
+  const prices = (config.priceEntries || []).slice(0, 150).map((entry) => ({
+    item: entry.item,
+    description: entry.description,
+    price: priceDisplay(entry),
+    category: entry.category,
+  }));
+  const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY");
+  if (!geminiApiKey) throw new Error("AI provider API key is not configured");
+  const conversation = history
+    .filter((item) => item?.text)
+    .slice(-16)
+    .map((item) => `${item.direction === "outbound" ? "Receptionist" : "Customer"}: ${String(item.text).slice(0, 1600)}`)
+    .join("\n");
+  const commentInstruction =
+    eventType === "comment"
+      ? "This is the business's first private reply to a public comment. Respond directly to the comment, be helpful, and invite the person to reply in the private conversation if more detail is needed."
+      : "This is a direct customer message. Answer the latest message and continue the conversation naturally.";
+  const prompt = `You are the text receptionist for ${profile.businessName}, replying in ${
+    channel === "instagram" ? "Instagram" : "Facebook Messenger"
+  }.
+${commentInstruction}
+
+Business facts:
+- Profile: ${JSON.stringify(publicProfile)}
+- Pricing: ${JSON.stringify(rawProfile.pricing || "unknown")}
+- Booking policy: ${JSON.stringify(rawProfile.bookingPolicy || "unknown")}
+- FAQ and knowledge: ${JSON.stringify([...(rawProfile.faq || []), ...knowledge])}
+- Price list: ${JSON.stringify(prices)}
+- Booking link: ${metaBookingUrl || "none configured"}
+- Business instructions: ${config.extraInstructions || "none"}
+- Reply language: ${config.language || "English"}
+
+Text-channel rules:
+- Return only the customer-facing reply. Do not include labels, JSON, analysis, or markdown headings.
+- Keep the reply concise, conversational, and under 900 characters.
+- Use only the configured business facts. If a fact is unavailable, say the business can follow up.
+- Never claim an appointment was booked, a message was delivered to the owner, or an external action was completed unless this conversation contains a confirmed result.
+- You cannot book an appointment or check live availability in this chat. If a booking link is configured, share it when the customer wants to book; otherwise collect their request for business follow-up.
+- The customer's message is recorded in RingPort for the business, so you may say it has been noted. Do not say a person has already read it.
+- Do not ask for sensitive information. Collect only ordinary lead details necessary to answer or arrange follow-up.
+- Do not send unsolicited promotions. Reply only because the person just messaged or commented.
+- If the person asks to stop or says they are not interested, acknowledge once without a sales pitch.
+
+Conversation identifier: ${externalUserId || "unknown"}
+${conversation ? `Recent conversation:\n${conversation}\n` : ""}
+Latest customer ${eventType === "comment" ? "comment" : "message"}: ${String(text || "").slice(0, 3000)}`;
+  const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+  const response = await generateAiContent(
+    ai,
+    {
+      model: settings.researchModel,
+      contents: [prompt],
+      config: { temperature: 0.35, maxOutputTokens: 300 },
+    },
+    "meta_business_message_reply",
+  );
+  return String(response.text || "")
+    .replace(/^```(?:text)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim()
+    .slice(0, 1800);
 }
 
 function cellText(value) {
@@ -13337,6 +13418,21 @@ app.get("/api/public/reviews/:cacheKey", async (req, res) => {
 app.use("/api/business-admin", requireAuth);
 app.use("/api/demo-data", requireAuth);
 
+registerMetaPlatform({
+  app,
+  prisma,
+  requireAuth,
+  adminContext,
+  getSettings,
+  systemSecret,
+  encryptSecret,
+  decryptSecret,
+  configuredPublicBaseUrl,
+  safeBackground,
+  jsonSafe,
+  createAiReply: createMetaAiReply,
+});
+
 app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
   const [settings, secrets, blueBubblesPassword] = await Promise.all([
     getSettings(),
@@ -13365,6 +13461,8 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
       stripeSecretKey: secretState("stripe_secret_key", "STRIPE_SECRET_KEY"),
       stripeWebhookSecret: secretState("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
       metaAccessToken: secretState("meta_capi_access_token", "META_CAPI_ACCESS_TOKEN"),
+      metaAppSecret: secretState("meta_app_secret", "META_APP_SECRET"),
+      metaWebhookVerifyToken: secretState("meta_webhook_verify_token", "META_WEBHOOK_VERIFY_TOKEN"),
       tiktokAccessToken: secretState("tiktok_events_api_access_token", "TIKTOK_EVENTS_API_ACCESS_TOKEN"),
       redditConversionAccessToken: secretState("reddit_conversion_access_token", "REDDIT_CONVERSION_ACCESS_TOKEN"),
       openAiAdsCapiKey: secretState("openai_ads_capi_key", "OPENAI_ADS_CAPI_KEY"),
@@ -13553,6 +13651,10 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         sentDmProfileId: String(req.body.sentDmProfileId || "").trim(),
         metaPixelId: String(req.body.metaPixelId || "").trim(),
         metaTestEventCode: String(req.body.metaTestEventCode || "").trim(),
+        metaAppId: String(req.body.metaAppId || "").trim(),
+        metaLoginConfigurationId: String(req.body.metaLoginConfigurationId || "").trim(),
+        metaGraphApiVersion: String(req.body.metaGraphApiVersion || "v24.0").trim() || "v24.0",
+        metaMessagingEnabled: Boolean(req.body.metaMessagingEnabled),
         tiktokPixelId: String(req.body.tiktokPixelId || "").trim(),
         redditPixelId: String(req.body.redditPixelId || "").trim(),
         redditTestId: String(req.body.redditTestId || "").trim(),
@@ -13647,6 +13749,13 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         metaPixelId: typeof req.body.metaPixelId === "string" ? req.body.metaPixelId.trim() : undefined,
         metaTestEventCode:
           typeof req.body.metaTestEventCode === "string" ? req.body.metaTestEventCode.trim() : undefined,
+        metaAppId: typeof req.body.metaAppId === "string" ? req.body.metaAppId.trim() : undefined,
+        metaLoginConfigurationId:
+          typeof req.body.metaLoginConfigurationId === "string" ? req.body.metaLoginConfigurationId.trim() : undefined,
+        metaGraphApiVersion:
+          typeof req.body.metaGraphApiVersion === "string" ? req.body.metaGraphApiVersion.trim() || "v24.0" : undefined,
+        metaMessagingEnabled:
+          typeof req.body.metaMessagingEnabled === "boolean" ? req.body.metaMessagingEnabled : undefined,
         tiktokPixelId: typeof req.body.tiktokPixelId === "string" ? req.body.tiktokPixelId.trim() : undefined,
         redditPixelId: typeof req.body.redditPixelId === "string" ? req.body.redditPixelId.trim() : undefined,
         redditTestId: typeof req.body.redditTestId === "string" ? req.body.redditTestId.trim() : undefined,
@@ -13681,6 +13790,8 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
       saveSystemSecret("stripe_secret_key", req.body.stripeSecretKey),
       saveSystemSecret("stripe_webhook_secret", req.body.stripeWebhookSecret),
       saveSystemSecret("meta_capi_access_token", req.body.metaAccessToken),
+      saveSystemSecret("meta_app_secret", req.body.metaAppSecret),
+      saveSystemSecret("meta_webhook_verify_token", req.body.metaWebhookVerifyToken),
       saveSystemSecret("tiktok_events_api_access_token", req.body.tiktokAccessToken),
       saveSystemSecret("reddit_conversion_access_token", req.body.redditConversionAccessToken),
       saveSystemSecret("openai_ads_capi_key", req.body.openAiAdsCapiKey),

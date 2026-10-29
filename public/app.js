@@ -213,6 +213,10 @@ const el = {
   appointmentNotificationPhone: document.querySelector("#appointmentNotificationPhone"),
   appointmentNotificationEmail: document.querySelector("#appointmentNotificationEmail"),
   saveNotificationSettingsButton: document.querySelector("#saveNotificationSettingsButton"),
+  metaChannelStatus: document.querySelector("#metaChannelStatus"),
+  connectMetaButton: document.querySelector("#connectMetaButton"),
+  metaConnectionList: document.querySelector("#metaConnectionList"),
+  metaRecentMessageList: document.querySelector("#metaRecentMessageList"),
   missedCallFollowupTemplate: document.querySelector("#missedCallFollowupTemplate"),
   appointmentReminderTemplate: document.querySelector("#appointmentReminderTemplate"),
   saveInstructionsButton: document.querySelector("#saveInstructionsButton"),
@@ -382,6 +386,7 @@ const OWNER_PAGE_FOR_TAB = {
   content: "receptionist",
   transfers: "receptionist",
   notifications: "settings",
+  channels: "settings",
   advanced: "settings",
   billing: "settings",
 };
@@ -1966,6 +1971,118 @@ async function loadBusinessAdmin() {
   applyAdminData(data);
   await loadBooking();
   await loadCalendar();
+}
+
+function metaBusinessQuery() {
+  const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
+  if (el.website.value.trim()) query.set("website", el.website.value.trim());
+  return query;
+}
+
+function metaActivityLabel(message) {
+  const channel = message.channel === "instagram" ? "Instagram" : "Facebook";
+  const direction = message.direction === "outbound" ? "Receptionist reply" : message.eventType === "comment" ? "Customer comment" : "Customer message";
+  return `${channel} · ${direction}`;
+}
+
+function renderMetaChannels(data) {
+  el.connectMetaButton.disabled = !data.configured;
+  el.metaChannelStatus.textContent = data.configured
+    ? "Connect a Facebook Page. Its professional Instagram account will be included when available."
+    : data.configurationError || "Meta business messaging is not available yet.";
+
+  el.metaConnectionList.replaceChildren();
+  if (!data.connections?.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state compact-empty-state";
+    empty.textContent = "No Facebook or Instagram business account is connected.";
+    el.metaConnectionList.appendChild(empty);
+  } else {
+    for (const connection of data.connections) {
+      const card = document.createElement("div");
+      card.className = "crm-webhook-card meta-connection-card";
+      const copy = document.createElement("div");
+      const title = document.createElement("h4");
+      title.textContent = connection.pageName;
+      const detail = document.createElement("p");
+      const instagram = connection.instagramUsername ? ` · Instagram @${connection.instagramUsername}` : " · No professional Instagram account";
+      const webhook = connection.webhookSubscribed ? "Webhooks active" : "Connected; webhook attention needed";
+      detail.textContent = `Facebook Page${instagram} · ${webhook}`;
+      copy.append(title, detail);
+      if (connection.lastError) {
+        const error = document.createElement("small");
+        error.className = "form-message error";
+        error.textContent = connection.lastError;
+        copy.appendChild(error);
+      }
+      const disconnect = document.createElement("button");
+      disconnect.type = "button";
+      disconnect.dataset.disconnectMeta = String(connection.id);
+      disconnect.textContent = "Disconnect";
+      card.append(copy, disconnect);
+      el.metaConnectionList.appendChild(card);
+    }
+  }
+
+  el.metaRecentMessageList.replaceChildren();
+  if (!data.recentMessages?.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state compact-empty-state";
+    empty.textContent = "Meta activity will appear here after customers message or comment.";
+    el.metaRecentMessageList.appendChild(empty);
+  } else {
+    for (const message of data.recentMessages) {
+      const row = document.createElement("div");
+      row.className = "data-row meta-message-row";
+      const copy = document.createElement("div");
+      const heading = document.createElement("strong");
+      heading.textContent = metaActivityLabel(message);
+      const text = document.createElement("span");
+      text.textContent = message.text || "Activity received";
+      const time = document.createElement("small");
+      time.textContent = new Date(message.createdAt).toLocaleString();
+      copy.append(heading, text, time);
+      const status = document.createElement("span");
+      status.className = `status-pill ${message.status === "failed" ? "error" : ""}`.trim();
+      status.textContent = message.status || "received";
+      row.append(copy, status);
+      el.metaRecentMessageList.appendChild(row);
+    }
+  }
+}
+
+async function loadMetaChannels() {
+  if (!el.metaChannelStatus) return;
+  el.metaChannelStatus.textContent = "Checking connection availability…";
+  const data = await apiJson(`/api/business-admin/meta?${metaBusinessQuery()}`);
+  renderMetaChannels(data);
+}
+
+async function connectMetaChannels() {
+  el.connectMetaButton.disabled = true;
+  el.metaChannelStatus.textContent = "Opening Meta authorization…";
+  try {
+    const data = await apiJson("/api/business-admin/meta/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(adminIdentity()),
+    });
+    window.location.assign(data.url);
+  } catch (error) {
+    el.connectMetaButton.disabled = false;
+    throw error;
+  }
+}
+
+async function disconnectMetaChannels(connectionId) {
+  if (!window.confirm("Disconnect this Facebook Page and its Instagram account from RingPort?")) return;
+  await apiJson(`/api/business-admin/meta/${connectionId}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  await loadMetaChannels();
+  setAdminStatus("Meta account disconnected");
 }
 
 function availabilityPayload() {
@@ -4219,6 +4336,8 @@ async function initializePortal(user) {
   await Promise.allSettled([loadCrm(), loadMessages(), refreshBillingTab()]);
   if (params.get("billing")) {
     openBusinessTool("billing");
+  } else if (params.get("open") === "settings") {
+    selectOwnerPage("settings", params.get("tab") || "notifications", { scroll: false });
   } else {
     selectOwnerPage("home", null, { scroll: false });
   }
@@ -4284,6 +4403,7 @@ function loadAdminTab(tabName) {
   }
   if (tabName === "leads") runAdmin(loadCrm);
   if (tabName === "messages") runAdmin(loadMessages);
+  if (tabName === "channels") runAdmin(loadMetaChannels);
   if (tabName === "billing") runAdmin(refreshBillingTab);
 }
 
@@ -4602,6 +4722,11 @@ el.transferTargetList.addEventListener("click", (event) => {
 el.saveBusinessProfileButton.addEventListener("click", () => runAdmin(saveBusinessProfile));
 el.saveCalendarButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.saveNotificationSettingsButton?.addEventListener("click", () => runAdmin(saveBusinessConfig));
+el.connectMetaButton?.addEventListener("click", () => runAdmin(connectMetaChannels));
+el.metaConnectionList?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-disconnect-meta]");
+  if (button) runAdmin(() => disconnectMetaChannels(button.dataset.disconnectMeta));
+});
 el.refreshCalendarButton.addEventListener("click", () => runAdmin(loadCalendar));
 el.calendarProvider.addEventListener("change", updateCalendarProviderUi);
 el.vagaroMode?.addEventListener("change", updateCalendarProviderUi);
