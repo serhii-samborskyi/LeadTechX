@@ -30,6 +30,7 @@ COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package*.json ./
 COPY --chown=node:node server.js ./
 COPY --chown=node:node call-silence-guard.js ./
+COPY --chown=node:node meta-platform.js ./
 COPY --chown=node:node calendar ./calendar
 COPY --chown=node:node prisma ./prisma
 COPY --chown=node:node public ./public
