@@ -186,6 +186,7 @@
           <nav class="admin-tabs" data-admin-group="receptionist" role="tablist" aria-label="Receptionist sections" hidden>
             <button class="admin-tab" data-tab="setup" role="tab" aria-selected="false" type="button">Basics</button>
             <button class="admin-tab" data-tab="content" role="tab" aria-selected="false" type="button">Knowledge</button>
+            <button class="admin-tab" data-tab="goals" role="tab" aria-selected="false" type="button">Goals</button>
             <button class="admin-tab" data-tab="transfers" role="tab" aria-selected="false" type="button">Team &amp; transfers</button>
           </nav>
           <nav class="admin-tabs" data-admin-group="settings" role="tablist" aria-label="Settings sections" hidden>
@@ -322,6 +323,45 @@
             <div class="data-list" id="pricesList"></div>
           </details>
 
+          <section class="admin-view" data-view="goals">
+            <div class="admin-view-heading">
+              <h3>Receptionist goals</h3>
+              <p>Give the receptionist a specific link to send when a caller is ready to buy, apply, register, or take another action.</p>
+            </div>
+            <div class="goal-summary-grid" aria-label="Goal performance">
+              <div><span>Active goals</span><strong id="goalActiveCount">0</strong></div>
+              <div><span>Links sent</span><strong id="goalSentCount">0</strong></div>
+              <div><span>Link clicks</span><strong id="goalClickCount">0</strong></div>
+              <div><span>Conversions</span><strong id="goalConversionCount">0</strong></div>
+            </div>
+            <details class="section-disclosure goal-editor-disclosure" id="goalEditorDisclosure">
+              <summary><span><strong id="goalEditorTitle">Add a goal</strong><small>The agent sends its link only after the caller shows the intent you describe.</small></span></summary>
+              <div class="section-disclosure-body goal-editor-card">
+              <input id="goalId" type="hidden" />
+              <div class="form-grid goal-editor-grid">
+                <label>Goal name<input id="goalName" placeholder="Start an application" /></label>
+                <label>Action<select id="goalActionType"><option value="send_link">Send a link</option><option value="purchase_link">Buy or pay</option><option value="application_link">Start an application</option><option value="booking_link">Book externally</option></select></label>
+                <label class="wide-field">Destination link<input id="goalDestinationUrl" type="url" placeholder="https://yourbusiness.com/apply" /></label>
+                <label class="wide-field">When should the agent offer it?<textarea id="goalTriggerInstructions" rows="3" placeholder="Offer after the caller says they want to apply or asks how to get started."></textarea></label>
+                <label class="wide-field">What should the agent qualify first?<textarea id="goalQualificationInstructions" rows="3" placeholder="Confirm their service area and intended start date. Do not pressure them."></textarea></label>
+                <label class="wide-field">Text message<textarea id="goalMessageTemplate" rows="2">Here is the {{goal_name}} link from {{business_name}}: {{goal_link}}</textarea><small>Available: {{business_name}}, {{goal_name}}, {{goal_link}}, {{customer_name}}</small></label>
+                <label class="wide-field">What the agent says after sending<input id="goalConfirmationMessage" value="I sent the link. Please open it to continue." /></label>
+                <label>Order<input id="goalSortOrder" type="number" step="1" value="0" /></label>
+                <label class="check-label"><input id="goalPrimary" type="checkbox" /> Main business goal</label>
+                <label class="check-label"><input id="goalActive" type="checkbox" checked /> Active</label>
+              </div>
+              <div class="goal-editor-actions">
+                <button id="saveGoalButton" class="primary" type="button">Save goal</button>
+                <button id="resetGoalButton" type="button">Clear</button>
+              </div>
+              </div>
+            </details>
+            <div class="goal-columns">
+              <div><h4>Configured goals</h4><div class="data-list" id="goalList"></div></div>
+              <div><h4>Recent sends</h4><div class="data-list compact-list" id="goalRecentSends"></div></div>
+            </div>
+          </section>
+
           <section class="admin-view" data-view="transfers">
             <div class="admin-view-heading">
               <h3>Call transfers</h3>
@@ -368,7 +408,7 @@
                 <p>Use RingPort's internal calendar or connect an external booking system.</p>
               </div>
               <div class="booking-provider-header">
-                <label>Provider<select id="calendarProvider"><option value="internal">RingPort calendar</option><option value="vagaro">Vagaro</option></select></label>
+                <label>Provider<select id="calendarProvider"><option value="internal">RingPort calendar</option><option value="vagaro">Vagaro</option><option value="google_calendar">Google Calendar</option><option value="calendly">Calendly</option></select></label>
                 <button id="saveVagaroSettingsButton" class="primary" type="button">Save booking system</button>
               </div>
               <div id="vagaroSettingsPanel" class="vagaro-settings-panel" hidden>
@@ -400,6 +440,35 @@
                 <div class="booking-provider-sync-row">
                   <button id="syncVagaroButton" type="button">Sync now</button>
                 </div>
+              </div>
+              <div id="googleCalendarSettingsPanel" class="calendar-oauth-panel" hidden>
+                <div class="calendar-connection-heading">
+                  <div><strong>Google Calendar</strong><small id="googleCalendarStatus">Not connected</small></div>
+                  <div class="booking-provider-actions">
+                    <button id="connectGoogleCalendarButton" type="button">Connect Google</button>
+                    <button id="disconnectGoogleCalendarButton" class="danger-subtle" type="button" hidden>Disconnect</button>
+                  </div>
+                </div>
+                <div class="form-grid booking-provider-grid">
+                  <label>Calendar ID<input id="googleCalendarId" value="primary" placeholder="primary" /></label>
+                  <label class="check-label"><input id="googleCalendarDirectBooking" type="checkbox" checked /> Let RingPort book available times</label>
+                </div>
+                <small>RingPort checks free/busy time and creates, updates, or cancels events in the connected calendar.</small>
+              </div>
+              <div id="calendlySettingsPanel" class="calendar-oauth-panel" hidden>
+                <div class="calendar-connection-heading">
+                  <div><strong>Calendly</strong><small id="calendlyStatus">Not connected</small></div>
+                  <div class="booking-provider-actions">
+                    <button id="connectCalendlyButton" type="button">Connect Calendly</button>
+                    <button id="syncCalendlyButton" type="button" hidden>Sync event types</button>
+                    <button id="disconnectCalendlyButton" class="danger-subtle" type="button" hidden>Disconnect</button>
+                  </div>
+                </div>
+                <div class="form-grid booking-provider-grid">
+                  <label>Event type<select id="calendlyEventType"><option value="">Connect Calendly first</option></select></label>
+                  <label class="check-label"><input id="calendlyDirectBooking" type="checkbox" checked /> Book directly in Calendly</label>
+                </div>
+                <small id="calendlyConnectionNote">Direct API booking creates appointments in Calendly. Turn it off to send a tracked Calendly link instead.</small>
               </div>
               <small id="vagaroStatus">Vagaro is not connected.</small>
             </div>

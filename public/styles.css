@@ -3412,6 +3412,18 @@ dd {
   grid-column: 1 / -1;
 }
 
+.field-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.field-help code {
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
 .action-button {
   margin-top: 16px;
   padding: 0 18px;
@@ -4195,6 +4207,152 @@ dd {
   resize: vertical;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.84rem;
+}
+
+.goal-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.goal-summary-grid > div {
+  display: grid;
+  gap: 4px;
+  min-height: 78px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.goal-summary-grid span,
+.goal-card small,
+.goal-send-row small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.goal-summary-grid strong {
+  color: var(--accent-dark);
+  font-size: 1.35rem;
+}
+
+.goal-editor-card {
+  margin-bottom: 20px;
+}
+
+.goal-editor-card textarea {
+  min-height: 74px;
+  font-family: inherit;
+}
+
+.goal-editor-actions,
+.goal-card-actions,
+.goal-send-row > div:last-child,
+.calendar-connection-heading,
+.calendar-connection-heading > div:last-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.goal-editor-actions {
+  justify-content: flex-start;
+}
+
+.goal-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
+  gap: 20px;
+}
+
+.goal-columns h4 {
+  margin: 0;
+}
+
+.goal-card {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.goal-card.is-disabled {
+  background: #f7f9f8;
+  opacity: 0.78;
+}
+
+.goal-card-heading,
+.goal-send-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.goal-card-heading > div,
+.goal-send-row > div:first-child,
+.calendar-connection-heading > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.goal-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.goal-card-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.goal-card-metrics span {
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-size: 0.76rem;
+}
+
+.goal-tracking-link {
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-card-actions {
+  flex-wrap: wrap;
+}
+
+.goal-send-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.calendar-oauth-panel {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.calendar-oauth-panel[hidden] {
+  display: none;
+}
+
+.calendar-connection-heading {
+  justify-content: space-between;
 }
 
 .meta-channel-connect-card,
@@ -5788,6 +5946,10 @@ a.appointment-field-value {
   .availability-list {
     grid-template-columns: repeat(4, minmax(130px, 1fr));
   }
+
+  .goal-columns {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 760px) {
@@ -5830,6 +5992,24 @@ a.appointment-field-value {
   .home-status-grid {
     grid-template-columns: 1fr;
     gap: 10px;
+  }
+
+  .goal-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .goal-card-heading,
+  .goal-send-row,
+  .calendar-connection-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .goal-card-actions,
+  .goal-send-row > div:last-child,
+  .calendar-connection-heading > div:last-child {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 
   .home-metrics {

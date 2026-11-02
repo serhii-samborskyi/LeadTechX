@@ -18,7 +18,12 @@ import readXlsxFile from "read-excel-file/node";
 import Stripe from "stripe";
 import { WebSocket, WebSocketServer } from "ws";
 
-import { bookCalendarAppointment, listCalendarSlots } from "./calendar/index.js";
+import {
+  bookCalendarAppointment,
+  cancelCalendarAppointment,
+  listCalendarSlots,
+  updateCalendarAppointment,
+} from "./calendar/index.js";
 import {
   appointmentConfirmationCode,
   backfillAppointmentBookingKeys,
@@ -417,6 +422,7 @@ function issueToken() {
 }
 
 const BOOKING_SHORT_CODE_PATTERN = /^BK[A-Z0-9]{4,12}$/;
+const GOAL_SHORT_CODE_PATTERN = /^GL[A-Z0-9]{4,12}$/;
 const BOOKING_SHORT_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 const FAST_AGENT_SHORT_CODE_PATTERN = /^\d{8}$/;
 
@@ -429,11 +435,13 @@ function randomBookingShortCode() {
 }
 
 async function bookingShortCodeExists(shortCode) {
-  const [link, send] = await Promise.all([
+  const [link, send, goal, goalSend] = await Promise.all([
     prisma.bookingLink.findUnique({ where: { shortCode }, select: { id: true } }),
     prisma.bookingLinkSend.findUnique({ where: { shortCode }, select: { id: true } }),
+    prisma.receptionistGoal.findUnique({ where: { shortCode }, select: { id: true } }),
+    prisma.goalLinkSend.findUnique({ where: { shortCode }, select: { id: true } }),
   ]);
-  return Boolean(link || send);
+  return Boolean(link || send || goal || goalSend);
 }
 
 async function generateBookingShortCode() {
@@ -442,6 +450,32 @@ async function generateBookingShortCode() {
     if (!(await bookingShortCodeExists(shortCode))) return shortCode;
   }
   throw new Error("Could not generate a unique booking short link");
+}
+
+function randomGoalShortCode() {
+  let suffix = "";
+  for (let index = 0; index < 6; index += 1) {
+    suffix += BOOKING_SHORT_CODE_ALPHABET[crypto.randomInt(BOOKING_SHORT_CODE_ALPHABET.length)];
+  }
+  return `GL${suffix}`;
+}
+
+async function goalShortCodeExists(shortCode) {
+  const [goal, send, bookingLink, bookingSend] = await Promise.all([
+    prisma.receptionistGoal.findUnique({ where: { shortCode }, select: { id: true } }),
+    prisma.goalLinkSend.findUnique({ where: { shortCode }, select: { id: true } }),
+    prisma.bookingLink.findUnique({ where: { shortCode }, select: { id: true } }),
+    prisma.bookingLinkSend.findUnique({ where: { shortCode }, select: { id: true } }),
+  ]);
+  return Boolean(goal || send || bookingLink || bookingSend);
+}
+
+async function generateGoalShortCode() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const shortCode = randomGoalShortCode();
+    if (!(await goalShortCodeExists(shortCode))) return shortCode;
+  }
+  throw new Error("Could not generate a unique goal link");
 }
 
 function randomFastAgentShortCode() {
@@ -6240,7 +6274,7 @@ function fastAgentShortUrl(req, settings, shortCode) {
 
 function normalizedBookingProvider(value) {
   const provider = String(value || "").trim().toLowerCase();
-  return provider === "vagaro" ? "vagaro" : "internal";
+  return ["vagaro", "google_calendar", "calendly"].includes(provider) ? provider : "internal";
 }
 
 function normalizedVagaroMode(value, fallback = "api") {
@@ -6274,6 +6308,7 @@ function safeBookingConnection(connection) {
     apiClientSecretConfigured: Boolean(connection.apiClientSecretEncrypted),
     apiClientSecretHint: connection.apiClientSecretHint || "",
     accessTokenConfigured: Boolean(connection.accessTokenEncrypted),
+    refreshTokenConfigured: Boolean(connection.refreshTokenEncrypted),
     accessTokenExpiresAt: connection.accessTokenExpiresAt,
     webhookSecretConfigured: Boolean(connection.webhookSecretEncrypted),
     webhookSecretHint: connection.webhookSecretHint || "",
@@ -7017,7 +7052,248 @@ async function syncVagaroLocations(connection, profile) {
 }
 
 function bookingProviderHelpers() {
-  return { resolveBookingAccessToken, requestBookingProvider };
+  return { resolveBookingAccessToken, requestBookingProvider, resolveCalendarAccessToken };
+}
+
+function calendarOAuthProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  if (!["google_calendar", "calendly"].includes(provider)) throw new Error("Calendar provider must be Google Calendar or Calendly");
+  return provider;
+}
+
+function calendarProviderLabel(provider) {
+  return provider === "google_calendar" ? "Google Calendar" : "Calendly";
+}
+
+function calendarOAuthCallbackUrl(settings, provider) {
+  const baseUrl = configuredPublicBaseUrl(settings);
+  if (!baseUrl) throw new Error("Set the public base URL in Admin before connecting calendars");
+  return `${baseUrl}/api/calendar/oauth/${provider}/callback`;
+}
+
+async function calendarOAuthConfig(provider, { requireSecret = true } = {}) {
+  const normalized = calendarOAuthProvider(provider);
+  const settings = await getSettings();
+  const google = normalized === "google_calendar";
+  const clientId = String(
+    google
+      ? settings.googleCalendarClientId || process.env.GOOGLE_CALENDAR_CLIENT_ID || ""
+      : settings.calendlyClientId || process.env.CALENDLY_CLIENT_ID || "",
+  ).trim();
+  const clientSecret = await systemSecret(
+    google ? "google_calendar_client_secret" : "calendly_client_secret",
+    google ? "GOOGLE_CALENDAR_CLIENT_SECRET" : "CALENDLY_CLIENT_SECRET",
+  );
+  if (!clientId) throw new Error(`${calendarProviderLabel(normalized)} client ID is not configured in Admin`);
+  if (requireSecret && !clientSecret) throw new Error(`${calendarProviderLabel(normalized)} client secret is not configured in Admin`);
+  return {
+    provider: normalized,
+    settings,
+    clientId,
+    clientSecret,
+    callbackUrl: calendarOAuthCallbackUrl(settings, normalized),
+  };
+}
+
+function oauthCodeChallenge(verifier) {
+  return crypto.createHash("sha256").update(String(verifier)).digest("base64url");
+}
+
+async function tokenEndpointRequest(url, { body, basicAuth = null } = {}) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+      ...(basicAuth ? { Authorization: `Basic ${Buffer.from(`${basicAuth.clientId}:${basicAuth.clientSecret}`).toString("base64")}` } : {}),
+    },
+    body: new URLSearchParams(body),
+    signal: AbortSignal.timeout(12_000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.access_token) {
+    throw new Error(payload.error_description || payload.message || payload.error || `OAuth token request failed (${response.status})`);
+  }
+  return payload;
+}
+
+async function refreshCalendarToken(connection) {
+  const provider = calendarOAuthProvider(connection.provider);
+  const config = await calendarOAuthConfig(provider);
+  const refreshToken = decryptOptional(connection.refreshTokenEncrypted);
+  if (!refreshToken) throw new Error(`Reconnect ${calendarProviderLabel(provider)} to refresh access`);
+  const token = provider === "google_calendar"
+    ? await tokenEndpointRequest("https://oauth2.googleapis.com/token", {
+        body: {
+          client_id: config.clientId,
+          client_secret: config.clientSecret,
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+        },
+      })
+    : await tokenEndpointRequest("https://auth.calendly.com/oauth/token", {
+        body: { grant_type: "refresh_token", refresh_token: refreshToken, client_id: config.clientId },
+        basicAuth: { clientId: config.clientId, clientSecret: config.clientSecret },
+      });
+  const access = encryptedField(token.access_token);
+  const rotatedRefresh = token.refresh_token ? encryptedField(token.refresh_token) : null;
+  const expiresAt = new Date(Date.now() + Math.max(60, Number(token.expires_in || 3600)) * 1000);
+  await prisma.bookingConnection.update({
+    where: { id: connection.id },
+    data: {
+      accessTokenEncrypted: access.encrypted,
+      accessTokenExpiresAt: expiresAt,
+      refreshTokenEncrypted: rotatedRefresh?.encrypted || undefined,
+      settings: {
+        ...(connection.settings && typeof connection.settings === "object" ? connection.settings : {}),
+        tokenRefreshedAt: new Date().toISOString(),
+      },
+    },
+  });
+  return token.access_token;
+}
+
+async function resolveCalendarAccessToken(connection) {
+  if (!connection || !["google_calendar", "calendly"].includes(connection.provider)) {
+    throw new Error("Calendar OAuth connection is invalid");
+  }
+  if (
+    connection.accessTokenEncrypted &&
+    (!connection.accessTokenExpiresAt || new Date(connection.accessTokenExpiresAt).getTime() > Date.now() + 90_000)
+  ) {
+    return decryptOptional(connection.accessTokenEncrypted);
+  }
+  return refreshCalendarToken(connection);
+}
+
+async function calendlyApi(connection, path, { method = "GET", body = null } = {}) {
+  const accessToken = await resolveCalendarAccessToken(connection);
+  const response = await fetch(`https://api.calendly.com${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(12_000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.message || payload.title || `Calendly request failed (${response.status})`);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
+  return payload;
+}
+
+function calendlyResourceId(uri) {
+  return String(uri || "").split("/").filter(Boolean).pop() || "";
+}
+
+async function syncCalendlyConnection(connection) {
+  const userPayload = await calendlyApi(connection, "/users/me");
+  const user = userPayload.resource || {};
+  const query = new URLSearchParams({ user: String(user.uri || ""), active: "true", count: "100" });
+  const eventPayload = await calendlyApi(connection, `/event_types?${query}`);
+  const eventTypes = (eventPayload.collection || []).map((eventType) => ({
+    uri: eventType.uri,
+    name: eventType.name,
+    duration: eventType.duration,
+    schedulingUrl: eventType.scheduling_url,
+    active: eventType.active !== false,
+    kind: eventType.kind || "solo",
+  }));
+  const current = connection.settings && typeof connection.settings === "object" ? connection.settings : {};
+  const selected = eventTypes.find((eventType) => eventType.uri === current.eventTypeUri) || eventTypes[0] || null;
+  return prisma.bookingConnection.update({
+    where: { id: connection.id },
+    data: {
+      displayName: user.name || user.email || "Calendly",
+      externalBusinessId: user.current_organization || null,
+      externalLocationId: user.uri || null,
+      bookingUrl: selected?.schedulingUrl || connection.bookingUrl || null,
+      lastSyncAt: new Date(),
+      settings: {
+        ...current,
+        userUri: user.uri || null,
+        organizationUri: user.current_organization || null,
+        accountEmail: user.email || null,
+        timezone: user.timezone || current.timezone || null,
+        eventTypes,
+        eventTypeUri: selected?.uri || null,
+        directBooking: current.directBooking !== false,
+        syncedAt: new Date().toISOString(),
+      },
+    },
+  });
+}
+
+async function ensureCalendlyWebhookSubscription(connection) {
+  if (!connection || connection.provider !== "calendly" || connection.status !== "active") return connection;
+  const current = connection.settings && typeof connection.settings === "object" ? connection.settings : {};
+  const settings = await getSettings();
+  const baseUrl = configuredPublicBaseUrl(settings);
+  const signingKey = await systemSecret("calendly_webhook_signing_key", "CALENDLY_WEBHOOK_SIGNING_KEY");
+  const callbackUrl = baseUrl ? `${baseUrl}/webhooks/calendly/${connection.id}` : "";
+  const required = {
+    organization: String(current.organizationUri || ""),
+    user: String(current.userUri || ""),
+  };
+  let warning = "";
+  let subscriptionUri = String(current.webhookSubscriptionUri || "");
+  try {
+    if (!baseUrl) throw new Error("Set the public base URL in RingPort Admin");
+    if (!signingKey) throw new Error("Save the Calendly webhook signing key in RingPort Admin");
+    if (!required.organization || !required.user) throw new Error("Sync the Calendly account before enabling booking sync");
+    if (!subscriptionUri || current.webhookCallbackUrl !== callbackUrl) {
+      const query = new URLSearchParams({
+        organization: required.organization,
+        user: required.user,
+        scope: "user",
+        count: "100",
+      });
+      const existingPayload = await calendlyApi(connection, `/webhook_subscriptions?${query}`);
+      const existing = (existingPayload.collection || []).find(
+        (item) => item.callback_url === callbackUrl && item.state !== "disabled",
+      );
+      if (existing?.uri) {
+        subscriptionUri = existing.uri;
+      } else {
+        const created = await calendlyApi(connection, "/webhook_subscriptions", {
+          method: "POST",
+          body: {
+            url: callbackUrl,
+            events: ["invitee.created", "invitee.canceled"],
+            organization: required.organization,
+            user: required.user,
+            scope: "user",
+          },
+        });
+        subscriptionUri = String(created.resource?.uri || "");
+      }
+    }
+  } catch (error) {
+    warning = error.status === 403
+      ? "Calendly denied webhook setup. Add webhooks:write and scheduled_events:read to the app, then reconnect."
+      : error.message;
+  }
+  return prisma.bookingConnection.update({
+    where: { id: connection.id },
+    data: {
+      settings: {
+        ...current,
+        webhookSubscriptionUri: subscriptionUri || null,
+        webhookCallbackUrl: callbackUrl || null,
+        webhookWarning: warning,
+        webhookSyncedAt: warning ? current.webhookSyncedAt || null : new Date().toISOString(),
+      },
+    },
+  });
+}
+
+async function deleteCalendlyWebhookSubscription(connection) {
+  const uri = String(connection?.settings?.webhookSubscriptionUri || "");
+  const subscriptionId = calendlyResourceId(uri);
+  if (!subscriptionId || !connection?.accessTokenEncrypted) return;
+  await calendlyApi(connection, `/webhook_subscriptions/${encodeURIComponent(subscriptionId)}`, { method: "DELETE" });
 }
 
 function bookingBaseUrl(settings, req = null) {
@@ -7060,6 +7336,193 @@ function bookingLinkSendTrackingUrl({ settings, req = null, config = null, token
   if (shortCode) return bookingShortTrackingUrl({ settings, req, config, shortCode });
   const url = new URL(`/book/t/${encodeURIComponent(token)}`, bookingTrackingBaseUrl({ settings, req, config }));
   return url.toString();
+}
+
+function normalizeGoalDestinationUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) throw new Error("Destination URL is required");
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("Destination URL must be a complete http(s) link");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) throw new Error("Destination URL must be a complete http(s) link");
+  if (parsed.username || parsed.password) throw new Error("Destination URLs cannot include embedded credentials");
+  return parsed.toString();
+}
+
+function normalizeGoalActionType(value) {
+  const type = String(value || "send_link").trim().toLowerCase();
+  return ["send_link", "purchase_link", "application_link", "booking_link"].includes(type) ? type : "send_link";
+}
+
+function normalizeGoalDeliveryMethod(value) {
+  const method = String(value || "sms").trim().toLowerCase();
+  return ["sms", "same_channel", "sms_and_same_channel"].includes(method) ? method : "sms";
+}
+
+function goalShortTrackingUrl({ settings, req = null, config = null, shortCode }) {
+  const url = new URL(`/${encodeURIComponent(shortCode)}`, bookingTrackingBaseUrl({ settings, req, config }));
+  return url.toString();
+}
+
+function goalTrackingUrl({ settings, req = null, config = null, goal }) {
+  if (goal.shortCode) return goalShortTrackingUrl({ settings, req, config, shortCode: goal.shortCode });
+  const url = new URL(`/goal/${encodeURIComponent(goal.clickToken)}`, bookingTrackingBaseUrl({ settings, req, config }));
+  return url.toString();
+}
+
+function goalSendTrackingUrl({ settings, req = null, config = null, token, shortCode = "" }) {
+  if (shortCode) return goalShortTrackingUrl({ settings, req, config, shortCode });
+  const url = new URL(`/goal/t/${encodeURIComponent(token)}`, bookingTrackingBaseUrl({ settings, req, config }));
+  return url.toString();
+}
+
+async function ensureGoalShortCode(goal) {
+  if (goal?.shortCode) return goal;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      return await prisma.receptionistGoal.update({ where: { id: goal.id }, data: { shortCode: await generateGoalShortCode() } });
+    } catch (error) {
+      if (error?.code !== "P2002") throw error;
+    }
+  }
+  throw new Error("Could not assign a short goal link");
+}
+
+function renderGoalMessage(template, { profile, goal, trackedUrl, customerName = "" }) {
+  const source = String(template || "Here is the {{goal_name}} link from {{business_name}}: {{goal_link}}");
+  return source
+    .replaceAll("{{business_name}}", profile.businessName)
+    .replaceAll("{{goal_name}}", goal.name)
+    .replaceAll("{{goal_link}}", trackedUrl)
+    .replaceAll("{{customer_name}}", customerName || "there")
+    .trim();
+}
+
+async function goalsDataForProfile(profile, settings = null, req = null) {
+  const activeSettings = settings || (await getSettings());
+  const config = await ensureBusinessConfig(profile);
+  const goals = await prisma.receptionistGoal.findMany({
+    where: { businessProfileId: profile.id },
+    orderBy: [{ active: "desc" }, { primaryGoal: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
+  });
+  const withCodes = [];
+  for (const goal of goals) withCodes.push(goal.active ? await ensureGoalShortCode(goal) : goal);
+  const recentSends = await prisma.goalLinkSend.findMany({
+    where: { businessProfileId: profile.id },
+    orderBy: { sentAt: "desc" },
+    take: 30,
+    include: { goal: { select: { name: true } }, lead: { select: { name: true } } },
+  });
+  return {
+    goals: withCodes.map((goal) => ({
+      ...goal,
+      trackingUrl: goal.active ? goalTrackingUrl({ settings: activeSettings, req, config, goal }) : "",
+    })),
+    recentSends,
+    totals: {
+      goals: goals.filter((goal) => goal.active).length,
+      sent: goals.reduce((sum, goal) => sum + Number(goal.sentCount || 0), 0),
+      clicked: goals.reduce((sum, goal) => sum + Number(goal.clickCount || 0), 0),
+      converted: goals.reduce((sum, goal) => sum + Number(goal.conversionCount || 0), 0),
+    },
+  };
+}
+
+async function sendGoalLink({ settings, profile, config, args = {}, lead = null, voiceCallId = null, source = "agent_tool" }) {
+  const goalId = Number(args.goalId || 0);
+  if (!goalId) throw new Error("A configured goal ID is required");
+  const goal = await prisma.receptionistGoal.findFirst({
+    where: { id: goalId, businessProfileId: profile.id, active: true },
+  });
+  if (!goal) throw new Error("The requested business goal is not available");
+  if (!goal.destinationUrl) throw new Error("This goal does not have a destination link");
+  const toPhone = normalizeE164Phone(args.phone) || normalizeE164Phone(lead?.phone) || "";
+  if (!toPhone) throw new Error("A caller phone number is required before sending this link");
+  const customerName = usableCallerName(args.name || args.customerName || lead?.name) || "Customer";
+  const clickToken = issueToken().token;
+  const shortCode = await generateGoalShortCode();
+  const trackedUrl = goalSendTrackingUrl({ settings, config, token: clickToken, shortCode });
+  const send = await prisma.goalLinkSend.create({
+    data: {
+      businessProfileId: profile.id,
+      goalId: goal.id,
+      leadId: lead?.id || null,
+      voiceCallId,
+      clickToken,
+      shortCode,
+      channel: "sms",
+      status: "queued",
+      customerName,
+      phone: toPhone,
+      email: cleanOptionalEmail(args.email) || lead?.email || null,
+      destinationUrl: goal.destinationUrl,
+      trackedUrl,
+      metadata: { source, actionType: goal.actionType, deliveryMethod: goal.deliveryMethod },
+    },
+  });
+  const message = renderGoalMessage(goal.messageTemplate, { profile, goal, trackedUrl, customerName });
+  try {
+    const delivery = await deliverBusinessMessage({
+      settings,
+      profile,
+      toPhone,
+      message,
+      purpose: "goal_link",
+      leadId: lead?.id || null,
+      voiceCallId,
+      metadata: { source, goalId: goal.id, goalLinkSendId: send.id, trackedUrl, destinationUrl: goal.destinationUrl },
+    });
+    const deliveredAt = ["sent", "delivery_pending"].includes(delivery.delivery?.status) ? new Date() : null;
+    await prisma.$transaction([
+      prisma.goalLinkSend.update({
+        where: { id: send.id },
+        data: {
+          status: "sent",
+          deliveredAt,
+          metadata: {
+            source,
+            actionType: goal.actionType,
+            deliveryMethod: goal.deliveryMethod,
+            messageDeliveryId: delivery.delivery?.id || null,
+            deliveryProvider: delivery.provider,
+          },
+        },
+      }),
+      prisma.receptionistGoal.update({
+        where: { id: goal.id },
+        data: { sentCount: { increment: 1 }, lastSentAt: new Date() },
+      }),
+    ]);
+    if (lead?.id) {
+      await prisma.lead.update({
+        where: { id: lead.id },
+        data: {
+          extractedFields: {
+            ...(lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {}),
+            latestGoalLink: { goalId: goal.id, goalName: goal.name, goalLinkSendId: send.id, sentAt: new Date().toISOString(), trackedUrl },
+          },
+        },
+      });
+    }
+    return {
+      ok: true,
+      sent: true,
+      completed: false,
+      status: "link_sent",
+      goalId: goal.id,
+      goalName: goal.name,
+      confirmationMessage: goal.confirmationMessage || "I sent the link. Please open it to continue.",
+    };
+  } catch (error) {
+    await prisma.goalLinkSend.update({
+      where: { id: send.id },
+      data: { status: "failed", metadata: { source, actionType: goal.actionType, error: error.message } },
+    }).catch(() => null);
+    throw error;
+  }
 }
 
 function bookingFollowupConfig(config = {}) {
@@ -7220,7 +7683,13 @@ function bookingDestinationUrl(send) {
   try {
     const url = new URL(destination);
     const source = bookingSourceValue(send);
-    if (source) url.searchParams.set("bookingSource", source);
+    if (source && send?.bookingLink?.provider === "calendly") {
+      url.searchParams.set("utm_source", "ringport");
+      url.searchParams.set("utm_medium", "ai_receptionist");
+      url.searchParams.set("utm_content", source);
+    } else if (source) {
+      url.searchParams.set("bookingSource", source);
+    }
     return url.toString();
   } catch {
     return destination;
@@ -7288,36 +7757,47 @@ async function bookingDataForProfile(profile, settings = null, req = null) {
     where: { businessProfileId: profile.id },
     orderBy: [{ provider: "asc" }],
   });
-  const activeConnection = connections.find((connection) => connection.provider === "vagaro") || null;
-  const [services, professionals, links, webhookEvents] = activeConnection
+  const activeProvider = normalizedBookingProvider(config.calendarProvider);
+  const activeConnection = connections.find((connection) => connection.provider === activeProvider) || null;
+  const vagaroConnection = connections.find((connection) => connection.provider === "vagaro") || null;
+  const [services, professionals, links, webhookEvents, googleSecret, calendlySecret] = vagaroConnection
     ? await Promise.all([
         prisma.bookingService.findMany({
-          where: { connectionId: activeConnection.id },
+          where: { connectionId: vagaroConnection.id },
           orderBy: [{ active: "desc" }, { sortOrder: "asc" }, { name: "asc" }],
           include: { professionals: { include: { professional: true } } },
         }),
         prisma.bookingProfessional.findMany({
-          where: { connectionId: activeConnection.id },
+          where: { connectionId: vagaroConnection.id },
           orderBy: [{ active: "desc" }, { displayName: "asc" }],
           include: { services: { include: { service: true } } },
         }),
         prisma.bookingLink.findMany({
-          where: { connectionId: activeConnection.id, active: true, serviceId: null, professionalId: null },
+          where: { connectionId: vagaroConnection.id, active: true, serviceId: null, professionalId: null },
           orderBy: [{ active: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
           include: { service: true, professional: true },
         }),
         prisma.bookingWebhookEvent.findMany({
-          where: { connectionId: activeConnection.id },
+          where: { connectionId: vagaroConnection.id },
           orderBy: { receivedAt: "desc" },
           take: 20,
         }),
+        systemSecretConfigured("google_calendar_client_secret", "GOOGLE_CALENDAR_CLIENT_SECRET"),
+        systemSecretConfigured("calendly_client_secret", "CALENDLY_CLIENT_SECRET"),
       ])
-    : [[], [], [], []];
+    : [
+        [],
+        [],
+        [],
+        [],
+        await systemSecretConfigured("google_calendar_client_secret", "GOOGLE_CALENDAR_CLIENT_SECRET"),
+        await systemSecretConfigured("calendly_client_secret", "CALENDLY_CLIENT_SECRET"),
+      ];
   const baseWebhookUrl = `${bookingBaseUrl(activeSettings, req)}/webhooks/vagaro`;
   let webhookUrl = baseWebhookUrl;
-  if (activeConnection?.webhookSecretEncrypted) {
+  if (vagaroConnection?.webhookSecretEncrypted) {
     const url = new URL(baseWebhookUrl);
-    url.searchParams.set("token", decryptOptional(activeConnection.webhookSecretEncrypted));
+    url.searchParams.set("token", decryptOptional(vagaroConnection.webhookSecretEncrypted));
     webhookUrl = url.toString();
   }
   const linksWithShortCodes = [];
@@ -7332,6 +7812,20 @@ async function bookingDataForProfile(profile, settings = null, req = null) {
     webhookUrl,
     baseWebhookUrl,
     trackingBaseUrl: normalizeBookingTrackingBaseUrl(config.bookingTrackingBaseUrl),
+    platformConnections: {
+      googleCalendar: {
+        configured: Boolean((activeSettings.googleCalendarClientId || process.env.GOOGLE_CALENDAR_CLIENT_ID) && googleSecret.configured),
+        callbackUrl: configuredPublicBaseUrl(activeSettings)
+          ? `${configuredPublicBaseUrl(activeSettings)}/api/calendar/oauth/google_calendar/callback`
+          : "",
+      },
+      calendly: {
+        configured: Boolean((activeSettings.calendlyClientId || process.env.CALENDLY_CLIENT_ID) && calendlySecret.configured),
+        callbackUrl: configuredPublicBaseUrl(activeSettings)
+          ? `${configuredPublicBaseUrl(activeSettings)}/api/calendar/oauth/calendly/callback`
+          : "",
+      },
+    },
   };
 }
 
@@ -7774,7 +8268,9 @@ async function matchBookingLinkSendToAppointment({ connection, appointment, payl
     .catch(() => null);
   const followup = bookingFollowupConfig(config || {});
   const cutoff = new Date(Date.now() - followup.matchWindowHours * 60 * 60 * 1000);
-  const payloadSourceToken = bookingSourceToken(payload.bookingSource || payload.booking_source || payload.source);
+  const payloadSourceToken = bookingSourceToken(
+    payload.bookingSource || payload.booking_source || payload.source || payload.tracking?.utm_content,
+  );
   let send = payloadSourceToken
     ? await prisma.bookingLinkSend.findFirst({
         where: { businessProfileId: connection.businessProfileId, clickToken: payloadSourceToken },
@@ -7985,6 +8481,113 @@ async function processVagaroWebhookEvent(webhookEvent, connection) {
       processedAt: new Date(),
       payload: { ...event, processingResult: result },
     },
+  });
+  return result;
+}
+
+async function processCalendlyWebhookEvent(webhookEvent, connection) {
+  const event = webhookEvent.payload || {};
+  const payload = event.payload || {};
+  const profile = await prisma.businessProfile.findUnique({ where: { id: connection.businessProfileId } });
+  if (!profile) throw new Error("Business profile was not found");
+  const eventType = String(event.event || webhookEvent.eventType || "").toLowerCase();
+  const eventUri = String(payload.event || payload.scheduled_event?.uri || "");
+  const eventId = calendlyResourceId(eventUri);
+  if (!eventId) throw new Error("Calendly webhook is missing the scheduled event ID");
+  let scheduledEvent = payload.scheduled_event && typeof payload.scheduled_event === "object" ? payload.scheduled_event : null;
+  if (!scheduledEvent?.start_time || !scheduledEvent?.event_type) {
+    const eventPayload = await calendlyApi(connection, `/scheduled_events/${encodeURIComponent(eventId)}`);
+    scheduledEvent = eventPayload.resource || scheduledEvent || {};
+  }
+  const configuredEventType = String(connection.settings?.eventTypeUri || "");
+  if (configuredEventType && scheduledEvent.event_type && scheduledEvent.event_type !== configuredEventType) {
+    const result = { skipped: true, reason: "different_event_type", eventTypeUri: scheduledEvent.event_type };
+    await prisma.bookingWebhookEvent.update({
+      where: { id: webhookEvent.id },
+      data: { status: "processed", processedAt: new Date(), payload: { ...event, processingResult: result } },
+    });
+    return result;
+  }
+  const inviteeId = calendlyResourceId(payload.uri) || crypto.createHash("sha256").update(`${eventId}:${payload.email || payload.name || "invitee"}`).digest("hex");
+  const cancelled = eventType === "invitee.canceled" || String(payload.status || scheduledEvent.status || "").toLowerCase() === "canceled";
+  const status = cancelled ? "cancelled" : "confirmed";
+  const tracking = payload.tracking && typeof payload.tracking === "object" ? payload.tracking : {};
+  const questions = Array.isArray(payload.questions_and_answers) ? payload.questions_and_answers : [];
+  const customerPhone = normalizeE164Phone(payload.text_reminder_number || payload.phone || "");
+  const customerEmail = String(payload.email || "").trim().toLowerCase();
+  const scheduledStart = scheduledEvent.start_time ? new Date(scheduledEvent.start_time) : null;
+  const scheduledEnd = scheduledEvent.end_time ? new Date(scheduledEvent.end_time) : null;
+  const directAppointment = await prisma.appointment.findFirst({
+    where: {
+      businessName: profile.businessName,
+      website: profile.website,
+      calendarProvider: "calendly",
+      externalId: eventId,
+    },
+  });
+  const existingAppointment = await prisma.bookingAppointment.findUnique({
+    where: { connectionId_externalId: { connectionId: connection.id, externalId: inviteeId } },
+  });
+  const data = {
+    businessProfileId: connection.businessProfileId,
+    connectionId: connection.id,
+    provider: "calendly",
+    calendarEventId: eventId,
+    customerName: String(payload.name || "").trim() || null,
+    phone: customerPhone || null,
+    email: customerEmail || null,
+    serviceExternalId: calendlyResourceId(scheduledEvent.event_type) || null,
+    serviceTitle: scheduledEvent.name || null,
+    bookingStatus: payload.status || scheduledEvent.status || null,
+    status,
+    source: tracking.utm_source || "calendly_webhook",
+    scheduledStart,
+    scheduledEnd,
+    timezone: payload.timezone || connection.settings?.timezone || null,
+    bookingUrl: connection.bookingUrl || null,
+    manageUrl: cancelled ? null : payload.reschedule_url || payload.cancel_url || null,
+    notes: questions.map((item) => `${item.question || "Question"}: ${item.answer || ""}`).join("\n") || null,
+    raw: jsonSafe({ invitee: payload, scheduledEvent }),
+  };
+  const appointment = await prisma.bookingAppointment.upsert({
+    where: { connectionId_externalId: { connectionId: connection.id, externalId: inviteeId } },
+    create: { ...data, externalId: inviteeId },
+    update: data,
+  });
+  if (directAppointment && cancelled && directAppointment.status !== "cancelled") {
+    await prisma.appointment.update({
+      where: { id: directAppointment.id },
+      data: { status: "cancelled", bookingKey: null },
+    });
+  }
+  const match = cancelled
+    ? null
+    : await matchBookingLinkSendToAppointment({
+        connection,
+        appointment,
+        payload: { ...payload, tracking, bookingSource: tracking.utm_content || "" },
+      });
+  let businessSummaryDelivery = null;
+  if (!cancelled && !existingAppointment && !directAppointment) {
+    try {
+      const config = await ensureBusinessConfig(profile);
+      const settings = await getSettings();
+      businessSummaryDelivery = await sendBusinessAppointmentSummary({
+        settings,
+        profile,
+        config,
+        appointment: { ...appointment, calendarProvider: "calendly" },
+        source: "calendly_booking_webhook",
+      });
+    } catch (error) {
+      businessSummaryDelivery = { error: error.message };
+      console.warn(`[appointments] Calendly business summary failed for ${inviteeId}: ${error.message}`);
+    }
+  }
+  const result = { appointmentId: appointment.id, status, match, businessSummaryDelivery };
+  await prisma.bookingWebhookEvent.update({
+    where: { id: webhookEvent.id },
+    data: { status: "processed", processedAt: new Date(), payload: { ...event, processingResult: result } },
   });
   return result;
 }
@@ -8544,9 +9147,11 @@ async function bookingServicesForAgent(profile, args = {}) {
   };
 }
 
-async function externalBookingLinkContext({ profile, args = {} }) {
+async function externalBookingLinkContext({ profile, args = {}, provider = "vagaro" }) {
+  const normalizedProvider = normalizedBookingProvider(provider);
+  if (!["vagaro", "calendly"].includes(normalizedProvider)) throw new Error("This calendar does not use an external booking link");
   const connection = await prisma.bookingConnection.findUnique({
-    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "vagaro" } },
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: normalizedProvider } },
     include: {
       services: { where: { active: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] },
       professionals: { where: { active: true }, orderBy: [{ displayName: "asc" }] },
@@ -8578,7 +9183,11 @@ async function externalBookingLinkContext({ profile, args = {} }) {
 
 async function sendExternalBookingLink({ settings, profile, config, args = {}, lead = null, voiceCallId = null, source = "agent_tool" }) {
   await ensureConfigEntitlements(profile, config);
-  const { connection, service, professional, link } = await externalBookingLinkContext({ profile, args });
+  const { connection, service, professional, link } = await externalBookingLinkContext({
+    profile,
+    args,
+    provider: config.calendarProvider,
+  });
   const toPhone = normalizeE164Phone(args.phone) || lead?.phone || null;
   if (!toPhone) throw new Error("A caller phone number is required before sending a booking link");
   const customerName = usableCallerName(args.name || args.customerName || lead?.name) || "Customer";
@@ -10258,6 +10867,11 @@ These platform-wide rules apply to every business agent and override per-busines
 }
 
 const businessConfigInclude = {
+  businessProfile: {
+    include: {
+      receptionistGoals: { where: { active: true }, orderBy: [{ primaryGoal: "desc" }, { sortOrder: "asc" }, { id: "asc" }] },
+    },
+  },
   intakeFields: { orderBy: { sortOrder: "asc" } },
   knowledgeEntries: { orderBy: { updatedAt: "desc" } },
   priceEntries: { orderBy: { updatedAt: "desc" } },
@@ -10426,18 +11040,33 @@ function runtimeBusinessInstructions(config) {
   }));
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
-  const externalBooking = config.calendarProvider === "vagaro";
-  const simpleVagaro = externalBooking && config.providerConfig?.vagaroMode === "simple";
+  const linkOnlyCalendly = config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false;
+  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly;
+  const simpleVagaro = config.calendarProvider === "vagaro" && config.providerConfig?.vagaroMode === "simple";
+  const externalBookingName = linkOnlyCalendly ? "Calendly" : "Vagaro";
+  const goals = (config.businessProfile?.receptionistGoals || []).map((goal) => ({
+    id: goal.id,
+    name: goal.name,
+    actionType: goal.actionType,
+    primary: goal.primaryGoal,
+    whenToUse: goal.triggerInstructions || goal.description,
+    collectFirst: goal.qualificationInstructions || "none",
+    deliveryMethod: goal.deliveryMethod,
+  }));
   const localNow = DateTime.now().setZone(config.timezone || "America/Chicago");
   const currentLocalDate = (localNow.isValid ? localNow : DateTime.now().setZone("America/Chicago")).toISODate();
-  const collectsEmail = intakeCollectsEmail(config);
+  const collectsEmail = intakeCollectsEmail(config) || config.calendarProvider === "calendly";
   return `
 Business-managed receptionist configuration:
 - Appointment mode: ${
     simpleVagaro
       ? "External Vagaro Simple mode. The public service catalog is available, but live availability is not. Offer to text the booking link so the customer can view openings and book in Vagaro."
       : externalBooking
-      ? "External Vagaro booking. Check live availability, then text the booking link. Do not say the appointment is booked until the external system confirms it."
+      ? `External ${externalBookingName} booking link. ${simpleVagaro ? "Live availability is not visible." : "Check live availability first when available."} Text the booking link and do not say the appointment is booked until the external system confirms it.`
+      : config.calendarProvider === "google_calendar"
+        ? "Direct Google Calendar booking. Check live availability and create the event only after the caller confirms the exact time."
+      : config.calendarProvider === "calendly"
+        ? "Direct Calendly booking. Check live availability, collect the customer's name and email, and book only after the caller confirms the exact time."
       : config.appointmentMode === "instant"
         ? "Book available slots immediately"
         : "Create pending appointment requests"
@@ -10446,9 +11075,11 @@ Business-managed receptionist configuration:
 - Current local date: ${currentLocalDate}. Never search availability or schedule appointments before this date. If the caller asks for a past date, ask for a future date.
 - Default appointment duration: ${config.slotDurationMinutes} minutes.
 - Information to collect before an appointment: ${JSON.stringify(intake)}
-- Only ask for fields listed in Information to collect before an appointment. This per-business intake list is the final source of truth for contact collection. ${collectsEmail ? "Email is configured only if it is listed there." : "Email is not configured, so do not ask callers for email."}
+- Only ask for fields listed in Information to collect before an appointment. This per-business intake list is the final source of truth for contact collection. ${config.calendarProvider === "calendly" ? "Calendly additionally requires the customer's name and email to create the booking." : collectsEmail ? "Email is configured only if it is listed there." : "Email is not configured, so do not ask callers for email."}
 - Knowledge base: ${JSON.stringify(knowledge)}
 - Prices: ${JSON.stringify(prices)}
+- Configured business goals: ${goals.length ? JSON.stringify(goals) : "none"}
+- The primary goal is the preferred outcome only when it fits the caller's intent. Never force it when it is irrelevant.
 - Call transfer targets: ${transferTargets.length ? JSON.stringify(transferTargets) : "none"}
 - Extra instructions: ${config.extraInstructions || "none"}
 - Smart review/recovery: ${
@@ -10472,20 +11103,22 @@ ${
 - If get_available_slots returns no slots but includes available services, ask the caller to pick a service and mention two or three examples.`
 }
 
-${externalBooking ? "- For questions about Vagaro services, categories, prices, descriptions, or durations, use get_booking_services before answering. Include the caller's service words as the query when possible." : ""}
+${config.calendarProvider === "vagaro" ? "- For questions about Vagaro services, categories, prices, descriptions, or durations, use get_booking_services before answering. Include the caller's service words as the query when possible." : ""}
+- When a configured business goal matches what the caller wants, follow its collectFirst instructions, ask permission to send its link, then call send_goal_link with the matching goalId. A goal marked primary has priority only when it matches the request.
+- After send_goal_link returns sent=true, use its confirmationMessage. Say only that the link was sent; never claim the customer purchased, applied, registered, or completed the destination action.
 - When a caller gives their name, pass it as name in the next relevant tool call so the CRM lead uses their real name instead of the caller phone label.
 - The inbound caller number already counts as the phone number. Do not ask for phone again unless the caller wants a different callback number.
 - ${
   simpleVagaro
     ? "If the caller asks to book or accepts the offer to receive the booking link, call send_booking_link. Do not require a requested time or additional intake details before sending it."
-    : `If the caller asks to book and has given a time, collect only missing required intake fields, then ${externalBooking ? "call send_booking_link and tell them the link lets them confirm in Vagaro." : "call schedule_appointment."}`
+    : `If the caller asks to book and has given a time, collect only missing required intake fields, then ${externalBooking ? `call send_booking_link and tell them the link lets them confirm in ${externalBookingName}.` : "call schedule_appointment."}`
 }
 - Do not repeat the same confirmation question after the caller already answered it.
 - If the caller asks for a person, department, manager, or topic you cannot answer from the configured knowledge, ${transferTargets.length ? "offer the best matching call transfer target. Only call transfer_call after the caller agrees to be transferred. After calling transfer_call, do not call end_call." : "record a transfer_message for human follow-up."} If no transfer target fits, record a transfer_message instead.
 - If the caller asks you to tell the business something or gives an operational update such as running late, a changed arrival time, cancellation, reschedule request, access instructions, urgent issue, or callback request, confirm the final corrected detail and call transfer_message immediately. Do not merely promise to pass it along.
 - Only tell the caller the business was notified, updated, or sent their message when transfer_message returns notified=true. If it returns recorded=true and notified=false, say it was recorded for follow-up and do not claim the owner received an alert.
 
-${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? "For Vagaro, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to confirm through the link." : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
+${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? `For ${externalBookingName}, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to confirm through the link.` : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
 
 function sanitizeMetaAiQualification(value) {
@@ -10547,7 +11180,7 @@ function parseMetaAiReply(text) {
 }
 
 async function createMetaAiReply({ connection, channel, externalUserId, text, eventType, history = [], lead = null }) {
-  const [profile, settings, bookingLink] = await Promise.all([
+  const [profile, settings, bookingLink, rawGoals] = await Promise.all([
     prisma.businessProfile.findUnique({ where: { id: connection.businessProfileId } }),
     getSettings(),
     prisma.bookingLink.findFirst({
@@ -10555,10 +11188,25 @@ async function createMetaAiReply({ connection, channel, externalUserId, text, ev
       orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
       select: { url: true, clickToken: true, shortCode: true },
     }),
+    prisma.receptionistGoal.findMany({
+      where: { businessProfileId: connection.businessProfileId, active: true },
+      orderBy: [{ primaryGoal: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
+      take: 20,
+    }),
   ]);
   if (!profile) throw new Error("The connected RingPort business was not found");
   const config = await ensureBusinessConfig(profile);
   const metaBookingUrl = bookingLink ? bookingLinkTrackingUrl({ settings, config, link: bookingLink }) : "";
+  const goalsWithCodes = [];
+  for (const goal of rawGoals) goalsWithCodes.push(await ensureGoalShortCode(goal));
+  const metaGoals = goalsWithCodes.map((goal) => ({
+    id: goal.id,
+    name: goal.name,
+    primary: goal.primaryGoal,
+    whenToUse: goal.triggerInstructions || goal.description,
+    collectFirst: goal.qualificationInstructions || "none",
+    link: goalTrackingUrl({ settings, config, goal }),
+  }));
   const publicProfile = publicBusinessProfile(profile, config);
   const rawProfile = profile.rawData && typeof profile.rawData === "object" && !Array.isArray(profile.rawData) ? profile.rawData : {};
   const knowledge = (config.knowledgeEntries || []).slice(0, 150).map(({ question, answer, category }) => ({ question, answer, category }));
@@ -10599,6 +11247,7 @@ Business facts:
 - FAQ and knowledge: ${JSON.stringify([...(rawProfile.faq || []), ...knowledge])}
 - Price list: ${JSON.stringify(prices)}
 - Booking link: ${metaBookingUrl || "none configured"}
+- Configured outcome links: ${metaGoals.length ? JSON.stringify(metaGoals) : "none configured"}
 - Business instructions: ${config.extraInstructions || "none"}
 - Reply language: ${config.language || "English"}
 - Known lead qualification: ${JSON.stringify(currentQualification)}
@@ -10609,6 +11258,7 @@ Text-channel rules:
 - Use only the configured business facts. If a fact is unavailable, say the business can follow up.
 - Never claim an appointment was booked, a message was delivered to the owner, or an external action was completed unless this conversation contains a confirmed result.
 - You cannot book an appointment or check live availability in this chat. If a booking link is configured, share it when the customer wants to book; otherwise collect their request for business follow-up.
+- If a configured outcome link matches the customer's request, follow its collectFirst guidance and share that exact tracked link. A primary goal has priority only when it fits the customer's intent. Say the link was shared, never that the purchase, application, registration, or other destination action was completed.
 - The customer's message is recorded in RingPort for the business, so you may say it has been noted. Do not say a person has already read it.
 - Do not ask for sensitive information. Collect only ordinary lead details necessary to answer or arrange follow-up.
 - Do not send unsolicited promotions. Reply only because the person just messaged or commented.
@@ -10707,9 +11357,11 @@ function toolDeclarations(config) {
   const appointmentRequired = ["start"];
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
-  const externalBooking = config.calendarProvider === "vagaro";
-  const simpleVagaro = externalBooking && config.providerConfig?.vagaroMode === "simple";
-  const collectsEmail = intakeCollectsEmail(config);
+  const linkOnlyCalendly = config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false;
+  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly;
+  const simpleVagaro = config.calendarProvider === "vagaro" && config.providerConfig?.vagaroMode === "simple";
+  const goals = config.businessProfile?.receptionistGoals || [];
+  const collectsEmail = intakeCollectsEmail(config) || config.calendarProvider === "calendly";
   const optionalEmailProperty = collectsEmail ? { email: { type: "STRING", description: "Customer email if configured and known." } } : {};
   for (const field of config.intakeFields) {
     appointmentProperties[field.fieldKey] = {
@@ -10719,6 +11371,12 @@ function toolDeclarations(config) {
         : field.label,
     };
     if (field.required) appointmentRequired.push(field.fieldKey);
+  }
+  if (config.calendarProvider === "calendly") {
+    if (!appointmentProperties.name) appointmentProperties.name = { type: "STRING", description: "Customer's full name, required by Calendly." };
+    if (!appointmentProperties.email) appointmentProperties.email = { type: "STRING", description: "Customer email, required by Calendly." };
+    if (!appointmentRequired.includes("name")) appointmentRequired.push("name");
+    if (!appointmentRequired.includes("email")) appointmentRequired.push("email");
   }
   return [
     ...(!simpleVagaro
@@ -10745,7 +11403,7 @@ function toolDeclarations(config) {
           },
         ]
       : []),
-    ...(externalBooking
+    ...(config.calendarProvider === "vagaro"
       ? [
           {
             name: "get_booking_services",
@@ -10758,12 +11416,16 @@ function toolDeclarations(config) {
               },
             },
           },
+        ]
+      : []),
+    ...(externalBooking
+      ? [
           {
             name: "send_booking_link",
             description:
               simpleVagaro
                 ? "Send the Vagaro booking link by text after the customer agrees. The customer uses it to see live availability and book."
-                : "Send the external booking link by text after checking availability. Use this for Vagaro instead of directly booking the appointment.",
+                : `Send the external booking link by text after checking availability. Use this for ${linkOnlyCalendly ? "Calendly" : "Vagaro"} instead of directly booking the appointment.`,
             parameters: {
               type: "OBJECT",
               properties: {
@@ -10786,7 +11448,7 @@ function toolDeclarations(config) {
             name: "schedule_appointment",
             description:
               externalBooking
-                ? "For Vagaro, do not directly book. This records a booking-link request and sends the external booking link."
+                ? `For ${linkOnlyCalendly ? "Calendly" : "Vagaro"}, do not directly book. This records a booking-link request and sends the external booking link.`
                 : config.appointmentMode === "instant"
                   ? "Book a confirmed appointment in an available calendar slot."
                   : "Create a pending appointment request in an available calendar slot.",
@@ -10809,6 +11471,26 @@ function toolDeclarations(config) {
                 },
               },
               required: ["confirmationCode"],
+            },
+          },
+        ]
+      : []),
+    ...(goals.length
+      ? [
+          {
+            name: "send_goal_link",
+            description: `Send a configured tracked business-outcome link by text only after the customer agrees. Available goals: ${goals
+              .map((goal) => `${goal.id}: ${goal.name}${goal.primaryGoal ? " (primary)" : ""}`)
+              .join("; ")}. This sends a link; it does not prove the destination action was completed.`,
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                goalId: { type: "INTEGER", description: "Configured goal ID from the available goals list." },
+                name: { type: "STRING", description: "Customer name if known." },
+                phone: { type: "STRING", description: "Customer phone. If omitted, the inbound caller number is used." },
+                email: { type: "STRING", description: "Customer email if already known." },
+              },
+              required: ["goalId"],
             },
           },
         ]
@@ -11075,8 +11757,28 @@ async function runToolCall(profile, config, functionCall, context = {}) {
     });
   }
 
+  if (functionCall.name === "send_goal_link") {
+    const settings = await getSettings();
+    const goalArgs = {
+      ...args,
+      phone: normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null,
+      email: cleanOptionalEmail(args.email) || contextLead?.email || null,
+      name: args.name || args.customer_name || args.customerName || contextLead?.name || "Customer",
+    };
+    const lead = await updateLeadContactFromTool({ lead: contextLead, args: goalArgs, config, fallbackPhone: context.fromNumber });
+    return sendGoalLink({
+      settings,
+      profile,
+      config,
+      args: goalArgs,
+      lead,
+      voiceCallId: context.voiceCallId || null,
+      source: context.channel === "phone" ? "phone_agent_goal_link" : "browser_agent_goal_link",
+    });
+  }
+
   if (functionCall.name === "schedule_appointment") {
-    if (config.calendarProvider === "vagaro") {
+    if (config.calendarProvider === "vagaro" || (config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false)) {
       const settings = await getSettings();
       const linkArgs = {
         ...args,
@@ -11100,7 +11802,9 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       config.intakeFields.map((field) => [field.fieldKey, args[field.fieldKey] ?? null]),
     );
     const appointmentPhone = normalizeE164Phone(args.phone) || context.fromNumber || contextLead?.phone || null;
-    const appointmentEmail = intakeCollectsEmail(config) && args.email ? String(args.email).trim().toLowerCase() : contextLead?.email || null;
+    const appointmentEmail = (intakeCollectsEmail(config) || config.calendarProvider === "calendly") && args.email
+      ? String(args.email).trim().toLowerCase()
+      : contextLead?.email || null;
     const appointmentName = args.name || args.customer_name || args.customerName || contextLead?.name || "unknown";
     if (appointmentPhone) intakeData.phone = intakeData.phone || appointmentPhone;
     if (appointmentEmail) intakeData.email = intakeData.email || appointmentEmail;
@@ -11118,6 +11822,7 @@ async function runToolCall(profile, config, functionCall, context = {}) {
       },
       intakeData,
       reason: args.reason,
+      ...bookingProviderHelpers(),
     });
     const confirmationCode = appointmentConfirmationCode(appointment.id);
     const settings = await getSettings();
@@ -13555,6 +14260,9 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
       metaAccessToken: secretState("meta_capi_access_token", "META_CAPI_ACCESS_TOKEN"),
       metaAppSecret: secretState("meta_app_secret", "META_APP_SECRET"),
       metaWebhookVerifyToken: secretState("meta_webhook_verify_token", "META_WEBHOOK_VERIFY_TOKEN"),
+      googleCalendarClientSecret: secretState("google_calendar_client_secret", "GOOGLE_CALENDAR_CLIENT_SECRET"),
+      calendlyClientSecret: secretState("calendly_client_secret", "CALENDLY_CLIENT_SECRET"),
+      calendlyWebhookSigningKey: secretState("calendly_webhook_signing_key", "CALENDLY_WEBHOOK_SIGNING_KEY"),
       tiktokAccessToken: secretState("tiktok_events_api_access_token", "TIKTOK_EVENTS_API_ACCESS_TOKEN"),
       redditConversionAccessToken: secretState("reddit_conversion_access_token", "REDDIT_CONVERSION_ACCESS_TOKEN"),
       openAiAdsCapiKey: secretState("openai_ads_capi_key", "OPENAI_ADS_CAPI_KEY"),
@@ -13747,6 +14455,8 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         metaLoginConfigurationId: String(req.body.metaLoginConfigurationId || "").trim(),
         metaGraphApiVersion: String(req.body.metaGraphApiVersion || "v24.0").trim() || "v24.0",
         metaMessagingEnabled: Boolean(req.body.metaMessagingEnabled),
+        googleCalendarClientId: String(req.body.googleCalendarClientId || "").trim(),
+        calendlyClientId: String(req.body.calendlyClientId || "").trim(),
         tiktokPixelId: String(req.body.tiktokPixelId || "").trim(),
         redditPixelId: String(req.body.redditPixelId || "").trim(),
         redditTestId: String(req.body.redditTestId || "").trim(),
@@ -13848,6 +14558,9 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
           typeof req.body.metaGraphApiVersion === "string" ? req.body.metaGraphApiVersion.trim() || "v24.0" : undefined,
         metaMessagingEnabled:
           typeof req.body.metaMessagingEnabled === "boolean" ? req.body.metaMessagingEnabled : undefined,
+        googleCalendarClientId:
+          typeof req.body.googleCalendarClientId === "string" ? req.body.googleCalendarClientId.trim() : undefined,
+        calendlyClientId: typeof req.body.calendlyClientId === "string" ? req.body.calendlyClientId.trim() : undefined,
         tiktokPixelId: typeof req.body.tiktokPixelId === "string" ? req.body.tiktokPixelId.trim() : undefined,
         redditPixelId: typeof req.body.redditPixelId === "string" ? req.body.redditPixelId.trim() : undefined,
         redditTestId: typeof req.body.redditTestId === "string" ? req.body.redditTestId.trim() : undefined,
@@ -13884,11 +14597,26 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
       saveSystemSecret("meta_capi_access_token", req.body.metaAccessToken),
       saveSystemSecret("meta_app_secret", req.body.metaAppSecret),
       saveSystemSecret("meta_webhook_verify_token", req.body.metaWebhookVerifyToken),
+      saveSystemSecret("google_calendar_client_secret", req.body.googleCalendarClientSecret),
+      saveSystemSecret("calendly_client_secret", req.body.calendlyClientSecret),
+      saveSystemSecret("calendly_webhook_signing_key", req.body.calendlyWebhookSigningKey),
       saveSystemSecret("tiktok_events_api_access_token", req.body.tiktokAccessToken),
       saveSystemSecret("reddit_conversion_access_token", req.body.redditConversionAccessToken),
       saveSystemSecret("openai_ads_capi_key", req.body.openAiAdsCapiKey),
     ]);
-    res.json({ ok: true, settings });
+    let calendlyConnectionsChecked = 0;
+    if (
+      typeof req.body.calendlyWebhookSigningKey === "string" ||
+      typeof req.body.calendlyClientSecret === "string" ||
+      typeof req.body.publicBaseUrl === "string"
+    ) {
+      const calendlyConnections = await prisma.bookingConnection.findMany({
+        where: { provider: "calendly", status: "active", accessTokenEncrypted: { not: null } },
+      });
+      calendlyConnectionsChecked = calendlyConnections.length;
+      await Promise.allSettled(calendlyConnections.map((connection) => ensureCalendlyWebhookSubscription(connection)));
+    }
+    res.json({ ok: true, settings, calendlyConnectionsChecked });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -14686,6 +15414,270 @@ app.get("/api/business-admin/booking", async (req, res) => {
   }
 });
 
+function calendarConnectionCompletionPage({ title, message, success }) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${htmlEscape(title)} | RingPort</title>
+    <style>body{margin:0;background:#f3f8f5;color:#10251f;font:16px/1.5 system-ui,sans-serif}.card{width:min(600px,calc(100% - 32px));margin:64px auto;background:#fff;border:1px solid #d9e7df;border-radius:18px;padding:30px}.mark{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;background:${success ? "#def5e9" : "#fff0e8"};color:${success ? "#16705a" : "#a64022"};font-size:24px;font-weight:800}h1{margin:16px 0 8px}.message{color:#607068}a{display:inline-block;margin-top:18px;color:#fff;background:#16705a;border-radius:10px;padding:11px 16px;text-decoration:none;font-weight:700}</style></head>
+    <body><main class="card"><div class="mark">${success ? "✓" : "!"}</div><h1>${htmlEscape(title)}</h1><p class="message">${htmlEscape(message)}</p><a href="/?open=appointments&tab=calendar">Return to appointments</a></main></body></html>`;
+}
+
+app.post("/api/business-admin/booking/oauth/:provider/start", async (req, res) => {
+  try {
+    const provider = calendarOAuthProvider(req.params.provider);
+    const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const oauth = await calendarOAuthConfig(provider);
+    const state = issueToken().token;
+    const codeVerifier = crypto.randomBytes(48).toString("base64url");
+    await prisma.bookingOAuthSession.deleteMany({ where: { userId: req.user.id, expiresAt: { lte: new Date() } } });
+    await prisma.bookingOAuthSession.create({
+      data: {
+        stateHash: sessionTokenHash(state),
+        businessProfileId: profile.id,
+        userId: req.user.id,
+        provider,
+        codeVerifierEncrypted: encryptSecret(codeVerifier),
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      },
+    });
+    const challenge = oauthCodeChallenge(codeVerifier);
+    const url = provider === "google_calendar"
+      ? new URL("https://accounts.google.com/o/oauth2/v2/auth")
+      : new URL("https://auth.calendly.com/oauth/authorize");
+    url.searchParams.set("client_id", oauth.clientId);
+    url.searchParams.set("redirect_uri", oauth.callbackUrl);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("state", state);
+    url.searchParams.set("code_challenge", challenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    if (provider === "google_calendar") {
+      url.searchParams.set(
+        "scope",
+        [
+          "https://www.googleapis.com/auth/calendar.events.owned",
+          "https://www.googleapis.com/auth/calendar.events.freebusy",
+        ].join(" "),
+      );
+      url.searchParams.set("access_type", "offline");
+      url.searchParams.set("include_granted_scopes", "true");
+      url.searchParams.set("prompt", "consent");
+    } else {
+      url.searchParams.set(
+        "scope",
+        [
+          "users:read",
+          "event_types:read",
+          "availability:read",
+          "scheduled_events:read",
+          "scheduled_events:write",
+          "webhooks:write",
+        ].join(" "),
+      );
+    }
+    res.json({ url: url.toString(), callbackUrl: oauth.callbackUrl });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/calendar/oauth/:provider/callback", async (req, res) => {
+  const providerLabel = (() => {
+    try {
+      return calendarProviderLabel(calendarOAuthProvider(req.params.provider));
+    } catch {
+      return "Calendar";
+    }
+  })();
+  try {
+    const provider = calendarOAuthProvider(req.params.provider);
+    const state = String(req.query.state || "");
+    const code = String(req.query.code || "");
+    if (!state || !code) throw new Error(String(req.query.error_description || req.query.error || "Calendar authorization was cancelled"));
+    const session = await prisma.bookingOAuthSession.findUnique({ where: { stateHash: sessionTokenHash(state) } });
+    if (!session || session.provider !== provider || session.expiresAt <= new Date() || session.usedAt) {
+      throw new Error("This calendar connection link has expired. Start again from RingPort.");
+    }
+    const oauth = await calendarOAuthConfig(provider);
+    const codeVerifier = decryptOptional(session.codeVerifierEncrypted);
+    const token = provider === "google_calendar"
+      ? await tokenEndpointRequest("https://oauth2.googleapis.com/token", {
+          body: {
+            code,
+            client_id: oauth.clientId,
+            client_secret: oauth.clientSecret,
+            redirect_uri: oauth.callbackUrl,
+            grant_type: "authorization_code",
+            code_verifier: codeVerifier,
+          },
+        })
+      : await tokenEndpointRequest("https://auth.calendly.com/oauth/token", {
+          body: {
+            code,
+            client_id: oauth.clientId,
+            redirect_uri: oauth.callbackUrl,
+            grant_type: "authorization_code",
+            code_verifier: codeVerifier,
+          },
+          basicAuth: { clientId: oauth.clientId, clientSecret: oauth.clientSecret },
+        });
+    const existing = await prisma.bookingConnection.findUnique({
+      where: { businessProfileId_provider: { businessProfileId: session.businessProfileId, provider } },
+    });
+    const access = encryptedField(token.access_token);
+    const refresh = token.refresh_token ? encryptedField(token.refresh_token) : null;
+    let connection = await prisma.bookingConnection.upsert({
+      where: { businessProfileId_provider: { businessProfileId: session.businessProfileId, provider } },
+      create: {
+        businessProfileId: session.businessProfileId,
+        provider,
+        status: "active",
+        workflowMode: "direct_booking",
+        displayName: providerLabel,
+        accessTokenEncrypted: access.encrypted,
+        refreshTokenEncrypted: refresh?.encrypted || null,
+        accessTokenExpiresAt: new Date(Date.now() + Math.max(60, Number(token.expires_in || 3600)) * 1000),
+        settings: provider === "google_calendar"
+          ? { calendarId: "primary", directBooking: true, connectedAt: new Date().toISOString() }
+          : { directBooking: true, connectedAt: new Date().toISOString() },
+      },
+      update: {
+        status: "active",
+        workflowMode: provider === "calendly" && existing?.settings?.directBooking === false ? "booking_link" : "direct_booking",
+        accessTokenEncrypted: access.encrypted,
+        refreshTokenEncrypted: refresh?.encrypted || existing?.refreshTokenEncrypted || undefined,
+        accessTokenExpiresAt: new Date(Date.now() + Math.max(60, Number(token.expires_in || 3600)) * 1000),
+        settings: {
+          ...(existing?.settings && typeof existing.settings === "object" ? existing.settings : {}),
+          connectedAt: new Date().toISOString(),
+          directBooking: existing?.settings?.directBooking !== false,
+          ...(provider === "google_calendar" ? { calendarId: existing?.settings?.calendarId || "primary" } : {}),
+        },
+      },
+    });
+    if (provider === "calendly") {
+      connection = await syncCalendlyConnection(connection);
+      connection = await ensureCalendlyWebhookSubscription(connection);
+    }
+    if (provider === "calendly" && connection.bookingUrl) {
+      await ensureGeneralBookingLinkForConnection(connection, { label: "Book with Calendly", url: connection.bookingUrl, sortOrder: 0 });
+    }
+    await prisma.businessConfig.update({
+      where: { businessProfileId: session.businessProfileId },
+      data: {
+        calendarProvider: provider,
+        providerConfig: {
+          provider,
+          connectionId: connection.id,
+          workflowMode: connection.workflowMode,
+          directBooking: connection.settings?.directBooking !== false,
+        },
+        ...(connection.settings?.timezone ? { timezone: connection.settings.timezone } : {}),
+      },
+    });
+    await prisma.bookingOAuthSession.update({ where: { id: session.id }, data: { usedAt: new Date(), codeVerifierEncrypted: null } });
+    res.send(calendarConnectionCompletionPage({
+      title: `${providerLabel} connected`,
+      message: provider === "calendly" && !connection.settings?.eventTypeUri
+        ? "The account is connected. Create or activate a Calendly event type, then sync it in RingPort."
+        : "RingPort can now read availability and book confirmed appointments.",
+      success: true,
+    }));
+  } catch (error) {
+    res.status(400).send(calendarConnectionCompletionPage({ title: `Could not connect ${providerLabel}`, message: error.message, success: false }));
+  }
+});
+
+app.put("/api/business-admin/booking/connections/:provider", async (req, res) => {
+  try {
+    const provider = calendarOAuthProvider(req.params.provider);
+    const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const connection = await prisma.bookingConnection.findUnique({
+      where: { businessProfileId_provider: { businessProfileId: profile.id, provider } },
+    });
+    if (!connection || connection.status !== "active" || !connection.accessTokenEncrypted) {
+      throw new Error(`Connect ${calendarProviderLabel(provider)} first`);
+    }
+    const current = connection.settings && typeof connection.settings === "object" ? connection.settings : {};
+    const directBooking = provider === "google_calendar" ? true : req.body.directBooking !== false;
+    const nextSettings = { ...current, directBooking };
+    if (provider === "google_calendar") {
+      nextSettings.calendarId = String(req.body.calendarId || current.calendarId || "primary").trim() || "primary";
+    } else {
+      const eventTypeUri = String(req.body.eventTypeUri || current.eventTypeUri || "").trim();
+      if (eventTypeUri && !(current.eventTypes || []).some((item) => item.uri === eventTypeUri)) throw new Error("Choose a Calendly event type from the connected account");
+      nextSettings.eventTypeUri = eventTypeUri || null;
+    }
+    const selectedEvent = (nextSettings.eventTypes || []).find((item) => item.uri === nextSettings.eventTypeUri);
+    const updated = await prisma.bookingConnection.update({
+      where: { id: connection.id },
+      data: {
+        status: "active",
+        workflowMode: directBooking ? "direct_booking" : "booking_link",
+        settings: nextSettings,
+        bookingUrl: selectedEvent?.schedulingUrl || connection.bookingUrl,
+      },
+    });
+    if (provider === "calendly" && updated.bookingUrl) {
+      await ensureGeneralBookingLinkForConnection(updated, { label: "Book with Calendly", url: updated.bookingUrl, sortOrder: 0 });
+    }
+    const readyConnection = provider === "calendly" ? await ensureCalendlyWebhookSubscription(updated) : updated;
+    await prisma.businessConfig.update({
+      where: { id: config.id },
+      data: {
+        calendarProvider: provider,
+        providerConfig: { provider, connectionId: readyConnection.id, workflowMode: readyConnection.workflowMode, directBooking },
+      },
+    });
+    const settings = await getSettings();
+    res.json(await bookingDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/booking/calendly/sync", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const connection = await prisma.bookingConnection.findUnique({
+      where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "calendly" } },
+    });
+    if (!connection || connection.status !== "active") throw new Error("Connect Calendly first");
+    let synced = await syncCalendlyConnection(connection);
+    synced = await ensureCalendlyWebhookSubscription(synced);
+    if (synced.bookingUrl) {
+      await ensureGeneralBookingLinkForConnection(synced, { label: "Book with Calendly", url: synced.bookingUrl, sortOrder: 0 });
+    }
+    const settings = await getSettings();
+    res.json(await bookingDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete("/api/business-admin/booking/connections/:provider", async (req, res) => {
+  try {
+    const provider = calendarOAuthProvider(req.params.provider);
+    const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const connection = await prisma.bookingConnection.findUnique({
+      where: { businessProfileId_provider: { businessProfileId: profile.id, provider } },
+    });
+    if (provider === "calendly" && connection) {
+      await deleteCalendlyWebhookSubscription(connection).catch((error) => {
+        console.warn(`[calendly] webhook disconnect cleanup failed for connection ${connection.id}: ${error.message}`);
+      });
+    }
+    await prisma.bookingConnection.updateMany({
+      where: { businessProfileId: profile.id, provider },
+      data: { status: "disabled", accessTokenEncrypted: null, refreshTokenEncrypted: null, accessTokenExpiresAt: null },
+    });
+    if (config.calendarProvider === provider) {
+      await prisma.businessConfig.update({ where: { id: config.id }, data: { calendarProvider: "internal", providerConfig: null } });
+    }
+    const settings = await getSettings();
+    res.json(await bookingDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.put("/api/business-admin/booking/vagaro", async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
@@ -14958,6 +15950,208 @@ app.delete("/api/business-admin/booking-links/:id", async (req, res) => {
   }
 });
 
+function receptionistGoalInput(body, existing = null) {
+  const name = String(body.name ?? existing?.name ?? "").trim().slice(0, 120);
+  if (!name) throw new Error("Goal name is required");
+  const destinationUrl = normalizeGoalDestinationUrl(body.destinationUrl ?? existing?.destinationUrl ?? "");
+  return {
+    name,
+    actionType: normalizeGoalActionType(body.actionType ?? existing?.actionType),
+    description: String(body.description ?? existing?.description ?? "").trim().slice(0, 1000),
+    triggerInstructions: String(body.triggerInstructions ?? existing?.triggerInstructions ?? "").trim().slice(0, 2000),
+    qualificationInstructions: String(body.qualificationInstructions ?? existing?.qualificationInstructions ?? "").trim().slice(0, 2000),
+    destinationUrl,
+    deliveryMethod: normalizeGoalDeliveryMethod(body.deliveryMethod ?? existing?.deliveryMethod),
+    messageTemplate:
+      String(body.messageTemplate ?? existing?.messageTemplate ?? "").trim().slice(0, 1200) ||
+      "Here is the {{goal_name}} link from {{business_name}}: {{goal_link}}",
+    confirmationMessage:
+      String(body.confirmationMessage ?? existing?.confirmationMessage ?? "").trim().slice(0, 500) ||
+      "I sent the link. Please open it to continue.",
+    primaryGoal: body.primaryGoal === undefined ? Boolean(existing?.primaryGoal) : Boolean(body.primaryGoal),
+    active: body.active === undefined ? existing?.active !== false : Boolean(body.active),
+    sortOrder: Number.isFinite(Number(body.sortOrder)) ? Math.round(Number(body.sortOrder)) : Number(existing?.sortOrder || 0),
+  };
+}
+
+app.get("/api/business-admin/goals", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const settings = await getSettings();
+    res.json(await goalsDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/goals", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const data = receptionistGoalInput(req.body);
+    if (data.primaryGoal) {
+      await prisma.receptionistGoal.updateMany({ where: { businessProfileId: profile.id, primaryGoal: true }, data: { primaryGoal: false } });
+    }
+    await prisma.receptionistGoal.create({
+      data: {
+        businessProfileId: profile.id,
+        ...data,
+        clickToken: issueToken().token,
+        shortCode: await generateGoalShortCode(),
+      },
+    });
+    const settings = await getSettings();
+    res.status(201).json(await goalsDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.put("/api/business-admin/goals/:id", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const existing = await prisma.receptionistGoal.findFirst({
+      where: { id: Number(req.params.id), businessProfileId: profile.id },
+    });
+    if (!existing) throw new Error("Goal was not found");
+    const data = receptionistGoalInput(req.body, existing);
+    if (data.primaryGoal) {
+      await prisma.receptionistGoal.updateMany({
+        where: { businessProfileId: profile.id, primaryGoal: true, id: { not: existing.id } },
+        data: { primaryGoal: false },
+      });
+    }
+    await prisma.receptionistGoal.update({ where: { id: existing.id }, data });
+    const settings = await getSettings();
+    res.json(await goalsDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete("/api/business-admin/goals/:id", async (req, res) => {
+  try {
+    const identity = adminRequestIdentity(req);
+    const { profile } = await adminContext(identity.businessName, identity.website, req.user);
+    await prisma.receptionistGoal.updateMany({
+      where: { id: Number(req.params.id), businessProfileId: profile.id },
+      data: { active: false, primaryGoal: false },
+    });
+    const settings = await getSettings();
+    res.json(await goalsDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post("/api/business-admin/goals/sends/:id/conversion", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const send = await prisma.goalLinkSend.findFirst({
+      where: { id: Number(req.params.id), businessProfileId: profile.id },
+    });
+    if (!send) throw new Error("Goal link send was not found");
+    if (!send.convertedAt) {
+      const now = new Date();
+      await prisma.$transaction([
+        prisma.goalLinkSend.update({ where: { id: send.id }, data: { convertedAt: now, status: "converted" } }),
+        prisma.receptionistGoal.update({
+          where: { id: send.goalId },
+          data: { conversionCount: { increment: 1 }, lastConvertedAt: now },
+        }),
+      ]);
+    }
+    const settings = await getSettings();
+    res.json(await goalsDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+async function redirectGoalLinkSend(req, res, send) {
+  if (!send || !send.goal || !send.goal.active || !send.destinationUrl) {
+    return res.status(404).send("This link is unavailable");
+  }
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.goalLinkSend.update({
+      where: { id: send.id },
+      data: {
+        status: send.convertedAt ? "converted" : "clicked",
+        firstClickedAt: send.firstClickedAt || now,
+        lastClickedAt: now,
+        clickCount: { increment: 1 },
+        metadata: {
+          ...(send.metadata && typeof send.metadata === "object" ? send.metadata : {}),
+          lastClickAt: now.toISOString(),
+          lastClickReferrer: String(req.get("referer") || ""),
+        },
+      },
+    }),
+    prisma.receptionistGoal.update({
+      where: { id: send.goalId },
+      data: { clickCount: { increment: 1 }, lastClickedAt: now },
+    }),
+    prisma.goalLinkClick.create({
+      data: {
+        businessProfileId: send.businessProfileId,
+        goalId: send.goalId,
+        goalLinkSendId: send.id,
+        leadId: send.leadId,
+        clickToken: send.clickToken,
+        sourceUrl: req.originalUrl,
+        referrer: String(req.get("referer") || ""),
+        ipAddress: adRequestIp(req),
+        userAgent: String(req.get("user-agent") || ""),
+        queryParams: jsonSafe(req.query || {}),
+      },
+    }),
+  ]);
+  if (send.leadId) {
+    const fields = send.lead?.extractedFields && typeof send.lead.extractedFields === "object" ? send.lead.extractedFields : {};
+    await prisma.lead.update({
+      where: { id: send.leadId },
+      data: {
+        extractedFields: {
+          ...fields,
+          latestGoalLink: {
+            ...(fields.latestGoalLink && typeof fields.latestGoalLink === "object" ? fields.latestGoalLink : {}),
+            goalId: send.goalId,
+            goalName: send.goal.name,
+            goalLinkSendId: send.id,
+            clickedAt: now.toISOString(),
+            clickCount: Number(send.clickCount || 0) + 1,
+          },
+        },
+      },
+    });
+  }
+  return res.redirect(send.destinationUrl);
+}
+
+async function redirectGoalLink(req, res, goal) {
+  if (!goal || !goal.active || !goal.destinationUrl) return res.status(404).send("This link is unavailable");
+  const now = new Date();
+  await prisma.$transaction([
+    prisma.receptionistGoal.update({
+      where: { id: goal.id },
+      data: { clickCount: { increment: 1 }, lastClickedAt: now },
+    }),
+    prisma.goalLinkClick.create({
+      data: {
+        businessProfileId: goal.businessProfileId,
+        goalId: goal.id,
+        clickToken: goal.clickToken,
+        sourceUrl: req.originalUrl,
+        referrer: String(req.get("referer") || ""),
+        ipAddress: adRequestIp(req),
+        userAgent: String(req.get("user-agent") || ""),
+        queryParams: jsonSafe(req.query || {}),
+      },
+    }),
+  ]);
+  return res.redirect(goal.destinationUrl);
+}
+
 async function redirectBookingLinkSend(req, res, send) {
   if (!send || !send.bookingLink || !send.bookingLink.active) return res.status(404).send("Booking link is unavailable");
   const now = new Date();
@@ -15091,6 +16285,27 @@ app.get("/book/:token", async (req, res) => {
   }
 });
 
+app.get("/goal/t/:token", async (req, res) => {
+  try {
+    const send = await prisma.goalLinkSend.findUnique({
+      where: { clickToken: req.params.token },
+      include: { goal: true, lead: true },
+    });
+    return redirectGoalLinkSend(req, res, send);
+  } catch (error) {
+    res.status(400).send(error.message);
+  }
+});
+
+app.get("/goal/:token", async (req, res) => {
+  try {
+    const goal = await prisma.receptionistGoal.findUnique({ where: { clickToken: req.params.token } });
+    return redirectGoalLink(req, res, goal);
+  } catch (error) {
+    res.status(400).send(error.message);
+  }
+});
+
 app.get("/:shortCode", async (req, res, next) => {
   const requestedCode = String(req.params.shortCode || "").trim();
   if (FAST_AGENT_SHORT_CODE_PATTERN.test(requestedCode)) {
@@ -15098,6 +16313,19 @@ app.get("/:shortCode", async (req, res, next) => {
     return res.sendFile(path.join(__dirname, "public/fastagent/index.html"));
   }
   const shortCode = requestedCode.toUpperCase();
+  if (GOAL_SHORT_CODE_PATTERN.test(shortCode)) {
+    try {
+      const send = await prisma.goalLinkSend.findUnique({
+        where: { shortCode },
+        include: { goal: true, lead: true },
+      });
+      if (send) return redirectGoalLinkSend(req, res, send);
+      const goal = await prisma.receptionistGoal.findUnique({ where: { shortCode } });
+      return redirectGoalLink(req, res, goal);
+    } catch (error) {
+      return res.status(400).send(error.message);
+    }
+  }
   if (!BOOKING_SHORT_CODE_PATTERN.test(shortCode)) return next();
   try {
     const send = await prisma.bookingLinkSend.findUnique({
@@ -15112,6 +16340,80 @@ app.get("/:shortCode", async (req, res, next) => {
     return redirectBookingLink(req, res, link);
   } catch (error) {
     res.status(400).send(error.message);
+  }
+});
+
+async function verifyCalendlyWebhookSignature(req) {
+  const signingKey = await systemSecret("calendly_webhook_signing_key", "CALENDLY_WEBHOOK_SIGNING_KEY");
+  if (!signingKey) throw new Error("Calendly webhook signing key is not configured");
+  const header = String(req.get("calendly-webhook-signature") || "");
+  const values = Object.fromEntries(
+    header.split(",").map((part) => part.trim().split("=", 2)).filter(([key, value]) => key && value),
+  );
+  const timestamp = Number(values.t);
+  const signature = String(values.v1 || "");
+  if (!Number.isFinite(timestamp) || !/^[a-f0-9]{64}$/i.test(signature) || !Buffer.isBuffer(req.rawBody)) {
+    throw new Error("Calendly webhook signature is missing or invalid");
+  }
+  if (Math.abs(Math.floor(Date.now() / 1000) - timestamp) > 180) {
+    throw new Error("Calendly webhook signature has expired");
+  }
+  const expected = crypto.createHmac("sha256", signingKey).update(`${timestamp}.${req.rawBody.toString("utf8")}`).digest();
+  const received = Buffer.from(signature, "hex");
+  if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) {
+    throw new Error("Calendly webhook signature did not match");
+  }
+}
+
+app.post("/webhooks/calendly/:connectionId", async (req, res) => {
+  const event = req.body || {};
+  const payload = event.payload || {};
+  const eventType = String(event.event || "").trim();
+  const eventKey = [eventType, payload.uri || payload.event || "", payload.updated_at || payload.created_at || ""].join(":");
+  const eventId = crypto.createHash("sha256").update(eventKey || req.rawBody || crypto.randomBytes(16)).digest("hex");
+  let webhookEvent = null;
+  try {
+    await verifyCalendlyWebhookSignature(req);
+    const connectionId = Number(req.params.connectionId);
+    if (!Number.isInteger(connectionId) || connectionId <= 0) throw new Error("Calendly webhook connection is invalid");
+    const connection = await prisma.bookingConnection.findFirst({
+      where: { id: connectionId, provider: "calendly", status: "active" },
+    });
+    if (!connection) throw new Error("Calendly connection was not found");
+    webhookEvent = await prisma.bookingWebhookEvent.upsert({
+      where: { provider_eventId: { provider: "calendly", eventId } },
+      create: {
+        businessProfileId: connection.businessProfileId,
+        connectionId: connection.id,
+        provider: "calendly",
+        eventId,
+        eventType: eventType || null,
+        action: eventType.split(".").pop() || null,
+        externalBusinessId: connection.externalBusinessId,
+        status: "received",
+        payload: event,
+      },
+      update: { status: "duplicate", payload: event },
+    });
+    if (webhookEvent.status === "duplicate") return res.json({ ok: true, duplicate: true });
+    if (!["invitee.created", "invitee.canceled"].includes(eventType)) {
+      await prisma.bookingWebhookEvent.update({
+        where: { id: webhookEvent.id },
+        data: { status: "processed", processedAt: new Date(), payload: { ...event, processingResult: { ignored: true } } },
+      });
+      return res.json({ ok: true, ignored: true });
+    }
+    await processCalendlyWebhookEvent(webhookEvent, connection);
+    res.json({ ok: true });
+  } catch (error) {
+    if (webhookEvent) {
+      await prisma.bookingWebhookEvent.update({
+        where: { id: webhookEvent.id },
+        data: { status: "failed", error: error.message, processedAt: new Date() },
+      }).catch(() => {});
+    }
+    console.warn(`[calendly] webhook failed: ${error.message}`);
+    res.status(error.message.includes("signature") ? 401 : 400).json({ ok: false, error: error.message });
   }
 });
 
@@ -15703,6 +17005,9 @@ app.post("/api/business-admin/appointments", async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
     if (config.calendarProvider === "vagaro") throw new Error("Vagaro calendars are read-only in RingPort. Send the booking link instead.");
+    if (config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false) {
+      throw new Error("Calendly is set to booking-link mode. Send the tracked Calendly link instead.");
+    }
     const customerName = String(req.body.customerName || req.body.name || "").trim();
     if (!customerName) throw new Error("Customer name is required");
     const appointment = await bookCalendarAppointment({
@@ -15723,6 +17028,7 @@ app.post("/api/business-admin/appointments", async (req, res) => {
         reason: req.body.reason ? String(req.body.reason).trim() : null,
       },
       reason: req.body.reason,
+      ...bookingProviderHelpers(),
     });
     const status = ["confirmed", "requested"].includes(String(req.body.status || "")) ? String(req.body.status) : appointment.status;
     const updated = status === appointment.status ? appointment : await prisma.appointment.update({ where: { id: appointment.id }, data: { status } });
@@ -15752,6 +17058,29 @@ app.patch("/api/business-admin/appointments/:id", async (req, res) => {
       where: { id: Number(req.params.id), businessName: profile.businessName, website: profile.website },
     });
     if (!existing) throw new Error("Appointment was not found for this business");
+    if (["google_calendar", "calendly"].includes(existing.calendarProvider)) {
+      const providerConfig = { ...config, calendarProvider: existing.calendarProvider };
+      const appointment = await updateCalendarAppointment({
+        prisma,
+        profile,
+        config: providerConfig,
+        appointment: existing,
+        start: req.body.start || existing.scheduledStart,
+        durationMinutes: req.body.durationMinutes || existing.durationMinutes,
+        customer: {
+          name: req.body.customerName === undefined ? existing.customerName : String(req.body.customerName || "Customer").trim() || "Customer",
+          phone: req.body.phone === undefined ? existing.phone : normalizeE164Phone(req.body.phone) || String(req.body.phone || "").trim() || null,
+          email: req.body.email === undefined ? existing.email : String(req.body.email || "").trim().toLowerCase() || null,
+        },
+        reason: req.body.reason === undefined ? existing.reason : String(req.body.reason || "").trim() || null,
+        ...bookingProviderHelpers(),
+      });
+      const settings = await getSettings();
+      const summaryDelivery = req.body.sendSummary
+        ? await sendAppointmentSummary({ settings, profile, config: providerConfig, appointment, source: "manual_calendar_update" })
+        : null;
+      return res.json({ appointment, summaryDelivery });
+    }
     let appointment = existing;
     const startChanged = Boolean(req.body.start);
     const status = ["confirmed", "requested", "cancelled"].includes(String(req.body.status || "")) ? String(req.body.status) : existing.status;
@@ -15803,14 +17132,24 @@ app.post("/api/business-admin/appointments/:id/cancel", async (req, res) => {
       where: { id: Number(req.params.id), businessName: profile.businessName, website: profile.website },
     });
     if (!existing) throw new Error("Appointment was not found for this business");
-    const appointment = await prisma.appointment.update({
-      where: { id: existing.id },
-      data: { status: "cancelled", bookingKey: null },
-    });
+    const providerConfig = { ...config, calendarProvider: existing.calendarProvider };
+    const appointment = ["google_calendar", "calendly"].includes(existing.calendarProvider)
+      ? await cancelCalendarAppointment({
+          prisma,
+          profile,
+          config: providerConfig,
+          appointment: existing,
+          reason: req.body.reason,
+          ...bookingProviderHelpers(),
+        })
+      : await prisma.appointment.update({
+          where: { id: existing.id },
+          data: { status: "cancelled", bookingKey: null },
+        });
     const settings = await getSettings();
     const summaryDelivery = req.body.sendSummary === false
       ? null
-      : await sendAppointmentSummary({ settings, profile, config, appointment, source: "manual_calendar_cancel" });
+      : await sendAppointmentSummary({ settings, profile, config: providerConfig, appointment, source: "manual_calendar_cancel" });
     res.json({ appointment, summaryDelivery });
   } catch (error) {
     res.status(400).json({ error: error.message });

@@ -94,7 +94,15 @@
               <label>Telnyx API key<input id="telnyxApiKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxApiKeyState"></small></label>
               <label>Telnyx public key<input id="telnyxPublicKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxPublicKeyState"></small></label>
               <label>Telnyx connection ID<input id="telnyxConnectionId" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="telnyxConnectionIdState"></small></label>
+              <label>Google Calendar client ID<input id="googleCalendarClientId" autocomplete="off" placeholder="OAuth client ID" /></label>
+              <label>Google Calendar client secret<input id="googleCalendarClientSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="googleCalendarClientSecretState"></small></label>
+              <label>Calendly client ID<input id="calendlyClientId" autocomplete="off" placeholder="OAuth client ID" /></label>
+              <label>Calendly client secret<input id="calendlyClientSecret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="calendlyClientSecretState"></small></label>
+              <label>Calendly webhook signing key<input id="calendlyWebhookSigningKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep current" /><small id="calendlyWebhookSigningKeyState"></small></label>
+              <p class="wide-field field-help">Calendly app scopes: <code>users:read</code>, <code>event_types:read</code>, <code>availability:read</code>, <code>scheduled_events:read</code>, <code>scheduled_events:write</code>, and <code>webhooks:write</code>. Existing connections must reconnect after scopes change.</p>
               <label class="wide-field">Public base URL<input id="publicBaseUrl" type="url" placeholder="https://example.ngrok-free.app" /><small>Used for provider webhooks and secure media sockets.</small></label>
+              <label class="wide-field">Google Calendar callback URL<input id="googleCalendarCallbackUrl" readonly /></label>
+              <label class="wide-field">Calendly callback URL<input id="calendlyCallbackUrl" readonly /></label>
             </div>
           </section>
           <section class="system-panel" data-system-panel="credits">

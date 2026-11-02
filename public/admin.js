@@ -29,6 +29,13 @@ const el = {
   telnyxApiKey: document.querySelector("#telnyxApiKey"),
   telnyxPublicKey: document.querySelector("#telnyxPublicKey"),
   telnyxConnectionId: document.querySelector("#telnyxConnectionId"),
+  googleCalendarClientId: document.querySelector("#googleCalendarClientId"),
+  googleCalendarClientSecret: document.querySelector("#googleCalendarClientSecret"),
+  googleCalendarCallbackUrl: document.querySelector("#googleCalendarCallbackUrl"),
+  calendlyClientId: document.querySelector("#calendlyClientId"),
+  calendlyClientSecret: document.querySelector("#calendlyClientSecret"),
+  calendlyWebhookSigningKey: document.querySelector("#calendlyWebhookSigningKey"),
+  calendlyCallbackUrl: document.querySelector("#calendlyCallbackUrl"),
   publicBaseUrl: document.querySelector("#publicBaseUrl"),
   trialDays: document.querySelector("#trialDays"),
   claimLinkDays: document.querySelector("#claimLinkDays"),
@@ -676,6 +683,8 @@ async function loadSystem() {
     "metaAppId",
     "metaLoginConfigurationId",
     "metaGraphApiVersion",
+    "googleCalendarClientId",
+    "calendlyClientId",
     "metaPixelId",
     "metaTestEventCode",
     "tiktokPixelId",
@@ -712,6 +721,9 @@ async function loadSystem() {
   secretState("stripeWebhookSecret", data.secrets.stripeWebhookSecret);
   secretState("metaAppSecret", data.secrets.metaAppSecret);
   secretState("metaWebhookVerifyToken", data.secrets.metaWebhookVerifyToken);
+  secretState("googleCalendarClientSecret", data.secrets.googleCalendarClientSecret);
+  secretState("calendlyClientSecret", data.secrets.calendlyClientSecret);
+  secretState("calendlyWebhookSigningKey", data.secrets.calendlyWebhookSigningKey);
   secretState("metaAccessToken", data.secrets.metaAccessToken);
   secretState("tiktokAccessToken", data.secrets.tiktokAccessToken);
   secretState("redditConversionAccessToken", data.secrets.redditConversionAccessToken);
@@ -771,6 +783,8 @@ function refreshSystemWebhookUrls() {
   refreshBlueBubblesWebhookUrl();
   const baseUrl = String(el.publicBaseUrl.value || "").trim().replace(/\/+$/, "");
   el.metaOAuthCallbackUrl.value = baseUrl ? `${baseUrl}/api/meta/oauth/callback` : "";
+  if (el.googleCalendarCallbackUrl) el.googleCalendarCallbackUrl.value = baseUrl ? `${baseUrl}/api/calendar/oauth/google_calendar/callback` : "";
+  if (el.calendlyCallbackUrl) el.calendlyCallbackUrl.value = baseUrl ? `${baseUrl}/api/calendar/oauth/calendly/callback` : "";
   el.metaMessagingWebhookUrl.value = baseUrl ? `${baseUrl}/webhooks/meta` : "";
 }
 
@@ -2101,6 +2115,11 @@ el.systemForm.addEventListener("submit", async (event) => {
         telnyxApiKey: el.telnyxApiKey.value,
         telnyxPublicKey: el.telnyxPublicKey.value,
         telnyxConnectionId: el.telnyxConnectionId.value,
+        googleCalendarClientId: el.googleCalendarClientId.value,
+        googleCalendarClientSecret: el.googleCalendarClientSecret.value,
+        calendlyClientId: el.calendlyClientId.value,
+        calendlyClientSecret: el.calendlyClientSecret.value,
+        calendlyWebhookSigningKey: el.calendlyWebhookSigningKey.value,
         trialDays: Number(el.trialDays.value),
         claimLinkDays: Number(el.claimLinkDays.value),
         trialCredits: Number(el.trialCredits.value),
@@ -2172,6 +2191,9 @@ el.systemForm.addEventListener("submit", async (event) => {
       el.telnyxApiKey,
       el.telnyxPublicKey,
       el.telnyxConnectionId,
+      el.googleCalendarClientSecret,
+      el.calendlyClientSecret,
+      el.calendlyWebhookSigningKey,
       el.smtpUsername,
       el.smtpPassword,
       el.stripeSecretKey,

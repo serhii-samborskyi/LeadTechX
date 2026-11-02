@@ -40,6 +40,7 @@ const state = {
   selectedMessageThreadKey: "",
   messageData: { messages: [], inboundMessages: [] },
   booking: null,
+  goalsData: { goals: [], recentSends: [], totals: {} },
   entitlements: null,
   planUsage: null,
   billingData: null,
@@ -227,6 +228,27 @@ const el = {
   transferActive: document.querySelector("#transferActive"),
   addTransferTargetButton: document.querySelector("#addTransferTargetButton"),
   transferTargetList: document.querySelector("#transferTargetList"),
+  goalId: document.querySelector("#goalId"),
+  goalEditorDisclosure: document.querySelector("#goalEditorDisclosure"),
+  goalEditorTitle: document.querySelector("#goalEditorTitle"),
+  goalName: document.querySelector("#goalName"),
+  goalActionType: document.querySelector("#goalActionType"),
+  goalDestinationUrl: document.querySelector("#goalDestinationUrl"),
+  goalTriggerInstructions: document.querySelector("#goalTriggerInstructions"),
+  goalQualificationInstructions: document.querySelector("#goalQualificationInstructions"),
+  goalMessageTemplate: document.querySelector("#goalMessageTemplate"),
+  goalConfirmationMessage: document.querySelector("#goalConfirmationMessage"),
+  goalSortOrder: document.querySelector("#goalSortOrder"),
+  goalPrimary: document.querySelector("#goalPrimary"),
+  goalActive: document.querySelector("#goalActive"),
+  saveGoalButton: document.querySelector("#saveGoalButton"),
+  resetGoalButton: document.querySelector("#resetGoalButton"),
+  goalList: document.querySelector("#goalList"),
+  goalRecentSends: document.querySelector("#goalRecentSends"),
+  goalActiveCount: document.querySelector("#goalActiveCount"),
+  goalSentCount: document.querySelector("#goalSentCount"),
+  goalClickCount: document.querySelector("#goalClickCount"),
+  goalConversionCount: document.querySelector("#goalConversionCount"),
   calendarProvider: document.querySelector("#calendarProvider"),
   vagaroSettingsPanel: document.querySelector("#vagaroSettingsPanel"),
   vagaroMode: document.querySelector("#vagaroMode"),
@@ -243,6 +265,20 @@ const el = {
   saveVagaroSettingsButton: document.querySelector("#saveVagaroSettingsButton"),
   syncVagaroButton: document.querySelector("#syncVagaroButton"),
   vagaroStatus: document.querySelector("#vagaroStatus"),
+  googleCalendarSettingsPanel: document.querySelector("#googleCalendarSettingsPanel"),
+  googleCalendarStatus: document.querySelector("#googleCalendarStatus"),
+  googleCalendarId: document.querySelector("#googleCalendarId"),
+  googleCalendarDirectBooking: document.querySelector("#googleCalendarDirectBooking"),
+  connectGoogleCalendarButton: document.querySelector("#connectGoogleCalendarButton"),
+  disconnectGoogleCalendarButton: document.querySelector("#disconnectGoogleCalendarButton"),
+  calendlySettingsPanel: document.querySelector("#calendlySettingsPanel"),
+  calendlyStatus: document.querySelector("#calendlyStatus"),
+  calendlyConnectionNote: document.querySelector("#calendlyConnectionNote"),
+  calendlyEventType: document.querySelector("#calendlyEventType"),
+  calendlyDirectBooking: document.querySelector("#calendlyDirectBooking"),
+  connectCalendlyButton: document.querySelector("#connectCalendlyButton"),
+  syncCalendlyButton: document.querySelector("#syncCalendlyButton"),
+  disconnectCalendlyButton: document.querySelector("#disconnectCalendlyButton"),
   bookingLinkLabel: document.querySelector("#bookingLinkLabel"),
   bookingLinkUrl: document.querySelector("#bookingLinkUrl"),
   bookingTrackingBaseUrl: document.querySelector("#bookingTrackingBaseUrl"),
@@ -384,6 +420,7 @@ const OWNER_PAGE_FOR_TAB = {
   calendar: "appointments",
   setup: "receptionist",
   content: "receptionist",
+  goals: "receptionist",
   transfers: "receptionist",
   notifications: "settings",
   channels: "settings",
@@ -1534,28 +1571,56 @@ function bookingDateLabel(value) {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
 }
 
+function calendarConnection(provider) {
+  return (state.booking?.connections || []).find((connection) => connection.provider === provider) || null;
+}
+
+function calendarProviderName(provider) {
+  if (provider === "google_calendar") return "Google Calendar";
+  if (provider === "calendly") return "Calendly";
+  if (provider === "vagaro") return "Vagaro";
+  return "RingPort calendar";
+}
+
 function updateCalendarProviderUi() {
   const provider = el.calendarProvider?.value || state.admin?.calendarProvider || "internal";
-  const external = provider === "vagaro";
+  const vagaro = provider === "vagaro";
+  const google = provider === "google_calendar";
+  const calendly = provider === "calendly";
+  const calendlyDirect = el.calendlyDirectBooking?.checked !== false;
+  const readOnly = vagaro || (calendly && !calendlyDirect);
   const vagaroMode = el.vagaroMode?.value === "api" ? "api" : "simple";
-  const apiMode = external && vagaroMode === "api";
+  const apiMode = vagaro && vagaroMode === "api";
   const appointmentEditor = document.querySelector(".appointment-editor-card");
   const bookingDirectory = document.querySelector(".booking-directory-card");
-  if (el.vagaroSettingsPanel) el.vagaroSettingsPanel.hidden = !external;
+  if (el.vagaroSettingsPanel) el.vagaroSettingsPanel.hidden = !vagaro;
+  if (el.vagaroStatus) el.vagaroStatus.hidden = !vagaro;
+  if (el.googleCalendarSettingsPanel) el.googleCalendarSettingsPanel.hidden = !google;
+  if (el.calendlySettingsPanel) el.calendlySettingsPanel.hidden = !calendly;
   if (el.vagaroApiSettings) el.vagaroApiSettings.hidden = !apiMode;
-  if (el.vagaroSimpleModeHelp) el.vagaroSimpleModeHelp.hidden = !external || apiMode;
-  if (bookingDirectory) bookingDirectory.hidden = !external;
-  if (el.syncVagaroButton) el.syncVagaroButton.disabled = !external;
+  if (el.vagaroSimpleModeHelp) el.vagaroSimpleModeHelp.hidden = !vagaro || apiMode;
+  if (bookingDirectory) bookingDirectory.hidden = !vagaro;
+  if (el.syncVagaroButton) el.syncVagaroButton.disabled = !vagaro;
   if (el.copyVagaroWebhookButton) el.copyVagaroWebhookButton.disabled = !apiMode || !el.vagaroWebhookUrl?.value.trim();
+  if (el.saveVagaroSettingsButton) {
+    const connection = calendarConnection(provider);
+    el.saveVagaroSettingsButton.textContent = ["google_calendar", "calendly"].includes(provider) && connection?.status !== "active"
+      ? `Connect ${calendarProviderName(provider)}`
+      : provider === "internal"
+        ? "Use RingPort calendar"
+        : "Save booking system";
+  }
   if (appointmentEditor) {
-    appointmentEditor.classList.toggle("is-read-only", external);
+    appointmentEditor.classList.toggle("is-read-only", readOnly);
     const copy = appointmentEditor.querySelector("p");
     if (copy) {
-      copy.textContent = external
+      copy.textContent = vagaro
         ? vagaroMode === "simple"
           ? "Vagaro Simple mode does not expose live availability. Send the booking link so customers can view openings and book in Vagaro."
           : "Vagaro appointments are read-only here. Use Vagaro links for booking, cancel, and reschedule."
-        : "Choose an open time from the schedule or enter a time manually.";
+        : calendly && !calendlyDirect
+          ? "RingPort sends a tracked Calendly link. Customers choose and confirm the time in Calendly."
+          : `Choose an open time or enter one manually. RingPort will book it in ${calendarProviderName(provider)}.`;
     }
   }
   for (const node of [
@@ -1571,32 +1636,78 @@ function updateCalendarProviderUi() {
     el.appointmentSendSummary,
     el.saveAppointmentButton,
   ]) {
-    if (node) node.disabled = external;
+    if (node) node.disabled = readOnly;
   }
-  if (el.availabilityRules) el.availabilityRules.hidden = external;
-  if (el.saveCalendarButton) el.saveCalendarButton.disabled = external;
+  if (el.availabilityRules) el.availabilityRules.hidden = vagaro || calendly;
+  if (el.saveCalendarButton) el.saveCalendarButton.disabled = vagaro || calendly;
+  if (el.calendarServiceFilter?.closest("label")) el.calendarServiceFilter.closest("label").hidden = !vagaro;
+  if (el.calendarProfessionalFilter?.closest("label")) el.calendarProfessionalFilter.closest("label").hidden = !vagaro;
 }
 
 function renderBooking(data = {}) {
   state.booking = data;
   const connection = data.activeConnection || {};
-  const provider = connection.status === "active" ? "vagaro" : state.admin?.calendarProvider || "internal";
-  if (el.calendarProvider) el.calendarProvider.value = provider === "vagaro" ? "vagaro" : "internal";
-  if (el.vagaroMode) el.vagaroMode.value = connection.settings?.vagaroMode === "simple" ? "simple" : connection.id ? "api" : "simple";
-  if (el.vagaroBusinessUrl) el.vagaroBusinessUrl.value = connection.settings?.vagaroBusinessUrl || connection.bookingUrl || "";
-  if (el.vagaroClientId) el.vagaroClientId.value = connection.apiClientId || "";
-  if (el.vagaroRegion) el.vagaroRegion.value = connection.region || connection.settings?.vagaroPublicRegion || "";
-  if (el.vagaroTokenScope) el.vagaroTokenScope.value = connection.settings?.tokenScope || "read access";
-  if (el.vagaroApiBusinessId) el.vagaroApiBusinessId.value = connection.apiBusinessId || "";
+  const provider = connection.status === "active" ? connection.provider : state.admin?.calendarProvider || "internal";
+  const vagaroConnection = (data.connections || []).find((item) => item.provider === "vagaro") || {};
+  const googleConnection = (data.connections || []).find((item) => item.provider === "google_calendar") || null;
+  const calendlyConnection = (data.connections || []).find((item) => item.provider === "calendly") || null;
+  if (el.calendarProvider) el.calendarProvider.value = ["vagaro", "google_calendar", "calendly"].includes(provider) ? provider : "internal";
+  if (el.vagaroMode) el.vagaroMode.value = vagaroConnection.settings?.vagaroMode === "simple" ? "simple" : vagaroConnection.id ? "api" : "simple";
+  if (el.vagaroBusinessUrl) el.vagaroBusinessUrl.value = vagaroConnection.settings?.vagaroBusinessUrl || vagaroConnection.bookingUrl || "";
+  if (el.vagaroClientId) el.vagaroClientId.value = vagaroConnection.apiClientId || "";
+  if (el.vagaroRegion) el.vagaroRegion.value = vagaroConnection.region || vagaroConnection.settings?.vagaroPublicRegion || "";
+  if (el.vagaroTokenScope) el.vagaroTokenScope.value = vagaroConnection.settings?.tokenScope || "read access";
+  if (el.vagaroApiBusinessId) el.vagaroApiBusinessId.value = vagaroConnection.apiBusinessId || "";
   if (el.vagaroWebhookUrl) el.vagaroWebhookUrl.value = data.webhookUrl || "";
   if (el.vagaroClientSecret) el.vagaroClientSecret.value = "";
+  if (el.googleCalendarId) el.googleCalendarId.value = googleConnection?.settings?.calendarId || "primary";
+  if (el.googleCalendarDirectBooking) {
+    el.googleCalendarDirectBooking.checked = true;
+    el.googleCalendarDirectBooking.disabled = true;
+  }
+  if (el.googleCalendarStatus) {
+    el.googleCalendarStatus.textContent = googleConnection?.status === "active"
+      ? `Connected${googleConnection.lastSyncAt ? ` · Last used ${bookingDateLabel(googleConnection.lastSyncAt)}` : ""}`
+      : data.platformConnections?.googleCalendar?.configured
+        ? "Ready to connect"
+        : "RingPort admin must configure Google OAuth first";
+  }
+  if (el.connectGoogleCalendarButton) el.connectGoogleCalendarButton.hidden = googleConnection?.status === "active";
+  if (el.disconnectGoogleCalendarButton) el.disconnectGoogleCalendarButton.hidden = googleConnection?.status !== "active";
+  if (el.calendlyDirectBooking) el.calendlyDirectBooking.checked = calendlyConnection?.settings?.directBooking !== false;
+  const eventTypes = Array.isArray(calendlyConnection?.settings?.eventTypes) ? calendlyConnection.settings.eventTypes : [];
+  setSelectOptions(
+    el.calendlyEventType,
+    eventTypes.length ? eventTypes.map((item) => [item.uri, `${item.name}${item.duration ? ` · ${item.duration} min` : ""}`]) : [["", "No active event types found"]],
+    calendlyConnection?.settings?.eventTypeUri || "",
+  );
+  if (el.calendlyStatus) {
+    const webhookWarning = calendlyConnection?.settings?.webhookWarning;
+    el.calendlyStatus.textContent = calendlyConnection?.status === "active"
+      ? `Connected${calendlyConnection.settings?.accountEmail ? ` as ${calendlyConnection.settings.accountEmail}` : ""}`
+      : data.platformConnections?.calendly?.configured
+        ? "Ready to connect"
+        : "RingPort admin must configure Calendly OAuth first";
+    if (webhookWarning && calendlyConnection?.status === "active") el.calendlyStatus.textContent += " · booking sync needs attention";
+  }
+  if (el.calendlyConnectionNote) {
+    const webhookWarning = calendlyConnection?.settings?.webhookWarning;
+    el.calendlyConnectionNote.textContent = webhookWarning
+      ? `Calendly is connected, but completed link bookings cannot sync yet: ${webhookWarning}`
+      : calendlyConnection?.settings?.webhookSubscriptionUri
+        ? "Calendly booking sync is active. Direct bookings and completed tracked-link bookings return to RingPort."
+        : "Direct API booking creates appointments in Calendly. Turn it off to send a tracked Calendly link instead.";
+  }
+  if (el.connectCalendlyButton) el.connectCalendlyButton.hidden = calendlyConnection?.status === "active";
+  if (el.syncCalendlyButton) el.syncCalendlyButton.hidden = calendlyConnection?.status !== "active";
+  if (el.disconnectCalendlyButton) el.disconnectCalendlyButton.hidden = calendlyConnection?.status !== "active";
 
   const services = Array.isArray(data.services) ? data.services : [];
   const professionals = Array.isArray(data.professionals) ? data.professionals : [];
   const links = Array.isArray(data.links) ? data.links : [];
   const generalLink = links[0] || null;
   if (el.bookingLinkLabel && document.activeElement !== el.bookingLinkLabel) el.bookingLinkLabel.value = generalLink?.label || "Book online";
-  if (el.bookingLinkUrl && document.activeElement !== el.bookingLinkUrl) el.bookingLinkUrl.value = generalLink?.url || connection.bookingUrl || "";
+  if (el.bookingLinkUrl && document.activeElement !== el.bookingLinkUrl) el.bookingLinkUrl.value = generalLink?.url || vagaroConnection.bookingUrl || "";
   if (el.bookingTrackingBaseUrl && document.activeElement !== el.bookingTrackingBaseUrl) {
     el.bookingTrackingBaseUrl.value = data.trackingBaseUrl || state.admin?.bookingTrackingBaseUrl || "";
   }
@@ -1608,19 +1719,17 @@ function renderBooking(data = {}) {
   );
 
   if (el.vagaroStatus) {
-    const mode = connection.settings?.vagaroMode === "simple" ? "Simple" : "API";
-    const lastSync = connection.lastSyncAt ? ` · Last sync ${bookingDateLabel(connection.lastSyncAt)}` : "";
-    const credentials = mode === "API" && connection.apiClientSecretConfigured
-      ? ` · API secret saved${connection.apiClientSecretHint ? ` ending in ${connection.apiClientSecretHint}` : ""}`
+    const mode = vagaroConnection.settings?.vagaroMode === "simple" ? "Simple" : "API";
+    const lastSync = vagaroConnection.lastSyncAt ? ` · Last sync ${bookingDateLabel(vagaroConnection.lastSyncAt)}` : "";
+    const credentials = mode === "API" && vagaroConnection.apiClientSecretConfigured
+      ? ` · API secret saved${vagaroConnection.apiClientSecretHint ? ` ending in ${vagaroConnection.apiClientSecretHint}` : ""}`
       : "";
-    const apiLocation = mode === "API" && connection.apiBusinessId ? " · API location ID saved" : "";
-    const warningText = mode === "Simple" ? connection.settings?.vagaroPublicSyncWarning : connection.settings?.locationsSyncWarning;
+    const apiLocation = mode === "API" && vagaroConnection.apiBusinessId ? " · API location ID saved" : "";
+    const warningText = mode === "Simple" ? vagaroConnection.settings?.vagaroPublicSyncWarning : vagaroConnection.settings?.locationsSyncWarning;
     const warning = warningText ? ` · ${warningText}` : "";
     el.vagaroStatus.textContent =
-      provider !== "vagaro"
-        ? "RingPort calendar is active."
-        : connection.status === "active"
-          ? `Vagaro ${mode} mode · ${vagaroCatalogCountLabel(connection.settings || {}, services)}${mode === "API" ? ` · ${professionals.length} professionals` : ""} · ${links.length ? "general link saved" : "no general link"}${lastSync}${credentials}${apiLocation}${warning}`
+      vagaroConnection.status === "active"
+          ? `Vagaro ${mode} mode · ${vagaroCatalogCountLabel(vagaroConnection.settings || {}, services)}${mode === "API" ? ` · ${professionals.length} professionals` : ""} · ${links.length ? "general link saved" : "no general link"}${lastSync}${credentials}${apiLocation}${warning}`
           : "Vagaro is not connected. Choose a mode and save the business link.";
   }
 
@@ -2189,8 +2298,206 @@ async function loadBooking() {
   renderBooking(data);
 }
 
+function goalActionLabel(value) {
+  return {
+    send_link: "Send link",
+    purchase_link: "Buy or pay",
+    application_link: "Application",
+    booking_link: "External booking",
+  }[value] || "Send link";
+}
+
+function resetGoalForm() {
+  if (!el.goalId) return;
+  el.goalId.value = "";
+  el.goalEditorTitle.textContent = "Add a goal";
+  el.goalName.value = "";
+  el.goalActionType.value = "send_link";
+  el.goalDestinationUrl.value = "";
+  el.goalTriggerInstructions.value = "";
+  el.goalQualificationInstructions.value = "";
+  el.goalMessageTemplate.value = "Here is the {{goal_name}} link from {{business_name}}: {{goal_link}}";
+  el.goalConfirmationMessage.value = "I sent the link. Please open it to continue.";
+  el.goalSortOrder.value = "0";
+  el.goalPrimary.checked = false;
+  el.goalActive.checked = true;
+  el.saveGoalButton.textContent = "Save goal";
+}
+
+function editGoal(goal) {
+  el.goalEditorDisclosure.open = true;
+  el.goalId.value = String(goal.id);
+  el.goalEditorTitle.textContent = `Edit ${goal.name}`;
+  el.goalName.value = goal.name || "";
+  el.goalActionType.value = goal.actionType || "send_link";
+  el.goalDestinationUrl.value = goal.destinationUrl || "";
+  el.goalTriggerInstructions.value = goal.triggerInstructions || "";
+  el.goalQualificationInstructions.value = goal.qualificationInstructions || "";
+  el.goalMessageTemplate.value = goal.messageTemplate || "";
+  el.goalConfirmationMessage.value = goal.confirmationMessage || "";
+  el.goalSortOrder.value = String(goal.sortOrder || 0);
+  el.goalPrimary.checked = Boolean(goal.primaryGoal);
+  el.goalActive.checked = goal.active !== false;
+  el.saveGoalButton.textContent = "Update goal";
+  el.goalEditorTitle.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function emptyListMessage(node, message) {
+  const row = document.createElement("div");
+  row.className = "compact-empty-state";
+  row.textContent = message;
+  node.appendChild(row);
+}
+
+function renderGoals(data = {}) {
+  state.goalsData = data;
+  const totals = data.totals || {};
+  el.goalActiveCount.textContent = String(totals.goals || 0);
+  el.goalSentCount.textContent = String(totals.sent || 0);
+  el.goalClickCount.textContent = String(totals.clicked || 0);
+  el.goalConversionCount.textContent = String(totals.converted || 0);
+  el.goalList.innerHTML = "";
+  const goals = Array.isArray(data.goals) ? data.goals : [];
+  if (!goals.length) el.goalEditorDisclosure.open = true;
+  if (!goals.length) emptyListMessage(el.goalList, "No link goals yet. Add one when your receptionist should guide a caller to a specific next step.");
+  for (const goal of goals) {
+    const card = document.createElement("article");
+    card.className = `goal-card${goal.active ? "" : " is-disabled"}`;
+    card.dataset.goalId = String(goal.id);
+    const heading = document.createElement("div");
+    heading.className = "goal-card-heading";
+    const title = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = goal.name;
+    const meta = document.createElement("small");
+    meta.textContent = `${goalActionLabel(goal.actionType)}${goal.primaryGoal ? " · Main goal" : ""}${goal.active ? "" : " · Paused"}`;
+    title.append(name, meta);
+    const badge = document.createElement("span");
+    badge.className = `status-pill ${goal.active ? "active" : ""}`;
+    badge.textContent = goal.active ? "Active" : "Paused";
+    heading.append(title, badge);
+    const instructions = document.createElement("p");
+    instructions.textContent = goal.triggerInstructions || "No trigger instructions yet.";
+    const metrics = document.createElement("div");
+    metrics.className = "goal-card-metrics";
+    metrics.innerHTML = `<span><strong>${Number(goal.sentCount || 0)}</strong> sent</span><span><strong>${Number(goal.clickCount || 0)}</strong> clicks</span><span><strong>${Number(goal.conversionCount || 0)}</strong> conversions</span>`;
+    const link = document.createElement("small");
+    link.className = "goal-tracking-link";
+    link.textContent = goal.trackingUrl || goal.destinationUrl || "";
+    const actions = document.createElement("div");
+    actions.className = "goal-card-actions";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.dataset.action = "edit-goal";
+    edit.textContent = "Edit";
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.dataset.action = "copy-goal-link";
+    copy.dataset.url = goal.trackingUrl || "";
+    copy.textContent = "Copy tracked link";
+    copy.disabled = !goal.trackingUrl;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-subtle";
+    remove.dataset.action = "delete-goal";
+    remove.textContent = goal.active ? "Pause" : "Paused";
+    remove.disabled = !goal.active;
+    actions.append(edit, copy, remove);
+    card.append(heading, instructions, metrics, link, actions);
+    el.goalList.appendChild(card);
+  }
+
+  el.goalRecentSends.innerHTML = "";
+  const sends = Array.isArray(data.recentSends) ? data.recentSends : [];
+  if (!sends.length) emptyListMessage(el.goalRecentSends, "Sent links and clicks will appear here.");
+  for (const send of sends) {
+    const row = document.createElement("div");
+    row.className = "goal-send-row";
+    row.dataset.sendId = String(send.id);
+    const detail = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = `${send.goal?.name || "Goal link"} · ${send.customerName || send.lead?.name || send.phone || "Customer"}`;
+    const meta = document.createElement("small");
+    meta.textContent = `${bookingDateLabel(send.sentAt)} · ${send.clickCount || 0} click${Number(send.clickCount || 0) === 1 ? "" : "s"}${send.convertedAt ? " · Converted" : ""}`;
+    detail.append(title, meta);
+    const actions = document.createElement("div");
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.dataset.action = "copy-goal-send";
+    copy.dataset.url = send.trackedUrl || "";
+    copy.textContent = "Copy";
+    actions.appendChild(copy);
+    if (!send.convertedAt) {
+      const converted = document.createElement("button");
+      converted.type = "button";
+      converted.dataset.action = "convert-goal-send";
+      converted.textContent = "Mark converted";
+      actions.appendChild(converted);
+    }
+    row.append(detail, actions);
+    el.goalRecentSends.appendChild(row);
+  }
+}
+
+async function loadGoals() {
+  if (!state.admin) return;
+  const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
+  if (el.website.value.trim()) query.set("website", el.website.value.trim());
+  renderGoals(await apiJson(`/api/business-admin/goals?${query}`));
+}
+
+async function saveGoal() {
+  const id = Number(el.goalId.value || 0);
+  const data = await apiJson(id ? `/api/business-admin/goals/${id}` : "/api/business-admin/goals", {
+    method: id ? "PUT" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      name: el.goalName.value.trim(),
+      actionType: el.goalActionType.value,
+      destinationUrl: el.goalDestinationUrl.value.trim(),
+      triggerInstructions: el.goalTriggerInstructions.value.trim(),
+      qualificationInstructions: el.goalQualificationInstructions.value.trim(),
+      messageTemplate: el.goalMessageTemplate.value.trim(),
+      confirmationMessage: el.goalConfirmationMessage.value.trim(),
+      sortOrder: Number(el.goalSortOrder.value || 0),
+      primaryGoal: el.goalPrimary.checked,
+      active: el.goalActive.checked,
+    }),
+  });
+  renderGoals(data);
+  resetGoalForm();
+  el.goalEditorDisclosure.open = false;
+  setAdminStatus(id ? "Goal updated" : "Goal added");
+}
+
+async function deleteGoal(id) {
+  renderGoals(await apiJson(`/api/business-admin/goals/${id}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  }));
+  resetGoalForm();
+  setAdminStatus("Goal paused");
+}
+
+async function markGoalSendConverted(id) {
+  renderGoals(await apiJson(`/api/business-admin/goals/sends/${id}/conversion`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  }));
+  setAdminStatus("Conversion recorded");
+}
+
 async function saveVagaroSettings() {
-  const enabled = el.calendarProvider.value === "vagaro";
+  const provider = el.calendarProvider.value;
+  if (["google_calendar", "calendly"].includes(provider)) {
+    const connection = calendarConnection(provider);
+    if (!connection || connection.status !== "active") return connectCalendarProvider(provider);
+    return saveOAuthCalendarProvider(provider);
+  }
+  const enabled = provider === "vagaro";
   setAdminStatus(enabled ? "Saving Vagaro booking system" : "Switching to RingPort calendar");
   const fieldValue = (node) => String(node?.value || "").trim();
   const data = await apiJson("/api/business-admin/booking/vagaro", {
@@ -2220,6 +2527,59 @@ async function saveVagaroSettings() {
   } else {
     setAdminStatus(enabled ? "Vagaro settings saved" : "RingPort calendar enabled");
   }
+}
+
+async function connectCalendarProvider(provider) {
+  setAdminStatus(`Opening ${calendarProviderName(provider)} authorization`);
+  const data = await apiJson(`/api/business-admin/booking/oauth/${provider}/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  window.location.assign(data.url);
+}
+
+async function saveOAuthCalendarProvider(provider) {
+  setAdminStatus(`Saving ${calendarProviderName(provider)}`);
+  const body = {
+    ...adminIdentity(),
+    directBooking: provider === "google_calendar" ? true : el.calendlyDirectBooking.checked,
+  };
+  if (provider === "google_calendar") body.calendarId = el.googleCalendarId.value.trim() || "primary";
+  if (provider === "calendly") body.eventTypeUri = el.calendlyEventType.value;
+  const data = await apiJson(`/api/business-admin/booking/connections/${provider}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  state.admin = { ...state.admin, calendarProvider: provider };
+  renderBooking(data);
+  await loadCalendar();
+  setAdminStatus(`${calendarProviderName(provider)} saved`);
+}
+
+async function disconnectCalendarProvider(provider) {
+  setAdminStatus(`Disconnecting ${calendarProviderName(provider)}`);
+  const data = await apiJson(`/api/business-admin/booking/connections/${provider}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  state.admin = { ...state.admin, calendarProvider: "internal" };
+  renderBooking(data);
+  await loadCalendar();
+  setAdminStatus(`${calendarProviderName(provider)} disconnected`);
+}
+
+async function syncCalendly() {
+  setAdminStatus("Syncing Calendly event types");
+  const data = await apiJson("/api/business-admin/booking/calendly/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(adminIdentity()),
+  });
+  renderBooking(data);
+  setAdminStatus("Calendly event types synced");
 }
 
 async function syncVagaro() {
@@ -2319,10 +2679,15 @@ async function loadCalendar() {
 
   el.bookedAppointments.innerHTML = "";
   for (const appointment of data.appointments) {
-    const external = appointment.calendarProvider && appointment.calendarProvider !== "internal";
-    const manageUrl = external
-      ? appointment.manageUrl || appointment.bookingUrl || state.booking?.activeConnection?.cancelRescheduleUrl || state.booking?.activeConnection?.bookingUrl || ""
-      : "";
+    const provider = appointment.calendarProvider || "internal";
+    const external = provider !== "internal";
+    const manageUrl = provider === "calendly"
+      ? appointment.intakeData?.rescheduleUrl || appointment.manageUrl || ""
+      : provider === "google_calendar"
+        ? appointment.intakeData?.googleEventUrl || ""
+        : external
+          ? appointment.manageUrl || appointment.bookingUrl || state.booking?.activeConnection?.cancelRescheduleUrl || state.booking?.activeConnection?.bookingUrl || ""
+          : "";
     const row = document.createElement("div");
     row.className = "data-row appointment-row";
     const start = appointment.scheduledStart ? new Date(appointment.scheduledStart).toLocaleString() : appointment.requestedAt;
@@ -2330,7 +2695,7 @@ async function loadCalendar() {
     const summary = document.createElement("div");
     summary.className = "appointment-summary";
     const code = document.createElement("strong");
-    code.textContent = appointmentCode(appointment.id);
+    code.textContent = appointment.externalRecordId ? `CAL-${String(appointment.externalRecordId).padStart(6, "0")}` : appointmentCode(appointment.id);
     const status = document.createElement("span");
     status.className = `appointment-status ${appointment.status || "requested"}`;
     status.textContent = appointment.status || "requested";
@@ -2348,7 +2713,7 @@ async function loadCalendar() {
       appointmentField("Professional", appointment.professionalName || appointment.intakeData?.professional),
       appointmentField("Booking system", external ? appointment.calendarProvider : ""),
       appointmentField("External status", appointment.bookingStatus),
-      appointmentField("Cancel/reschedule", manageUrl, manageUrl || null),
+      appointmentField(provider === "google_calendar" ? "Calendar event" : "Cancel/reschedule", manageUrl, manageUrl || null),
     ];
 
     const builtInKeys = new Set(["name", "customer_name", "phone", "email", "reason"]);
@@ -2382,10 +2747,12 @@ async function loadCalendar() {
     cancelButton.className = "danger-button";
     cancelButton.disabled = appointment.status === "cancelled";
     cancelButton.textContent = "Cancel";
-    if (external) {
+    if (provider === "vagaro" || (provider === "calendly" && appointment.externalRecordId)) {
       const note = document.createElement("small");
       note.className = "external-calendar-note";
-      note.textContent = "Synced from Vagaro. Changes happen in Vagaro.";
+      note.textContent = provider === "vagaro"
+        ? "Synced from Vagaro. Changes happen in Vagaro."
+        : "Synced from Calendly. Changes happen in Calendly.";
       actions.appendChild(note);
       if (manageUrl) {
         const open = document.createElement("a");
@@ -2393,11 +2760,31 @@ async function loadCalendar() {
         open.href = manageUrl;
         open.target = "_blank";
         open.rel = "noreferrer";
-        open.textContent = "Open Vagaro";
+        open.textContent = provider === "vagaro" ? "Open Vagaro" : "Manage in Calendly";
         actions.appendChild(open);
       }
     } else {
-      actions.append(reminder, summaryButton, editButton, cancelButton);
+      actions.append(reminder, summaryButton);
+      if (provider !== "calendly") actions.appendChild(editButton);
+      if (provider === "calendly" && manageUrl) {
+        const reschedule = document.createElement("a");
+        reschedule.className = "button-link";
+        reschedule.href = manageUrl;
+        reschedule.target = "_blank";
+        reschedule.rel = "noreferrer";
+        reschedule.textContent = "Reschedule in Calendly";
+        actions.appendChild(reschedule);
+      }
+      if (provider === "google_calendar" && manageUrl) {
+        const open = document.createElement("a");
+        open.className = "button-link";
+        open.href = manageUrl;
+        open.target = "_blank";
+        open.rel = "noreferrer";
+        open.textContent = "Open in Google";
+        actions.appendChild(open);
+      }
+      actions.appendChild(cancelButton);
     }
     row.append(summary, details, actions);
     el.bookedAppointments.appendChild(row);
@@ -4375,8 +4762,9 @@ async function initializePortal(user) {
   await Promise.allSettled([loadCrm(), loadMessages(), refreshBillingTab()]);
   if (params.get("billing")) {
     openBusinessTool("billing");
-  } else if (params.get("open") === "settings") {
-    selectOwnerPage("settings", params.get("tab") || "notifications", { scroll: false });
+  } else if (["inbox", "appointments", "receptionist", "settings"].includes(params.get("open"))) {
+    const page = params.get("open");
+    selectOwnerPage(page, params.get("tab") || state.ownerTabs[page], { scroll: false });
   } else {
     selectOwnerPage("home", null, { scroll: false });
   }
@@ -4443,6 +4831,7 @@ function loadAdminTab(tabName) {
   if (tabName === "leads") runAdmin(loadCrm);
   if (tabName === "messages") runAdmin(loadMessages);
   if (tabName === "channels") runAdmin(loadMetaChannels);
+  if (tabName === "goals") runAdmin(loadGoals);
   if (tabName === "billing") runAdmin(refreshBillingTab);
 }
 
@@ -4758,6 +5147,25 @@ el.transferTargetList.addEventListener("click", (event) => {
   if (button.dataset.action === "save-transfer-target") runAdmin(() => saveTransferTarget(row));
   if (button.dataset.action === "delete-transfer-target") runAdmin(() => deleteTransferTarget(row));
 });
+el.saveGoalButton?.addEventListener("click", () => runAdmin(saveGoal));
+el.resetGoalButton?.addEventListener("click", resetGoalForm);
+el.goalList?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const card = button.closest("[data-goal-id]");
+  const goal = state.goalsData.goals.find((item) => item.id === Number(card?.dataset.goalId));
+  if (!goal) return;
+  if (button.dataset.action === "edit-goal") editGoal(goal);
+  if (button.dataset.action === "copy-goal-link") runAdmin(() => copyText(button.dataset.url, "Tracked link copied"));
+  if (button.dataset.action === "delete-goal") runAdmin(() => deleteGoal(goal.id));
+});
+el.goalRecentSends?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const row = button.closest("[data-send-id]");
+  if (button.dataset.action === "copy-goal-send") runAdmin(() => copyText(button.dataset.url, "Customer link copied"));
+  if (button.dataset.action === "convert-goal-send") runAdmin(() => markGoalSendConverted(Number(row?.dataset.sendId)));
+});
 el.saveBusinessProfileButton.addEventListener("click", () => runAdmin(saveBusinessProfile));
 el.saveCalendarButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.saveNotificationSettingsButton?.addEventListener("click", () => runAdmin(saveBusinessConfig));
@@ -4769,8 +5177,14 @@ el.metaConnectionList?.addEventListener("click", (event) => {
 el.refreshCalendarButton.addEventListener("click", () => runAdmin(loadCalendar));
 el.calendarProvider.addEventListener("change", updateCalendarProviderUi);
 el.vagaroMode?.addEventListener("change", updateCalendarProviderUi);
+el.calendlyDirectBooking?.addEventListener("change", updateCalendarProviderUi);
 el.saveVagaroSettingsButton.addEventListener("click", () => runAdmin(saveVagaroSettings));
 el.syncVagaroButton.addEventListener("click", () => runAdmin(syncVagaro));
+el.connectGoogleCalendarButton?.addEventListener("click", () => runAdmin(() => connectCalendarProvider("google_calendar")));
+el.disconnectGoogleCalendarButton?.addEventListener("click", () => runAdmin(() => disconnectCalendarProvider("google_calendar")));
+el.connectCalendlyButton?.addEventListener("click", () => runAdmin(() => connectCalendarProvider("calendly")));
+el.disconnectCalendlyButton?.addEventListener("click", () => runAdmin(() => disconnectCalendarProvider("calendly")));
+el.syncCalendlyButton?.addEventListener("click", () => runAdmin(syncCalendly));
 el.copyVagaroWebhookButton.addEventListener("click", () => runAdmin(copyVagaroWebhook));
 el.addBookingLinkButton.addEventListener("click", () => runAdmin(addBookingLink));
 el.saveTrackingDomainButton?.addEventListener("click", () =>
@@ -4797,8 +5211,11 @@ el.resetAppointmentButton.addEventListener("click", resetAppointmentForm);
 el.availableSlots.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action='select-slot']");
   if (!button) return;
-  if (state.admin?.calendarProvider === "vagaro") {
-    setAdminStatus("Vagaro bookings must be confirmed through a Vagaro booking link.");
+  if (
+    state.admin?.calendarProvider === "vagaro" ||
+    (state.admin?.calendarProvider === "calendly" && calendarConnection("calendly")?.settings?.directBooking === false)
+  ) {
+    setAdminStatus(`${calendarProviderName(state.admin.calendarProvider)} bookings must be confirmed through the booking link.`);
     return;
   }
   el.appointmentStart.value = calendarDateTimeLocal(button.dataset.start, el.calendarTimezone.value);
