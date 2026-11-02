@@ -40,6 +40,7 @@ for (const file of jsFiles) {
 
 run("npx", ["prisma", "validate"]);
 run(process.execPath, ["scripts/test-call-silence-guard.js"]);
+run(process.execPath, ["scripts/test-meta-platform.js"]);
 
 if (process.env.RUN_INTEGRATION === "1" || process.env.RUN_BOOKING_TEST === "1") {
   run("npm", ["run", "test:booking"]);

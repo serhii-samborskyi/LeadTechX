@@ -10488,7 +10488,65 @@ ${externalBooking ? "- For questions about Vagaro services, categories, prices, 
 ${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? "For Vagaro, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to confirm through the link." : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
 
-async function createMetaAiReply({ connection, channel, externalUserId, text, eventType, history = [] }) {
+function sanitizeMetaAiQualification(value) {
+  const raw = value && typeof value === "object" ? value : {};
+  const clean = (item, limit = 500) => {
+    const text = String(item || "").trim();
+    return text ? text.slice(0, limit) : null;
+  };
+  const email = clean(raw.email, 320);
+  return {
+    name: clean(raw.name, 200),
+    phone: normalizeE164Phone(raw.phone || "") || null,
+    email: email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null,
+    serviceNeed: clean(raw.serviceNeed, 700),
+    location: clean(raw.location, 500),
+    urgency: normalizeKnownValue(raw.urgency, ["urgent", "soon", "normal", "low", "unknown"], "unknown"),
+    budget: clean(raw.budget, 300),
+    timeline: clean(raw.timeline, 300),
+    intent: normalizeKnownValue(raw.intent, ["high", "medium", "low", "unknown"], "unknown"),
+    outcome: normalizeKnownValue(
+      raw.outcome,
+      [
+        "new",
+        "engaged",
+        "qualified",
+        "appointment_intent",
+        "quote_requested",
+        "needs_follow_up",
+        "message_for_business",
+        "complaint",
+        "not_interested",
+        "resolved",
+        "unknown",
+      ],
+      "unknown",
+    ),
+    appointmentIntent: raw.appointmentIntent === true,
+    isQualified: raw.isQualified === true,
+    requiresOwnerAttention: raw.requiresOwnerAttention === true,
+    stopRequested: raw.stopRequested === true,
+    summary: clean(raw.summary, 1200),
+    nextStep: clean(raw.nextStep, 700),
+    missingFields: Array.isArray(raw.missingFields) ? raw.missingFields.map((item) => clean(item, 80)).filter(Boolean).slice(0, 8) : [],
+  };
+}
+
+function parseMetaAiReply(text) {
+  const rawText = String(text || "").trim();
+  try {
+    const parsed = JSON.parse(stripJsonFence(rawText));
+    const reply = String(parsed?.reply || parsed?.text || "").trim().slice(0, 1800);
+    return { reply, qualification: sanitizeMetaAiQualification(parsed?.qualification) };
+  } catch {
+    return {
+      reply: rawText.replace(/^```(?:text)?\s*/i, "").replace(/```$/i, "").trim().slice(0, 1800),
+      qualification: {},
+    };
+  }
+}
+
+async function createMetaAiReply({ connection, channel, externalUserId, text, eventType, history = [], lead = null }) {
   const [profile, settings, bookingLink] = await Promise.all([
     prisma.businessProfile.findUnique({ where: { id: connection.businessProfileId } }),
     getSettings(),
@@ -10517,9 +10575,17 @@ async function createMetaAiReply({ connection, channel, externalUserId, text, ev
     .slice(-16)
     .map((item) => `${item.direction === "outbound" ? "Receptionist" : "Customer"}: ${String(item.text).slice(0, 1600)}`)
     .join("\n");
+  const currentQualification =
+    lead?.extractedFields?.metaQualification && typeof lead.extractedFields.metaQualification === "object"
+      ? lead.extractedFields.metaQualification
+      : {};
+  const attribution =
+    lead?.extractedFields?.metaAttribution && typeof lead.extractedFields.metaAttribution === "object"
+      ? lead.extractedFields.metaAttribution
+      : {};
   const commentInstruction =
     eventType === "comment"
-      ? "This is the business's first private reply to a public comment. Respond directly to the comment, be helpful, and invite the person to reply in the private conversation if more detail is needed."
+      ? "This is the business's one allowed initial private reply to a public comment. Answer or acknowledge the comment first, then ask one useful qualification question that gives the person a clear reason to reply."
       : "This is a direct customer message. Answer the latest message and continue the conversation naturally.";
   const prompt = `You are the text receptionist for ${profile.businessName}, replying in ${
     channel === "instagram" ? "Instagram" : "Facebook Messenger"
@@ -10535,9 +10601,10 @@ Business facts:
 - Booking link: ${metaBookingUrl || "none configured"}
 - Business instructions: ${config.extraInstructions || "none"}
 - Reply language: ${config.language || "English"}
+- Known lead qualification: ${JSON.stringify(currentQualification)}
+- Source attribution: ${JSON.stringify(attribution.latestTouch || attribution.firstTouch || {})}
 
 Text-channel rules:
-- Return only the customer-facing reply. Do not include labels, JSON, analysis, or markdown headings.
 - Keep the reply concise, conversational, and under 900 characters.
 - Use only the configured business facts. If a fact is unavailable, say the business can follow up.
 - Never claim an appointment was booked, a message was delivered to the owner, or an external action was completed unless this conversation contains a confirmed result.
@@ -10546,6 +10613,35 @@ Text-channel rules:
 - Do not ask for sensitive information. Collect only ordinary lead details necessary to answer or arrange follow-up.
 - Do not send unsolicited promotions. Reply only because the person just messaged or commented.
 - If the person asks to stop or says they are not interested, acknowledge once without a sales pitch.
+- Qualify naturally, not like a form. Answer the person's question first and ask at most one follow-up question per reply.
+- Do not ask again for facts already present in the conversation or known qualification.
+- Useful qualification facts are the requested service or problem, service location, timing or urgency, and ordinary contact details when human follow-up is needed. Ask about budget only when it is genuinely relevant.
+- Mark isQualified=true when the service need and enough location/timing information are known to act, or when the customer explicitly requests a quote, booking, or callback. Do not require every field.
+- Mark stopRequested=true and outcome=not_interested when the person opts out or says they are not interested.
+
+Return only valid JSON in this exact shape:
+{
+  "reply": "customer-facing response",
+  "qualification": {
+    "name": null,
+    "phone": null,
+    "email": null,
+    "serviceNeed": null,
+    "location": null,
+    "urgency": "urgent|soon|normal|low|unknown",
+    "budget": null,
+    "timeline": null,
+    "intent": "high|medium|low|unknown",
+    "outcome": "new|engaged|qualified|appointment_intent|quote_requested|needs_follow_up|message_for_business|complaint|not_interested|resolved|unknown",
+    "appointmentIntent": false,
+    "isQualified": false,
+    "requiresOwnerAttention": false,
+    "stopRequested": false,
+    "summary": "short factual lead summary",
+    "nextStep": "short operational next action",
+    "missingFields": []
+  }
+}
 
 Conversation identifier: ${externalUserId || "unknown"}
 ${conversation ? `Recent conversation:\n${conversation}\n` : ""}
@@ -10556,15 +10652,11 @@ Latest customer ${eventType === "comment" ? "comment" : "message"}: ${String(tex
     {
       model: settings.researchModel,
       contents: [prompt],
-      config: { temperature: 0.35, maxOutputTokens: 300 },
+      config: { temperature: 0.25, maxOutputTokens: 700, responseMimeType: "application/json" },
     },
     "meta_business_message_reply",
   );
-  return String(response.text || "")
-    .replace(/^```(?:text)?\s*/i, "")
-    .replace(/```$/i, "")
-    .trim()
-    .slice(0, 1800);
+  return parseMetaAiReply(response.text || "");
 }
 
 function cellText(value) {

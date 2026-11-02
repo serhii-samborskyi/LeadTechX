@@ -14,6 +14,85 @@ const META_SCOPES = [
   "instagram_manage_comments",
 ];
 
+const META_LEAD_PROTECTED_STATUSES = new Set(["appointment", "transferred", "unreachable"]);
+
+function compactObject(value) {
+  return Object.fromEntries(Object.entries(value || {}).filter(([, item]) => item !== undefined && item !== null && item !== ""));
+}
+
+function shortText(value, limit = 2000) {
+  const text = String(value || "").trim();
+  return text ? text.slice(0, limit) : null;
+}
+
+export function metaAttributionFromEvent({ connection = {}, entry = {}, payload = {}, channel, eventType }) {
+  const referral = payload.referral || payload.message?.referral || payload.postback?.referral || {};
+  const adContext = referral.ads_context_data || payload.ads_context_data || {};
+  const commentId = payload.id || payload.comment_id || referral.comment_id;
+  const postId = payload.post_id || payload.media?.id || referral.post_id || adContext.post_id;
+  const adId = referral.ad_id || payload.ad_id || adContext.ad_id;
+  const campaignId = referral.campaign_id || payload.campaign_id || adContext.campaign_id;
+  const adsetId = referral.adset_id || payload.adset_id || adContext.adset_id;
+  return compactObject({
+    platform: channel === "instagram" ? "instagram" : "facebook",
+    channel,
+    eventType,
+    pageId: connection.pageId || entry.id,
+    instagramBusinessId: connection.instagramBusinessId,
+    commentId: commentId ? String(commentId) : null,
+    postId: postId ? String(postId) : null,
+    parentId: payload.parent_id ? String(payload.parent_id) : null,
+    mediaId: payload.media?.id ? String(payload.media.id) : null,
+    personName: shortText(payload.from?.name || payload.sender?.name, 200),
+    username: shortText(payload.from?.username || payload.sender?.username, 200),
+    referralSource: shortText(referral.source, 120),
+    referralType: shortText(referral.type, 120),
+    referralCode: shortText(referral.ref, 300),
+    sourceUrl: shortText(referral.referer_uri || payload.permalink_url, 1000),
+    adId: adId ? String(adId) : null,
+    adsetId: adsetId ? String(adsetId) : null,
+    campaignId: campaignId ? String(campaignId) : null,
+    adTitle: shortText(adContext.ad_title || payload.ad_title, 500),
+    adBody: shortText(adContext.ad_body || payload.ad_body, 1000),
+    trafficType: adId ? "paid" : postId ? "post_unknown" : referral.source || "direct",
+  });
+}
+
+export function metaPrivateReplyRequest({ channel, pageId, commentId, text }) {
+  const message = String(text || "").trim().slice(0, 900);
+  if (!message) throw new Error("A private reply message is required");
+  if (!commentId) throw new Error("A Meta comment ID is required");
+  if (channel === "instagram") {
+    return { path: `${commentId}/private_replies`, body: { message } };
+  }
+  if (!pageId) throw new Error("A Facebook Page ID is required");
+  return {
+    path: `${pageId}/messages`,
+    body: { recipient: { comment_id: String(commentId) }, message: { text: message } },
+  };
+}
+
+export function normalizeMetaAiResult(value) {
+  if (typeof value === "string") return { reply: value.trim(), qualification: {} };
+  if (!value || typeof value !== "object") return { reply: "", qualification: {} };
+  return {
+    reply: String(value.reply || value.text || "").trim(),
+    qualification: value.qualification && typeof value.qualification === "object" ? value.qualification : {},
+  };
+}
+
+export function mergeMetaQualification(existing = {}, incoming = {}) {
+  const merged = { ...(existing && typeof existing === "object" ? existing : {}) };
+  const stickyBooleans = new Set(["appointmentIntent", "isQualified", "requiresOwnerAttention", "stopRequested"]);
+  for (const [key, value] of Object.entries(incoming && typeof incoming === "object" ? incoming : {})) {
+    if (value === undefined || value === null || value === "") continue;
+    if (value === "unknown" && merged[key] && merged[key] !== "unknown") continue;
+    if (stickyBooleans.has(key)) merged[key] = Boolean(merged[key] || value);
+    else merged[key] = value;
+  }
+  return merged;
+}
+
 function htmlEscape(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -252,14 +331,14 @@ export function registerMetaPlatform({
   async function recentConversation(connectionId, externalUserId) {
     if (!externalUserId) return [];
     const messages = await prisma.metaMessage.findMany({
-      where: { connectionId, externalUserId, eventType: "message" },
+      where: { connectionId, externalUserId },
       orderBy: { createdAt: "desc" },
       take: 16,
     });
     return messages.reverse().map((message) => ({ direction: message.direction, text: message.text || "" }));
   }
 
-  async function ensureMetaLead({ connection, channel, externalUserId, text, eventType }) {
+  async function ensureMetaLead({ connection, channel, externalUserId, text, eventType, attribution }) {
     if (!externalUserId) return null;
     const source = `meta_${channel}`;
     const existing = await prisma.lead.findFirst({
@@ -271,13 +350,28 @@ export function registerMetaPlatform({
       orderBy: { createdAt: "desc" },
     });
     const detail = String(text || "").trim().slice(0, 2000);
+    const receivedAt = new Date().toISOString();
+    const touch = jsonSafe(compactObject({ ...attribution, eventType, text: detail || null, receivedAt }));
     if (existing) {
+      const existingFields = existing.extractedFields && typeof existing.extractedFields === "object" ? existing.extractedFields : {};
+      const existingAttribution =
+        existingFields.metaAttribution && typeof existingFields.metaAttribution === "object" ? existingFields.metaAttribution : {};
       return prisma.lead.update({
         where: { id: existing.id },
         data: {
-          need: detail || existing.need,
           summary: detail ? `Latest ${eventType === "comment" ? "comment" : "message"}: ${detail}` : existing.summary,
-          status: existing.status === "new" ? "new" : "needs_reply",
+          extractedFields: jsonSafe({
+            ...existingFields,
+            externalUserId,
+            pageId: connection.pageId,
+            channel,
+            eventType,
+            metaAttribution: {
+              ...existingAttribution,
+              firstTouch: existingAttribution.firstTouch || touch,
+              latestTouch: touch,
+            },
+          }),
         },
       });
     }
@@ -286,12 +380,46 @@ export function registerMetaPlatform({
       data: {
         businessProfileId: connection.businessProfileId,
         businessName: connection.pageName,
-        name: `${channelName} customer`,
+        name: attribution?.personName || attribution?.username || `${channelName} customer`,
         need: detail || `${channelName} conversation`,
         summary: detail ? `New ${eventType === "comment" ? "comment" : "message"}: ${detail}` : `New ${channelName} conversation`,
         status: "new",
         source,
-        extractedFields: jsonSafe({ externalUserId, pageId: connection.pageId, channel, eventType }),
+        extractedFields: jsonSafe({
+          externalUserId,
+          pageId: connection.pageId,
+          channel,
+          eventType,
+          metaAttribution: { firstTouch: touch, latestTouch: touch },
+        }),
+      },
+    });
+  }
+
+  async function applyMetaQualification(lead, incoming) {
+    if (!lead?.id || !incoming || typeof incoming !== "object" || !Object.keys(incoming).length) return lead;
+    const existingFields = lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {};
+    const qualification = mergeMetaQualification(existingFields.metaQualification, incoming);
+    qualification.updatedAt = new Date().toISOString();
+    let status = lead.status || "new";
+    if (!META_LEAD_PROTECTED_STATUSES.has(status)) {
+      if (qualification.stopRequested || qualification.outcome === "not_interested") status = "unqualified";
+      else if (qualification.isQualified || qualification.outcome === "qualified") status = "qualified";
+      else if (qualification.appointmentIntent || qualification.outcome === "appointment_intent") status = "callback";
+      else if (qualification.requiresOwnerAttention) status = "needs_reply";
+    }
+    const currentName = String(lead.name || "");
+    const placeholderName = /^(Facebook|Instagram) customer$/i.test(currentName);
+    return prisma.lead.update({
+      where: { id: lead.id },
+      data: {
+        status,
+        name: qualification.name && placeholderName ? String(qualification.name).slice(0, 200) : lead.name,
+        phone: qualification.phone || lead.phone,
+        email: qualification.email || lead.email,
+        need: qualification.serviceNeed || lead.need,
+        summary: qualification.summary || lead.summary,
+        extractedFields: jsonSafe({ ...existingFields, metaQualification: qualification }),
       },
     });
   }
@@ -317,6 +445,7 @@ export function registerMetaPlatform({
     const channel = String(entry.id) === String(connection.instagramBusinessId) ? "instagram" : "messenger";
     const externalUserId = String(event.sender?.id || "");
     if (!externalUserId) return;
+    const attribution = metaAttributionFromEvent({ connection, entry, payload: event, channel, eventType: "message" });
     const externalMessageId = messageIdForEvent(channel, entry, event, "message");
     const stored = await persistInbound({
       connection,
@@ -328,11 +457,15 @@ export function registerMetaPlatform({
       raw: event,
     });
     if (stored.duplicate) return;
-    await ensureMetaLead({ connection, channel, externalUserId, text: event.message.text, eventType: "message" });
+    let lead = await ensureMetaLead({ connection, channel, externalUserId, text: event.message.text, eventType: "message", attribution });
     try {
       const history = await recentConversation(connection.id, externalUserId);
-      const reply = await createAiReply({ connection, channel, externalUserId, text: event.message.text, eventType: "message", history });
+      const aiResult = normalizeMetaAiResult(
+        await createAiReply({ connection, channel, externalUserId, text: event.message.text, eventType: "message", history, lead }),
+      );
+      const reply = aiResult.reply;
       if (!reply) throw new Error("The AI did not produce a reply");
+      lead = await applyMetaQualification(lead, aiResult.qualification);
       const sent = await sendDirectReply({ metaConfig, connection, channel, externalUserId, text: reply });
       await prisma.metaMessage.create({
         data: {
@@ -363,6 +496,7 @@ export function registerMetaPlatform({
     const externalUserId = String(value.from?.id || value.from?.username || "");
     if (!commentId || !text || value.verb === "remove" || (change?.field === "feed" && value.item !== "comment")) return;
     const channel = isInstagram ? "instagram" : "messenger";
+    const attribution = metaAttributionFromEvent({ connection, entry, payload: value, channel, eventType: "comment" });
     const stored = await persistInbound({
       connection,
       channel,
@@ -373,15 +507,20 @@ export function registerMetaPlatform({
       raw: change,
     });
     if (stored.duplicate) return;
-    await ensureMetaLead({ connection, channel, externalUserId, text, eventType: "comment" });
+    let lead = await ensureMetaLead({ connection, channel, externalUserId, text, eventType: "comment", attribution });
     try {
-      const reply = await createAiReply({ connection, channel, externalUserId, text, eventType: "comment", history: [] });
+      const aiResult = normalizeMetaAiResult(
+        await createAiReply({ connection, channel, externalUserId, text, eventType: "comment", history: [], lead }),
+      );
+      const reply = aiResult.reply;
       if (!reply) throw new Error("The AI did not produce a private reply");
+      lead = await applyMetaQualification(lead, aiResult.qualification);
       const accessToken = decryptSecret(connection.pageAccessTokenEncrypted);
-      const sent = await graphRequest(metaConfig, `${commentId}/private_replies`, {
+      const request = metaPrivateReplyRequest({ channel, pageId: connection.pageId, commentId, text: reply });
+      const sent = await graphRequest(metaConfig, request.path, {
         method: "POST",
         accessToken,
-        body: { message: String(reply).slice(0, 900) },
+        body: request.body,
       });
       await prisma.metaMessage.create({
         data: {
@@ -400,6 +539,7 @@ export function registerMetaPlatform({
       await prisma.metaMessage.update({ where: { id: stored.message.id }, data: { status: "replied" } });
     } catch (error) {
       await prisma.metaMessage.update({ where: { id: stored.message.id }, data: { status: "failed", error: error.message } });
+      await prisma.metaConnection.update({ where: { id: connection.id }, data: { lastError: error.message } });
     }
   }
 

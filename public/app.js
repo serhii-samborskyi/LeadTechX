@@ -2626,7 +2626,28 @@ function crmEventDetail(detail) {
 
 function crmInsight(lead) {
   const fields = lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {};
-  return fields.postCallAi || fields.callSummary?.fallbackInsight || fields.callSummary || fields.callTranscript || {};
+  const metaQualification = fields.metaQualification && typeof fields.metaQualification === "object" ? fields.metaQualification : null;
+  return (
+    fields.postCallAi ||
+    fields.callSummary?.fallbackInsight ||
+    fields.callSummary ||
+    fields.callTranscript ||
+    (metaQualification
+      ? {
+          outcome: metaQualification.outcome,
+          urgency: metaQualification.urgency,
+          nextStep: metaQualification.nextStep,
+        }
+      : {})
+  );
+}
+
+function crmMetaDetails(lead) {
+  const fields = lead.extractedFields && typeof lead.extractedFields === "object" ? lead.extractedFields : {};
+  const qualification = fields.metaQualification && typeof fields.metaQualification === "object" ? fields.metaQualification : {};
+  const attribution = fields.metaAttribution && typeof fields.metaAttribution === "object" ? fields.metaAttribution : {};
+  const touch = attribution.latestTouch || attribution.firstTouch || {};
+  return { qualification, touch };
 }
 
 function bookingMessageDelivery(lead, send) {
@@ -2772,6 +2793,7 @@ function renderCrm(leads) {
     grid.className = "crm-detail-grid";
     const started = call?.startedAt ? new Date(call.startedAt).toLocaleString() : null;
     const insight = crmInsight(lead);
+    const metaDetails = crmMetaDetails(lead);
     const duration = call?.metrics?.durationSeconds ? `${call.metrics.durationSeconds}s` : null;
     const latestFeedback = lead.feedback?.[0] || null;
     grid.append(
@@ -2789,6 +2811,23 @@ function renderCrm(leads) {
         crmField("Urgency", insight.urgency),
         crmField("Satisfaction", insight.satisfaction),
         crmField("Next step", insight.nextStep),
+        crmField("Lead intent", metaDetails.qualification.intent),
+        crmField("Service need", metaDetails.qualification.serviceNeed),
+        crmField("Service location", metaDetails.qualification.location),
+        crmField("Timeline", metaDetails.qualification.timeline),
+        crmField("Budget", metaDetails.qualification.budget),
+        crmField(
+          "Meta source",
+          metaDetails.touch.trafficType === "paid"
+            ? "Paid ad"
+            : metaDetails.touch.trafficType === "post_unknown"
+              ? "Facebook/Instagram post"
+              : metaDetails.touch.platform,
+        ),
+        crmField("Meta campaign", metaDetails.touch.campaignId),
+        crmField("Meta ad set", metaDetails.touch.adsetId),
+        crmField("Meta ad", metaDetails.touch.adId || metaDetails.touch.adTitle),
+        crmField("Meta post", metaDetails.touch.postId),
         crmField("Feedback", latestFeedback ? `${latestFeedback.sentiment} · ${latestFeedback.status}` : null),
         crmField("Review sent", latestFeedback?.reviewRequestedAt ? new Date(latestFeedback.reviewRequestedAt).toLocaleString() : null),
         crmField("Complaint escalated", latestFeedback?.complaintEscalatedAt ? new Date(latestFeedback.complaintEscalatedAt).toLocaleString() : null),
