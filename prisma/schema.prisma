@@ -33,6 +33,16 @@ model BusinessProfile {
   subscriptionCurrentPeriodEnd DateTime?
   subscriptionPlanId           Int?
   subscriptionPlan             SubscriptionPlan?                   @relation(fields: [subscriptionPlanId], references: [id], onDelete: SetNull)
+  planAccessSource             String?
+  complimentaryPlanEndsAt      DateTime?
+  complimentaryCreditsEnabled  Boolean                             @default(false)
+  complimentaryCreditsNextAt   DateTime?
+  complimentaryGrantKey        String?                             @unique
+  complimentaryGrantedAt       DateTime?
+  complimentaryGrantedBy       String?
+  complimentaryGrantNote       String?
+  complimentaryPreviousStatus  String?
+  complimentaryPreviousPlanId  Int?
   archivedAt                   DateTime?
   leadWebhookToken             String?                             @unique
   leadWebhookEnabled           Boolean                             @default(true)
@@ -74,6 +84,9 @@ model BusinessProfile {
   metaConnections              MetaConnection[]
   metaOAuthSessions            MetaOAuthSession[]
   metaMessages                 MetaMessage[]
+
+  @@index([planAccessSource, complimentaryPlanEndsAt])
+  @@index([planAccessSource, complimentaryCreditsNextAt])
 }
 
 model SubscriptionPlan {
@@ -1348,6 +1361,7 @@ model CreditBucket {
   expiresAt               DateTime?
   stripeInvoiceId         String?             @unique
   stripeCheckoutSessionId String?             @unique
+  grantKey                String?             @unique
   metadata                Json?
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt

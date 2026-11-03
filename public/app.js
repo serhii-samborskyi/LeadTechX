@@ -4267,6 +4267,7 @@ function planWaitlistedForBusiness(plan, currentPlan = null) {
 function billingAccountPresentation(data) {
   const accountStatus = String(data.accountStatus || "").trim().toLowerCase();
   const currentPlan = data.currentPlan || null;
+  const planAccess = data.planAccess || {};
   const checkoutResult = String(params.get("billing") || "").trim().toLowerCase();
   if (checkoutResult === "success" && !currentPlan && accountStatus !== "paid") {
     return {
@@ -4292,12 +4293,29 @@ function billingAccountPresentation(data) {
       message: "Your business settings are still here. Select a plan below to resume service.",
     };
   }
+  if (planAccess.complimentary && !planAccess.active) {
+    return {
+      tone: "warning",
+      state: "Complimentary access ended",
+      title: "Choose a plan to keep RingPort active",
+      message: "Your business settings are still here. Select a plan below or contact support to resume service.",
+    };
+  }
   if (accountStatus === "suspended") {
     return {
       tone: "warning",
       state: "Account paused",
       title: "Your account needs attention",
       message: "Choose a plan below or contact support if you need help restoring service.",
+    };
+  }
+  if (planAccess.complimentary && planAccess.active) {
+    const ending = planAccess.endsAt ? ` Access is available through ${new Date(planAccess.endsAt).toLocaleDateString()}.` : "";
+    return {
+      tone: "success",
+      state: "Complimentary plan",
+      title: currentPlan ? `${currentPlan.name} is active` : "Your RingPort plan is active",
+      message: `RingPort has enabled this plan with no payment required.${ending}`,
     };
   }
   if (currentPlan || accountStatus === "paid") {
@@ -4480,6 +4498,13 @@ function renderBilling(data) {
   el.billingAccountBalance.classList.toggle("warning", Number(data.creditBalance || 0) < 0);
   if (stripe.configurationError) {
     el.billingStatus.textContent = "Checkout is temporarily unavailable. Please contact support.";
+  } else if (data.planAccess?.complimentary && data.planAccess?.active && currentPlan) {
+    const refresh = data.planAccess.creditsRefresh && data.planAccess.nextCreditRefreshAt
+      ? ` Included credits refresh on ${new Date(data.planAccess.nextCreditRefreshAt).toLocaleDateString()}.`
+      : "";
+    el.billingStatus.textContent = `${currentPlan.name} is provided by RingPort with no payment required.${refresh}`;
+  } else if (data.planAccess?.complimentary && !data.planAccess?.active) {
+    el.billingStatus.textContent = "Complimentary access has ended. Choose a plan below to resume service.";
   } else if (currentPlan) {
     const renewal = stripe.subscriptionCurrentPeriodEnd
       ? ` Your next renewal is ${new Date(stripe.subscriptionCurrentPeriodEnd).toLocaleDateString()}.`

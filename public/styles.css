@@ -2250,18 +2250,107 @@ body {
   line-height: 1.35;
 }
 
-.business-plan-control {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  margin-top: 8px;
+.business-plan-cell {
+  grid-column: span 2;
+  min-width: 300px;
 }
 
-.business-plan-control select,
-.business-plan-control button {
+.complimentary-plan-control {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fcfa;
+}
+
+.complimentary-plan-control summary {
+  min-height: 38px;
+  padding: 9px 11px;
+  cursor: pointer;
+  color: var(--green);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.complimentary-plan-control summary:focus-visible {
+  outline: 3px solid rgb(47 128 104 / 24%);
+  outline-offset: 2px;
+}
+
+.complimentary-plan-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 11px 11px;
+  border-top: 1px solid var(--line);
+}
+
+.complimentary-plan-panel > label:not(.complimentary-credit-toggle) {
+  margin-top: 10px;
+  font-size: 0.72rem;
+}
+
+.complimentary-plan-panel input,
+.complimentary-plan-panel select {
+  width: 100%;
+  min-height: 38px;
+  margin-top: 4px;
+  padding: 7px 9px;
+  font-size: 0.8rem;
+}
+
+.complimentary-plan-panel small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.complimentary-credit-toggle {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.complimentary-credit-toggle input {
+  flex: 0 0 auto;
+  width: 17px;
+  min-height: 17px;
+  margin: 0;
+}
+
+.complimentary-plan-help {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.complimentary-plan-help.warning {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.complimentary-plan-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.complimentary-plan-actions button {
   min-height: 36px;
-  padding: 0 10px;
-  font-size: 0.82rem;
+  padding: 0 11px;
+  font-size: 0.78rem;
+  transition: transform 140ms var(--ease-out);
+}
+
+.complimentary-plan-actions button:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .business-actions {
@@ -6241,6 +6330,15 @@ a.appointment-field-value {
   .number-search-form,
   .number-row,
   .number-row.search-result {
+    grid-template-columns: 1fr;
+  }
+
+  .business-plan-cell {
+    grid-column: auto;
+    min-width: 0;
+  }
+
+  .complimentary-plan-panel {
     grid-template-columns: 1fr;
   }
 

@@ -1493,6 +1493,19 @@ function setBusinessProfilesMessage(message = "", className = "form-message") {
   el.businessProfilesMessage.textContent = message;
 }
 
+function localDateInputValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function stripeSubscriptionBlocksComplimentaryAccess(business) {
+  if (!business.stripeSubscriptionId) return false;
+  return !["canceled", "cancelled", "incomplete_expired"].includes(String(business.stripeSubscriptionStatus || "").toLowerCase());
+}
+
 async function addTrialCredits(business) {
   const rawAmount = window.prompt(`How many trial credits should be added to ${business.businessName}?`, "100");
   if (rawAmount === null) return;
@@ -1583,44 +1596,142 @@ async function loadAccounts() {
           ? "Trial account"
           : business.accountStatus;
     lifecycle.querySelector("span").textContent = `${business.archivedAt ? "Archived" : lifecycleLabel} · ${business.creditBalance} credits${
-      business.trialEndsAt ? ` · ends ${new Date(business.trialEndsAt).toLocaleDateString()}` : ""
+      business.accountStatus === "trial" && business.trialEndsAt ? ` · ends ${new Date(business.trialEndsAt).toLocaleDateString()}` : ""
     }`;
     const plan = document.createElement("div");
-    plan.innerHTML = `<b>Plan</b><span></span>`;
-    plan.querySelector("span").textContent = business.subscriptionPlan
-      ? `${business.subscriptionPlan.name} · ${planPriceDisplay(business.subscriptionPlan.monthlyPriceCents)}/mo · ${business.subscriptionPlan.monthlyCredits} credits`
-      : business.stripeSubscriptionStatus
-        ? `Subscription · ${business.stripeSubscriptionStatus}`
-        : "No subscription";
-    const planControls = document.createElement("div");
-    planControls.className = "business-plan-control";
+    plan.className = "business-plan-cell";
+    const planLabel = document.createElement("b");
+    planLabel.textContent = "Plan";
+    const planStatus = document.createElement("span");
+    const complimentaryActive = Boolean(
+      business.planAccessSource === "complimentary" &&
+        business.accountStatus === "paid" &&
+        (!business.complimentaryPlanEndsAt || new Date(business.complimentaryPlanEndsAt) > new Date()),
+    );
+    const complimentaryEnded = business.planAccessSource === "complimentary_expired";
+    const complimentaryEndLabel = business.complimentaryPlanEndsAt
+      ? ` through ${new Date(business.complimentaryPlanEndsAt).toLocaleDateString()}`
+      : " with no expiration";
+    planStatus.textContent = complimentaryActive
+      ? `${business.subscriptionPlan?.name || "Plan"} · Complimentary${complimentaryEndLabel}`
+      : complimentaryEnded
+        ? `${business.subscriptionPlan?.name || "Plan"} · Complimentary access ended`
+        : business.subscriptionPlan
+          ? `${business.subscriptionPlan.name} · ${planPriceDisplay(business.subscriptionPlan.monthlyPriceCents)}/mo · ${business.subscriptionPlan.monthlyCredits} credits`
+          : business.stripeSubscriptionStatus
+            ? `Subscription · ${business.stripeSubscriptionStatus}`
+            : "No subscription";
+    const grantControl = document.createElement("details");
+    grantControl.className = "complimentary-plan-control";
+    const grantSummary = document.createElement("summary");
+    grantSummary.textContent = complimentaryActive ? "Manage complimentary access" : "Grant complimentary access";
+    const grantPanel = document.createElement("div");
+    grantPanel.className = "complimentary-plan-panel";
+    const planField = document.createElement("label");
+    planField.textContent = "Plan";
     const planSelect = document.createElement("select");
-    const noPlanOption = document.createElement("option");
-    noPlanOption.value = "";
-    noPlanOption.textContent = "No app plan";
-    planSelect.appendChild(noPlanOption);
-    const activePlans = subscriptionPlans.filter((item) => item.active || item.id === business.subscriptionPlanId);
+    planSelect.setAttribute("aria-label", `Complimentary plan for ${business.businessName}`);
+    const activePlans = subscriptionPlans.filter((item) => item.active);
     for (const item of activePlans) {
       const option = document.createElement("option");
       option.value = String(item.id);
-      option.textContent = `${item.name} · ${planPriceDisplay(item.monthlyPriceCents)}/mo`;
+      option.textContent = `${item.name} · ${item.monthlyCredits.toLocaleString()} credits monthly`;
       option.selected = item.id === business.subscriptionPlanId;
       planSelect.appendChild(option);
     }
-    planSelect.value = business.subscriptionPlanId ? String(business.subscriptionPlanId) : "";
+    if (!business.subscriptionPlanId && activePlans[0]) planSelect.value = String(activePlans[0].id);
+    planField.appendChild(planSelect);
+
+    const endField = document.createElement("label");
+    endField.textContent = "Ends on";
+    const endInput = document.createElement("input");
+    endInput.type = "date";
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    endInput.min = localDateInputValue(tomorrow);
+    endInput.value = complimentaryActive ? localDateInputValue(business.complimentaryPlanEndsAt) : "";
+    const endHint = document.createElement("small");
+    endHint.textContent = "Leave empty for no expiration.";
+    endField.append(endInput, endHint);
+
+    const creditToggle = document.createElement("label");
+    creditToggle.className = "complimentary-credit-toggle";
+    const creditInput = document.createElement("input");
+    creditInput.type = "checkbox";
+    creditInput.checked = complimentaryActive ? business.complimentaryCreditsEnabled !== false : true;
+    const creditCopy = document.createElement("span");
+    creditCopy.textContent = "Refresh the plan's included credits every month";
+    creditToggle.append(creditInput, creditCopy);
+
+    const noteField = document.createElement("label");
+    noteField.textContent = "Internal note";
+    const noteInput = document.createElement("input");
+    noteInput.maxLength = 1000;
+    noteInput.placeholder = "Partner, recovery, staff account...";
+    noteInput.value = business.complimentaryGrantNote || "";
+    noteField.appendChild(noteInput);
+
+    const grantHelp = document.createElement("p");
+    grantHelp.className = "complimentary-plan-help";
+    const stripeBlocked = stripeSubscriptionBlocksComplimentaryAccess(business);
+    grantHelp.textContent = stripeBlocked
+      ? "This business has an active Stripe subscription. Cancel it in Stripe before granting complimentary access."
+      : "No Stripe checkout or payment record will be created.";
+    if (stripeBlocked) grantHelp.classList.add("warning");
+
+    const grantActions = document.createElement("div");
+    grantActions.className = "complimentary-plan-actions";
     const savePlan = document.createElement("button");
     savePlan.type = "button";
-    savePlan.textContent = "Save plan";
+    savePlan.className = "primary";
+    savePlan.textContent = complimentaryActive ? "Update access" : "Grant access";
+    savePlan.disabled = stripeBlocked || !activePlans.length;
     savePlan.addEventListener("click", async () => {
-      await api(`/api/admin/businesses/${business.id}/plan`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subscriptionPlanId: planSelect.value ? Number(planSelect.value) : null }),
-      });
-      await Promise.all([loadAccounts(), loadPlans()]);
+      if (!planSelect.value) return;
+      savePlan.disabled = true;
+      try {
+        setBusinessProfilesMessage(`${complimentaryActive ? "Updating" : "Granting"} complimentary access for ${business.businessName}`);
+        const endsAt = endInput.value ? new Date(`${endInput.value}T23:59:59`).toISOString() : null;
+        await api(`/api/admin/businesses/${business.id}/complimentary-plan`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            subscriptionPlanId: Number(planSelect.value),
+            endsAt,
+            refreshMonthlyCredits: creditInput.checked,
+            note: noteInput.value.trim(),
+          }),
+        });
+        await Promise.all([loadAccounts(), loadPlans()]);
+        setBusinessProfilesMessage(`Complimentary access is active for ${business.businessName}`, "form-message success");
+      } catch (error) {
+        savePlan.disabled = stripeBlocked || !activePlans.length;
+        setBusinessProfilesMessage(error.message, "form-message error");
+      }
     });
-    planControls.append(planSelect, savePlan);
-    plan.appendChild(planControls);
+    grantActions.appendChild(savePlan);
+    if (complimentaryActive) {
+      const revokePlan = document.createElement("button");
+      revokePlan.type = "button";
+      revokePlan.className = "danger-button";
+      revokePlan.textContent = "Revoke access";
+      revokePlan.addEventListener("click", async () => {
+        if (!window.confirm(`Revoke complimentary access for ${business.businessName}? Remaining complimentary credits will expire.`)) return;
+        revokePlan.disabled = true;
+        try {
+          await api(`/api/admin/businesses/${business.id}/complimentary-plan`, { method: "DELETE" });
+          await Promise.all([loadAccounts(), loadPlans()]);
+          setBusinessProfilesMessage(`Complimentary access was revoked for ${business.businessName}`, "form-message success");
+        } catch (error) {
+          revokePlan.disabled = false;
+          setBusinessProfilesMessage(error.message, "form-message error");
+        }
+      });
+      grantActions.appendChild(revokePlan);
+    }
+    grantPanel.append(planField, endField, creditToggle, noteField, grantHelp, grantActions);
+    grantControl.append(grantSummary, grantPanel);
+    plan.append(planLabel, planStatus, grantControl);
     const agent = document.createElement("div");
     agent.innerHTML = `<b>Agent</b><span></span>`;
     agent.querySelector("span").textContent = business.config

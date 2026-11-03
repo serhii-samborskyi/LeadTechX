@@ -207,6 +207,8 @@ let trialPhoneNumberCleanupInterval = null;
 let trialPhoneNumberCleanupRunning = false;
 let trialReminderWorkerTimer = null;
 let trialReminderWorkerRunning = false;
+let complimentaryPlanWorkerTimer = null;
+let complimentaryPlanWorkerRunning = false;
 const aiRateLimitHits = new Map();
 const publicBookingAttempts = new Map();
 let prismaReconnectPromise = null;
@@ -2285,7 +2287,12 @@ async function profileWithPlan(profileOrId) {
 function effectiveBusinessEntitlements(profile) {
   const currentPlan = publicSubscriptionPlan(profile?.subscriptionPlan);
   const expiredAccount = ["expired", "cancelled", "canceled", "suspended"].includes(String(profile?.accountStatus || "").toLowerCase());
-  const usablePlan = Boolean(currentPlan && currentPlan.active !== false && !profile?.archivedAt && !expiredAccount);
+  const complimentaryExpired = Boolean(
+    profile?.planAccessSource === "complimentary" &&
+      profile?.complimentaryPlanEndsAt &&
+      new Date(profile.complimentaryPlanEndsAt) <= new Date(),
+  );
+  const usablePlan = Boolean(currentPlan && currentPlan.active !== false && !profile?.archivedAt && !expiredAccount && !complimentaryExpired);
   const plan = usablePlan ? currentPlan : { ...BASIC_TRIAL_ENTITLEMENTS };
   return {
     source: usablePlan ? "plan" : currentPlan ? "inactive_plan" : "basic_trial",
@@ -2307,6 +2314,17 @@ function effectiveBusinessEntitlements(profile) {
       maxUsers: Number(plan.maxUsers || 1),
     },
   };
+}
+
+function businessAccessPaused(profile, now = new Date()) {
+  const status = String(profile?.accountStatus || "").trim().toLowerCase();
+  if (["expired", "cancelled", "canceled", "suspended"].includes(status)) return true;
+  if (status === "trial" && profile?.trialEndsAt && new Date(profile.trialEndsAt) <= now) return true;
+  return Boolean(
+    profile?.planAccessSource === "complimentary" &&
+      profile?.complimentaryPlanEndsAt &&
+      new Date(profile.complimentaryPlanEndsAt) <= now,
+  );
 }
 
 async function businessEntitlements(profileOrId) {
@@ -3865,6 +3883,7 @@ async function createCreditBucketGrant(
     subscriptionPlanId = null,
     stripeInvoiceId = null,
     stripeCheckoutSessionId = null,
+    grantKey = null,
   },
 ) {
   const creditAmount = Math.max(0, Math.round(Number(amount || 0)));
@@ -3875,6 +3894,10 @@ async function createCreditBucketGrant(
   }
   if (stripeCheckoutSessionId) {
     const existing = await client.creditBucket.findUnique({ where: { stripeCheckoutSessionId } });
+    if (existing) return existing;
+  }
+  if (grantKey) {
+    const existing = await client.creditBucket.findUnique({ where: { grantKey } });
     if (existing) return existing;
   }
   const bucket = await client.creditBucket.create({
@@ -3888,6 +3911,7 @@ async function createCreditBucketGrant(
       expiresAt,
       stripeInvoiceId,
       stripeCheckoutSessionId,
+      grantKey,
       metadata,
     },
   });
@@ -3933,7 +3957,7 @@ async function creditBucketBreakdown(businessProfileId, now = new Date()) {
     for (const bucket of buckets) {
       const active = !bucket.expiresAt || new Date(bucket.expiresAt) > now;
       if (!active) continue;
-      if (["subscription_monthly", "subscription_annual"].includes(bucket.sourceType)) {
+      if (["subscription_monthly", "subscription_annual", "complimentary_monthly"].includes(bucket.sourceType)) {
         summary.monthlyIncluded.remaining += bucket.remainingCredits;
         summary.monthlyIncluded.total += bucket.totalCredits;
         if (
@@ -4097,6 +4121,7 @@ async function grantBusinessCredits({
   subscriptionPlanId = null,
   stripeInvoiceId = null,
   stripeCheckoutSessionId = null,
+  grantKey = null,
 }) {
   const creditAmount = Math.max(0, Math.round(Number(amount || 0)));
   if (!businessProfileId || !creditAmount) return null;
@@ -4114,8 +4139,297 @@ async function grantBusinessCredits({
       subscriptionPlanId,
       stripeInvoiceId,
       stripeCheckoutSessionId,
+      grantKey,
     });
   });
+}
+
+const INACTIVE_STRIPE_SUBSCRIPTION_STATUSES = new Set(["canceled", "cancelled", "incomplete_expired"]);
+
+function hasLiveStripeSubscription(profile) {
+  if (!profile?.stripeSubscriptionId) return false;
+  const status = String(profile.stripeSubscriptionStatus || "").trim().toLowerCase();
+  return !INACTIVE_STRIPE_SUBSCRIPTION_STATUSES.has(status);
+}
+
+function stripePlanAccessData() {
+  return {
+    planAccessSource: "stripe",
+    complimentaryPlanEndsAt: null,
+    complimentaryCreditsEnabled: false,
+    complimentaryCreditsNextAt: null,
+    complimentaryGrantKey: null,
+    complimentaryGrantedAt: null,
+    complimentaryGrantedBy: null,
+    complimentaryGrantNote: null,
+    complimentaryPreviousStatus: null,
+    complimentaryPreviousPlanId: null,
+  };
+}
+
+function complimentaryPlanActive(profile, now = new Date()) {
+  if (profile?.planAccessSource !== "complimentary" || profile?.accountStatus !== "paid") return false;
+  return !profile.complimentaryPlanEndsAt || new Date(profile.complimentaryPlanEndsAt) > now;
+}
+
+function complimentaryPeriodEnd(periodStart, grantEndsAt = null) {
+  const monthlyEnd = DateTime.fromJSDate(periodStart).plus({ months: 1 }).toJSDate();
+  if (!grantEndsAt) return monthlyEnd;
+  const accessEnd = new Date(grantEndsAt);
+  return accessEnd < monthlyEnd ? accessEnd : monthlyEnd;
+}
+
+async function expireComplimentaryCreditBuckets(client, businessProfileId, note, now = new Date()) {
+  const buckets = await client.creditBucket.findMany({
+    where: { businessProfileId, sourceType: "complimentary_monthly", remainingCredits: { gt: 0 } },
+    orderBy: { createdAt: "asc" },
+  });
+  if (!buckets.length) return 0;
+  await client.creditBucket.updateMany({
+    where: { id: { in: buckets.map((bucket) => bucket.id) } },
+    data: { remainingCredits: 0, expiresAt: now },
+  });
+  const balanceAfter = await syncCreditBalance(client, businessProfileId, now);
+  await client.creditTransaction.createMany({
+    data: buckets.map((bucket) => ({
+      businessProfileId,
+      creditBucketId: bucket.id,
+      type: "expiration",
+      amount: -bucket.remainingCredits,
+      balanceAfter,
+      note,
+      metadata: {
+        creditBucketId: bucket.id,
+        sourceType: bucket.sourceType,
+        reason: "complimentary_plan_ended",
+      },
+    })),
+  });
+  return buckets.length;
+}
+
+function complimentaryRestoreStatus(profile, now = new Date()) {
+  const previousStatus = String(profile?.complimentaryPreviousStatus || "").trim().toLowerCase();
+  if (previousStatus === "trial" && profile?.trialEndsAt && new Date(profile.trialEndsAt) > now) return "trial";
+  if (previousStatus === "paid") return "paid";
+  if (previousStatus === "unclaimed" && !Number(profile?._count?.users || 0)) return "unclaimed";
+  return "suspended";
+}
+
+async function grantComplimentaryPlanAccess({
+  businessProfileId,
+  subscriptionPlanId,
+  endsAt = null,
+  refreshMonthlyCredits = true,
+  note = "",
+  grantedBy = "System administrator",
+  now = new Date(),
+}) {
+  const accessEnd = endsAt ? new Date(endsAt) : null;
+  if (accessEnd && (Number.isNaN(accessEnd.getTime()) || accessEnd <= now)) {
+    throw new Error("Complimentary access must end in the future");
+  }
+  return prisma.$transaction(async (tx) => {
+    const [profile, plan] = await Promise.all([
+      tx.businessProfile.findUnique({ where: { id: Number(businessProfileId) }, include: { subscriptionPlan: true } }),
+      tx.subscriptionPlan.findUnique({ where: { id: Number(subscriptionPlanId) } }),
+    ]);
+    if (!profile) throw new Error("Business was not found");
+    if (!plan) throw new Error("Subscription plan was not found");
+    if (!plan.active) throw new Error("Only active plans can be granted");
+    if (hasLiveStripeSubscription(profile)) {
+      const error = new Error("This business has an active Stripe subscription. Cancel it in Stripe before granting complimentary access.");
+      error.statusCode = 409;
+      error.code = "active_stripe_subscription";
+      throw error;
+    }
+
+    const alreadyComplimentary = complimentaryPlanActive(profile, now);
+    const samePlan = alreadyComplimentary && profile.subscriptionPlanId === plan.id;
+    const sameCreditCycle = samePlan && profile.complimentaryCreditsEnabled && refreshMonthlyCredits;
+    const startNewCreditCycle = Boolean(refreshMonthlyCredits && !sameCreditCycle);
+    const grantKey = samePlan && profile.complimentaryGrantKey ? profile.complimentaryGrantKey : crypto.randomUUID();
+    const previousStatus = alreadyComplimentary
+      ? profile.complimentaryPreviousStatus
+      : profile.accountStatus;
+    const previousPlanId = alreadyComplimentary
+      ? profile.complimentaryPreviousPlanId
+      : profile.planAccessSource === "complimentary_expired"
+        ? null
+        : profile.subscriptionPlanId;
+
+    await prepareCreditBuckets(tx, profile.id, now);
+    if (startNewCreditCycle || (alreadyComplimentary && !samePlan)) {
+      await expireComplimentaryCreditBuckets(tx, profile.id, "Complimentary plan changed", now);
+    }
+
+    const periodEnd = refreshMonthlyCredits ? complimentaryPeriodEnd(now, accessEnd) : null;
+    let nextCreditAt = refreshMonthlyCredits
+      ? sameCreditCycle && profile.complimentaryCreditsNextAt && new Date(profile.complimentaryCreditsNextAt) > now
+        ? new Date(profile.complimentaryCreditsNextAt)
+        : periodEnd
+      : null;
+    if (accessEnd && nextCreditAt && nextCreditAt > accessEnd) nextCreditAt = accessEnd;
+
+    const updated = await tx.businessProfile.update({
+      where: { id: profile.id },
+      data: {
+        subscriptionPlanId: plan.id,
+        accountStatus: "paid",
+        planAccessSource: "complimentary",
+        complimentaryPlanEndsAt: accessEnd,
+        complimentaryCreditsEnabled: Boolean(refreshMonthlyCredits),
+        complimentaryCreditsNextAt: nextCreditAt,
+        complimentaryGrantKey: grantKey,
+        complimentaryGrantedAt: alreadyComplimentary ? profile.complimentaryGrantedAt || now : now,
+        complimentaryGrantedBy: String(grantedBy || "System administrator").slice(0, 200),
+        complimentaryGrantNote: String(note || "").trim().slice(0, 1000) || null,
+        complimentaryPreviousStatus: previousStatus || null,
+        complimentaryPreviousPlanId: previousPlanId || null,
+        stripeSubscriptionId: null,
+        stripeSubscriptionStatus: null,
+        subscriptionCurrentPeriodEnd: null,
+      },
+      include: { subscriptionPlan: true },
+    });
+
+    if (startNewCreditCycle && plan.monthlyCredits > 0) {
+      await createCreditBucketGrant(tx, {
+        businessProfileId: profile.id,
+        amount: plan.monthlyCredits,
+        type: "complimentary_plan",
+        sourceType: "complimentary_monthly",
+        note: `${plan.name} complimentary monthly credits`,
+        periodStart: now,
+        expiresAt: periodEnd,
+        subscriptionPlanId: plan.id,
+        grantKey: `complimentary:${grantKey}:initial`,
+        metadata: {
+          source: "admin_complimentary_plan",
+          subscriptionPlanId: plan.id,
+          subscriptionPlanName: plan.name,
+          grantedBy: String(grantedBy || "System administrator").slice(0, 200),
+        },
+      });
+    }
+    return updated;
+  });
+}
+
+async function revokeComplimentaryPlanAccess({ businessProfileId, reason = "Complimentary plan revoked", expired = false, now = new Date() }) {
+  return prisma.$transaction(async (tx) => {
+    const profile = await tx.businessProfile.findUnique({
+      where: { id: Number(businessProfileId) },
+      include: { subscriptionPlan: true, _count: { select: { users: true } } },
+    });
+    if (!profile) throw new Error("Business was not found");
+    if (profile.planAccessSource !== "complimentary") return profile;
+    await prepareCreditBuckets(tx, profile.id, now);
+    await expireComplimentaryCreditBuckets(tx, profile.id, reason, now);
+    const restoredStatus = complimentaryRestoreStatus(profile, now);
+    const retainExpiredGrant = expired && restoredStatus === "suspended";
+    return tx.businessProfile.update({
+      where: { id: profile.id },
+      data: {
+        accountStatus: restoredStatus,
+        subscriptionPlanId: retainExpiredGrant ? profile.subscriptionPlanId : profile.complimentaryPreviousPlanId || null,
+        planAccessSource: retainExpiredGrant ? "complimentary_expired" : null,
+        complimentaryPlanEndsAt: retainExpiredGrant ? profile.complimentaryPlanEndsAt : null,
+        complimentaryCreditsEnabled: false,
+        complimentaryCreditsNextAt: null,
+        complimentaryGrantKey: retainExpiredGrant ? profile.complimentaryGrantKey : null,
+        complimentaryGrantedAt: retainExpiredGrant ? profile.complimentaryGrantedAt : null,
+        complimentaryGrantedBy: retainExpiredGrant ? profile.complimentaryGrantedBy : null,
+        complimentaryGrantNote: retainExpiredGrant ? profile.complimentaryGrantNote : null,
+        complimentaryPreviousStatus: null,
+        complimentaryPreviousPlanId: null,
+      },
+      include: { subscriptionPlan: true },
+    });
+  });
+}
+
+async function processComplimentaryPlanGrants({ now = new Date() } = {}) {
+  if (complimentaryPlanWorkerRunning) return { skipped: true, reason: "already_running" };
+  complimentaryPlanWorkerRunning = true;
+  try {
+    const expired = await prisma.businessProfile.findMany({
+      where: { planAccessSource: "complimentary", complimentaryPlanEndsAt: { lte: now } },
+      select: { id: true },
+      take: 500,
+    });
+    for (const profile of expired) {
+      await revokeComplimentaryPlanAccess({
+        businessProfileId: profile.id,
+        reason: "Complimentary plan expired",
+        expired: true,
+        now,
+      });
+    }
+
+    const due = await prisma.businessProfile.findMany({
+      where: {
+        planAccessSource: "complimentary",
+        accountStatus: "paid",
+        complimentaryCreditsEnabled: true,
+        complimentaryCreditsNextAt: { lte: now },
+        OR: [{ complimentaryPlanEndsAt: null }, { complimentaryPlanEndsAt: { gt: now } }],
+      },
+      select: { id: true },
+      take: 500,
+    });
+    let refreshed = 0;
+    for (const candidate of due) {
+      const granted = await prisma.$transaction(async (tx) => {
+        const profile = await tx.businessProfile.findUnique({ where: { id: candidate.id }, include: { subscriptionPlan: true } });
+        if (!profile || !complimentaryPlanActive(profile, now) || !profile.complimentaryCreditsEnabled || !profile.subscriptionPlan) return false;
+        const dueAt = profile.complimentaryCreditsNextAt ? new Date(profile.complimentaryCreditsNextAt) : now;
+        if (dueAt > now) return false;
+        const periodEnd = complimentaryPeriodEnd(now, profile.complimentaryPlanEndsAt);
+        const grantKey = `complimentary:${profile.complimentaryGrantKey || profile.id}:${dueAt.toISOString()}`;
+        await prepareCreditBuckets(tx, profile.id, now);
+        if (profile.subscriptionPlan.monthlyCredits > 0) {
+          await createCreditBucketGrant(tx, {
+            businessProfileId: profile.id,
+            amount: profile.subscriptionPlan.monthlyCredits,
+            type: "complimentary_plan",
+            sourceType: "complimentary_monthly",
+            note: `${profile.subscriptionPlan.name} complimentary monthly credits`,
+            periodStart: now,
+            expiresAt: periodEnd,
+            subscriptionPlanId: profile.subscriptionPlan.id,
+            grantKey,
+            metadata: {
+              source: "complimentary_plan_renewal",
+              subscriptionPlanId: profile.subscriptionPlan.id,
+              subscriptionPlanName: profile.subscriptionPlan.name,
+            },
+          });
+        }
+        await tx.businessProfile.update({
+          where: { id: profile.id },
+          data: { complimentaryCreditsNextAt: periodEnd },
+        });
+        return true;
+      });
+      if (granted) refreshed += 1;
+    }
+    if (expired.length || refreshed) console.log(`[complimentary-plans] expired=${expired.length} refreshed=${refreshed}`);
+    return { expired: expired.length, refreshed };
+  } finally {
+    complimentaryPlanWorkerRunning = false;
+  }
+}
+
+function scheduleComplimentaryPlanWorker(delayMs = 30000) {
+  if (complimentaryPlanWorkerTimer) return;
+  complimentaryPlanWorkerTimer = setTimeout(() => {
+    complimentaryPlanWorkerTimer = null;
+    processComplimentaryPlanGrants()
+      .catch((error) => console.warn(`[complimentary-plans] worker failed: ${error.message}`))
+      .finally(() => scheduleComplimentaryPlanWorker(15 * 60 * 1000));
+  }, delayMs);
+  if (typeof complimentaryPlanWorkerTimer.unref === "function") complimentaryPlanWorkerTimer.unref();
 }
 
 async function recordUsageEventOnce(args, unique = {}) {
@@ -6203,9 +6517,7 @@ async function resolveInboundBusiness(voiceNumber, callerPhone) {
   if (voiceNumber.numberType !== "demo") {
     const profile = voiceNumber.businessProfile?.archivedAt ? null : voiceNumber.businessProfile || null;
     if (!profile || voiceNumber.numberType !== "regular") return profile;
-    const trialEnded =
-      profile.accountStatus === "trial" && profile.trialEndsAt && new Date(profile.trialEndsAt) <= new Date();
-    if (profile.accountStatus === "expired" || trialEnded) return null;
+    if (businessAccessPaused(profile)) return null;
     const entitlements = await businessEntitlements(profile.id);
     const maxNumbers = Math.max(0, Number(entitlements.limits.maxPhoneNumbers || 0));
     const assignedRegularNumbers = await prisma.voiceNumber.findMany({
@@ -14275,8 +14587,7 @@ async function publicInternalBookingContext(token) {
   }
   const profile = link.businessProfile;
   if (!profile || profile.archivedAt) throw new Error("This booking link is unavailable");
-  const trialEnded = profile.accountStatus === "trial" && profile.trialEndsAt && new Date(profile.trialEndsAt) <= new Date();
-  if (profile.accountStatus === "expired" || trialEnded) throw new Error("Online booking is paused for this business");
+  if (businessAccessPaused(profile)) throw new Error("Online booking is paused for this business");
   const config = await ensureBusinessConfig(profile);
   const linkMode = config.calendarProvider === "internal" && config.providerConfig?.directBooking === false;
   if (!linkMode || Number(config.providerConfig?.connectionId || 0) !== link.connectionId) {
@@ -15207,14 +15518,23 @@ app.post("/api/admin/users", requireAuth, requireAdmin, async (req, res) => {
       researchModel: settings.researchModel,
     });
     const subscriptionPlanId = req.body.subscriptionPlanId ? Number(req.body.subscriptionPlanId) : null;
+    let selectedPlan = null;
     if (subscriptionPlanId) {
-      const plan = await prisma.subscriptionPlan.findUnique({ where: { id: subscriptionPlanId } });
-      if (!plan) throw new Error("Subscription plan was not found");
-      if (!plan.active) throw new Error("Only active plans can be assigned to a business");
-      await prisma.businessProfile.update({ where: { id: profile.id }, data: { subscriptionPlanId } });
+      selectedPlan = await prisma.subscriptionPlan.findUnique({ where: { id: subscriptionPlanId } });
+      if (!selectedPlan) throw new Error("Subscription plan was not found");
+      if (!selectedPlan.active) throw new Error("Only active plans can be assigned to a business");
     }
     const existingUserCount = await prisma.user.count({ where: { businessProfileId: profile.id, role: "business" } });
-    await requireBusinessLimit(profile.id, "maxUsers", existingUserCount, "Business user");
+    if (selectedPlan) {
+      if (existingUserCount >= Number(selectedPlan.maxUsers || 1)) {
+        throw planGateError(
+          `Business user limit reached for ${selectedPlan.name} (${selectedPlan.maxUsers || 1}).`,
+          "plan_limit_reached",
+        );
+      }
+    } else {
+      await requireBusinessLimit(profile.id, "maxUsers", existingUserCount, "Business user");
+    }
     await ensureBusinessConfig(profile);
     const user = await prisma.user.create({
       data: {
@@ -15226,7 +15546,17 @@ app.post("/api/admin/users", requireAuth, requireAdmin, async (req, res) => {
       },
       include: { businessProfile: true },
     });
-    await prisma.businessProfile.update({ where: { id: profile.id }, data: { accountStatus: "paid", subscriptionPlanId: subscriptionPlanId || undefined } });
+    if (subscriptionPlanId) {
+      await grantComplimentaryPlanAccess({
+        businessProfileId: profile.id,
+        subscriptionPlanId,
+        refreshMonthlyCredits: true,
+        note: "Complimentary plan granted when the admin created the login account",
+        grantedBy: req.user?.email || req.user?.name || "System administrator",
+      });
+    } else {
+      await prisma.businessProfile.update({ where: { id: profile.id }, data: { accountStatus: "paid" } });
+    }
     res.status(201).json({ user: { id: user.id, email: user.email, name: user.name, role: user.role, business: user.businessProfile } });
   } catch (error) {
     res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
@@ -15386,23 +15716,53 @@ app.patch("/api/admin/businesses/:id/plan", requireAuth, requireAdmin, async (re
   try {
     const id = Number(req.params.id);
     const subscriptionPlanId = req.body?.subscriptionPlanId ? Number(req.body.subscriptionPlanId) : null;
-    const existing = await prisma.businessProfile.findUnique({ where: { id }, select: { id: true } });
-    if (!existing) return res.status(404).json({ error: "Business was not found" });
-    let plan = null;
+    let updated;
     if (subscriptionPlanId) {
-      plan = await prisma.subscriptionPlan.findUnique({ where: { id: subscriptionPlanId } });
-      if (!plan) throw new Error("Subscription plan was not found");
-      if (!plan.active) throw new Error("Only active plans can be assigned to a business");
-    }
-    const updated = await prisma.businessProfile.update({
-      where: { id },
-      data: {
+      updated = await grantComplimentaryPlanAccess({
+        businessProfileId: id,
         subscriptionPlanId,
-        accountStatus: subscriptionPlanId ? "paid" : undefined,
-      },
-      include: { subscriptionPlan: true },
-    });
+        refreshMonthlyCredits: true,
+        note: "Granted from the legacy admin plan control",
+        grantedBy: req.user?.email || req.user?.name || "System administrator",
+      });
+    } else {
+      const current = await prisma.businessProfile.findUnique({ where: { id }, select: { id: true, planAccessSource: true } });
+      if (!current) return res.status(404).json({ error: "Business was not found" });
+      updated = current.planAccessSource === "complimentary"
+        ? await revokeComplimentaryPlanAccess({ businessProfileId: id, reason: "Complimentary plan removed by admin" })
+        : await prisma.businessProfile.update({ where: { id }, data: { subscriptionPlanId: null }, include: { subscriptionPlan: true } });
+    }
     res.json({ ok: true, business: updated });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.put("/api/admin/businesses/:id/complimentary-plan", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const subscriptionPlanId = Number(req.body?.subscriptionPlanId || 0);
+    if (!subscriptionPlanId) throw new Error("Choose an active plan to grant");
+    const business = await grantComplimentaryPlanAccess({
+      businessProfileId: Number(req.params.id),
+      subscriptionPlanId,
+      endsAt: req.body?.endsAt || null,
+      refreshMonthlyCredits: req.body?.refreshMonthlyCredits !== false,
+      note: req.body?.note,
+      grantedBy: req.user?.email || req.user?.name || "System administrator",
+    });
+    res.json({ ok: true, business });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.delete("/api/admin/businesses/:id/complimentary-plan", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const business = await revokeComplimentaryPlanAccess({
+      businessProfileId: Number(req.params.id),
+      reason: "Complimentary plan revoked by admin",
+    });
+    res.json({ ok: true, business });
   } catch (error) {
     res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
@@ -18051,15 +18411,23 @@ async function completeStripeSubscriptionCheckout(session) {
   const customerId = stripeCheckoutCustomer(session);
   const subscriptionId = stripeCheckoutSubscription(session);
   const subscriptionPlanId = checkout?.subscriptionPlanId || Number(metadata.subscriptionPlanId || 0) || null;
-  await prisma.businessProfile.update({
-    where: { id: profileId },
-    data: {
-      accountStatus: "paid",
-      stripeCustomerId: customerId || undefined,
-      stripeSubscriptionId: subscriptionId || undefined,
-      stripeSubscriptionStatus: subscriptionId ? "active" : undefined,
-      subscriptionPlanId: subscriptionPlanId || undefined,
-    },
+  await prisma.$transaction(async (tx) => {
+    const profile = await tx.businessProfile.findUnique({ where: { id: profileId } });
+    if (profile?.planAccessSource === "complimentary") {
+      await prepareCreditBuckets(tx, profileId);
+      await expireComplimentaryCreditBuckets(tx, profileId, "Complimentary plan replaced by Stripe subscription");
+    }
+    await tx.businessProfile.update({
+      where: { id: profileId },
+      data: {
+        accountStatus: "paid",
+        stripeCustomerId: customerId || undefined,
+        stripeSubscriptionId: subscriptionId || undefined,
+        stripeSubscriptionStatus: subscriptionId ? "active" : undefined,
+        subscriptionPlanId: subscriptionPlanId || undefined,
+        ...stripePlanAccessData(),
+      },
+    });
   });
   return prisma.stripeCheckoutSession.upsert({
     where: { stripeSessionId: session.id },
@@ -18136,6 +18504,7 @@ async function processStripeSubscription(subscription) {
   };
   const accountStatus = accountStatusForStripeSubscription(subscription.status);
   if (accountStatus) data.accountStatus = accountStatus;
+  Object.assign(data, stripePlanAccessData());
   const updated = await prisma.businessProfile.updateMany({
     where: { stripeSubscriptionId: subscriptionId },
     data,
@@ -18163,14 +18532,31 @@ async function processStripeInvoicePaid(invoice) {
     0,
     Math.round(Number(invoiceMetadata.creditAmount || fallbackCredits || 0)),
   );
-  if (!creditAmount) return profile;
+  const period = stripeInvoiceCreditPeriod(invoice);
+  const stripeProfile = await prisma.$transaction(async (tx) => {
+    if (profile.planAccessSource === "complimentary") {
+      await prepareCreditBuckets(tx, profile.id);
+      await expireComplimentaryCreditBuckets(tx, profile.id, "Complimentary plan replaced by Stripe subscription");
+    }
+    return tx.businessProfile.update({
+      where: { id: profile.id },
+      data: {
+        accountStatus: "paid",
+        stripeCustomerId: customerId || undefined,
+        stripeSubscriptionId: subscriptionId || undefined,
+        stripeSubscriptionStatus: "active",
+        subscriptionCurrentPeriodEnd: period.periodEnd,
+        ...stripePlanAccessData(),
+      },
+    });
+  });
+  if (!creditAmount) return stripeProfile;
   const note = `Stripe subscription credits (${invoice.id})`;
   const existing = await prisma.creditTransaction.findFirst({
     where: { businessProfileId: profile.id, type: "stripe_subscription", note },
     select: { id: true },
   });
-  if (existing) return profile;
-  const period = stripeInvoiceCreditPeriod(invoice);
+  if (existing) return stripeProfile;
   await grantBusinessCredits({
     businessProfileId: profile.id,
     amount: creditAmount,
@@ -18194,16 +18580,7 @@ async function processStripeInvoicePaid(invoice) {
       currency: invoice.currency || null,
     },
   });
-  return prisma.businessProfile.update({
-    where: { id: profile.id },
-    data: {
-      accountStatus: "paid",
-      stripeCustomerId: customerId || undefined,
-      stripeSubscriptionId: subscriptionId || undefined,
-      stripeSubscriptionStatus: "active",
-      subscriptionCurrentPeriodEnd: period.periodEnd,
-    },
-  });
+  return prisma.businessProfile.findUnique({ where: { id: profile.id } });
 }
 
 function componentStatus(configured, detail = "") {
@@ -19864,6 +20241,11 @@ app.get("/api/business-admin/billing", async (req, res) => {
           stripeSubscriptionId: true,
           stripeSubscriptionStatus: true,
           subscriptionCurrentPeriodEnd: true,
+          planAccessSource: true,
+          complimentaryPlanEndsAt: true,
+          complimentaryCreditsEnabled: true,
+          complimentaryCreditsNextAt: true,
+          complimentaryGrantedAt: true,
           subscriptionPlan: true,
         },
       }),
@@ -19882,11 +20264,26 @@ app.get("/api/business-admin/billing", async (req, res) => {
       secretKeyStatus.ok ? null : secretKeyStatus.detail,
       webhookSecretStatus.ok ? null : webhookSecretStatus.detail,
     ].filter(Boolean);
+    const accessSource = current?.planAccessSource || (current?.stripeSubscriptionId ? "stripe" : "legacy");
+    const complimentaryActive = Boolean(
+      accessSource === "complimentary" &&
+        current?.accountStatus === "paid" &&
+        (!current?.complimentaryPlanEndsAt || new Date(current.complimentaryPlanEndsAt) > new Date()),
+    );
     res.json({
       accountStatus: current?.accountStatus || profile.accountStatus,
       creditBalance: creditBuckets.creditBalance ?? current?.creditBalance ?? profile.creditBalance,
       creditBuckets,
       currentPlan: publicSubscriptionPlan(current?.subscriptionPlan),
+      planAccess: {
+        source: accessSource,
+        complimentary: accessSource.startsWith("complimentary"),
+        active: complimentaryActive,
+        endsAt: current?.complimentaryPlanEndsAt || null,
+        creditsRefresh: Boolean(current?.complimentaryCreditsEnabled),
+        nextCreditRefreshAt: current?.complimentaryCreditsNextAt || null,
+        grantedAt: current?.complimentaryGrantedAt || null,
+      },
       availablePlans: plansWithSlots.map(publicSubscriptionPlan),
       stripe: {
         checkoutConfigured,
@@ -22017,12 +22414,7 @@ wss.on("connection", (clientWs, request) => {
             if (!socketUser.businessProfileId) throw new Error("No business is assigned to this account");
             const assignedProfile = await prisma.businessProfile.findUnique({ where: { id: socketUser.businessProfileId } });
             if (!assignedProfile) throw new Error("Assigned business was not found");
-            if (
-              assignedProfile.accountStatus === "expired" ||
-              (assignedProfile.accountStatus === "trial" && assignedProfile.trialEndsAt <= new Date())
-            ) {
-              throw new Error("This trial has expired");
-            }
+            if (businessAccessPaused(assignedProfile)) throw new Error("This account is paused");
             if (assignedProfile.accountStatus === "trial" && assignedProfile.creditBalance <= 0) {
               throw new Error("This trial has no credits remaining");
             }
@@ -22270,6 +22662,7 @@ scheduleBlueBubblesPendingDeliveryWorker(10000);
 scheduleBookingFollowupWorker(5000);
 scheduleTrialPhoneNumberCleanupWorker(15000);
 scheduleTrialReminderWorker(20000);
+scheduleComplimentaryPlanWorker(25000);
 
 server.listen(PORT, () => {
   const protocol = USE_HTTPS ? "https" : "http";
