@@ -132,6 +132,24 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024 },
 });
+const APPOINTMENT_PHOTO_MAX_FILES = 5;
+const APPOINTMENT_PHOTO_MAX_BYTES = 4 * 1024 * 1024;
+const APPOINTMENT_PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const appointmentPhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: APPOINTMENT_PHOTO_MAX_FILES,
+    fileSize: APPOINTMENT_PHOTO_MAX_BYTES,
+    fields: 20,
+    fieldSize: 128 * 1024,
+  },
+  fileFilter: (_req, file, callback) => {
+    if (!APPOINTMENT_PHOTO_TYPES.has(String(file.mimetype || "").toLowerCase())) {
+      return callback(new Error("Photos must be JPG, PNG, or WebP files"));
+    }
+    return callback(null, true);
+  },
+});
 const app = express();
 app.set("trust proxy", 1);
 const server = USE_HTTPS
@@ -172,6 +190,10 @@ app.get(["/admin", "/admin/"], (_req, res) => {
   res.sendFile(path.join(__dirname, "public/admin.html"));
 });
 
+app.get(["/schedule/:token", "/schedule/:token/"], (_req, res) => {
+  res.sendFile(path.join(__dirname, "public/booking/index.html"));
+});
+
 const SESSION_COOKIE = "receptionist_session";
 const SESSION_DAYS = 14;
 const onboardingAttempts = new Map();
@@ -186,6 +208,7 @@ let trialPhoneNumberCleanupRunning = false;
 let trialReminderWorkerTimer = null;
 let trialReminderWorkerRunning = false;
 const aiRateLimitHits = new Map();
+const publicBookingAttempts = new Map();
 let prismaReconnectPromise = null;
 
 function sleep(ms) {
@@ -7760,6 +7783,13 @@ async function bookingDataForProfile(profile, settings = null, req = null) {
   const activeProvider = normalizedBookingProvider(config.calendarProvider);
   const activeConnection = connections.find((connection) => connection.provider === activeProvider) || null;
   const vagaroConnection = connections.find((connection) => connection.provider === "vagaro") || null;
+  const internalConnection = connections.find((connection) => connection.provider === "internal") || null;
+  const internalLink = internalConnection
+    ? await prisma.bookingLink.findFirst({
+        where: { connectionId: internalConnection.id, active: true, serviceId: null, professionalId: null },
+        orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+      })
+    : null;
   const [services, professionals, links, webhookEvents, googleSecret, calendlySecret] = vagaroConnection
     ? await Promise.all([
         prisma.bookingService.findMany({
@@ -7812,6 +7842,15 @@ async function bookingDataForProfile(profile, settings = null, req = null) {
     webhookUrl,
     baseWebhookUrl,
     trackingBaseUrl: normalizeBookingTrackingBaseUrl(config.bookingTrackingBaseUrl),
+    internalBooking: {
+      directBooking: config.calendarProvider !== "internal" || config.providerConfig?.directBooking !== false,
+      enabled: config.calendarProvider === "internal" && config.providerConfig?.directBooking === false,
+      allowPhotoUploads: Boolean(config.providerConfig?.allowPhotoUploads ?? internalConnection?.settings?.allowPhotoUploads),
+      publicUrl: internalLink?.url || internalConnection?.bookingUrl || "",
+      trackingUrl: internalLink
+        ? bookingLinkTrackingUrl({ settings: activeSettings, req, config, link: await ensureBookingLinkShortCode(internalLink) })
+        : "",
+    },
     platformConnections: {
       googleCalendar: {
         configured: Boolean((activeSettings.googleCalendarClientId || process.env.GOOGLE_CALENDAR_CLIENT_ID) && googleSecret.configured),
@@ -7895,6 +7934,95 @@ async function ensureGeneralBookingLinkForConnection(connection, { label = "", u
     data: { active: false },
   });
   return link;
+}
+
+async function ensureInternalBookingConnection({
+  profile,
+  config,
+  settings,
+  req = null,
+  directBooking = true,
+  allowPhotoUploads = undefined,
+}) {
+  const baseUrl = bookingBaseUrl(settings, req);
+  const current = await prisma.bookingConnection.findUnique({
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "internal" } },
+  });
+  const currentSettings = current?.settings && typeof current.settings === "object" ? current.settings : {};
+  const photoUploadsEnabled =
+    typeof allowPhotoUploads === "boolean"
+      ? allowPhotoUploads
+      : Boolean(config.providerConfig?.allowPhotoUploads ?? currentSettings.allowPhotoUploads);
+  const workflowMode = directBooking ? "direct_booking" : "booking_link";
+  let connection = await prisma.bookingConnection.upsert({
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "internal" } },
+    create: {
+      businessProfileId: profile.id,
+      provider: "internal",
+      status: "active",
+      workflowMode,
+      displayName: "RingPort calendar",
+      settings: { directBooking, allowPhotoUploads: photoUploadsEnabled },
+    },
+    update: {
+      status: "active",
+      workflowMode,
+      displayName: "RingPort calendar",
+      settings: {
+        ...currentSettings,
+        directBooking,
+        allowPhotoUploads: photoUploadsEnabled,
+      },
+    },
+  });
+  let link = await prisma.bookingLink.findFirst({
+    where: { connectionId: connection.id, serviceId: null, professionalId: null },
+    orderBy: [{ active: "desc" }, { id: "asc" }],
+  });
+  if (!link) {
+    link = await ensureBookingLinkForConnection(connection, {
+      label: "Book with RingPort",
+      url: `${baseUrl}/schedule/pending`,
+      sortOrder: 0,
+    });
+  }
+  const publicUrl = new URL(`/schedule/${encodeURIComponent(link.clickToken)}`, `${baseUrl}/`).toString();
+  link = await prisma.bookingLink.update({
+    where: { id: link.id },
+    data: { label: "Book with RingPort", url: publicUrl, active: true, sortOrder: 0 },
+  });
+  if (directBooking) {
+    await prisma.bookingLinkSend.updateMany({
+      where: { bookingLinkId: link.id, followupState: { in: ["active", "needs_reply"] } },
+      data: { followupState: "stopped", nextFollowupAt: null },
+    });
+  }
+  connection = await prisma.bookingConnection.update({
+    where: { id: connection.id },
+    data: {
+      bookingUrl: publicUrl,
+      settings: {
+        ...(connection.settings && typeof connection.settings === "object" ? connection.settings : {}),
+        directBooking,
+        allowPhotoUploads: photoUploadsEnabled,
+        publicBookingUrl: publicUrl,
+      },
+    },
+  });
+  await prisma.businessConfig.update({
+    where: { id: config.id },
+    data: {
+      calendarProvider: "internal",
+      providerConfig: {
+        provider: "internal",
+        connectionId: connection.id,
+        workflowMode,
+        directBooking,
+        allowPhotoUploads: photoUploadsEnabled,
+      },
+    },
+  });
+  return { connection, link, publicUrl };
 }
 
 async function upsertServiceBookingLink(connection, service, url, label = "") {
@@ -9149,7 +9277,7 @@ async function bookingServicesForAgent(profile, args = {}) {
 
 async function externalBookingLinkContext({ profile, args = {}, provider = "vagaro" }) {
   const normalizedProvider = normalizedBookingProvider(provider);
-  if (!["vagaro", "calendly"].includes(normalizedProvider)) throw new Error("This calendar does not use an external booking link");
+  if (!["internal", "vagaro", "calendly"].includes(normalizedProvider)) throw new Error("This calendar does not use a booking link");
   const connection = await prisma.bookingConnection.findUnique({
     where: { businessProfileId_provider: { businessProfileId: profile.id, provider: normalizedProvider } },
     include: {
@@ -9158,7 +9286,7 @@ async function externalBookingLinkContext({ profile, args = {}, provider = "vaga
       links: { where: { active: true }, orderBy: [{ sortOrder: "asc" }, { id: "asc" }] },
     },
   });
-  if (!connection || connection.status !== "active") throw new Error("External booking is not enabled for this business");
+  if (!connection || connection.status !== "active") throw new Error("Booking by link is not enabled for this business");
   const serviceNeedle = String(args.serviceId || args.serviceName || args.service || args.reason || "").trim();
   const professionalNeedle = String(args.professionalId || args.professionalName || args.professional || args.serviceProviderId || "").trim();
   const service =
@@ -9177,7 +9305,7 @@ async function externalBookingLinkContext({ profile, args = {}, provider = "vaga
       sortOrder: 0,
     });
   }
-  if (!link) throw new Error("No booking link is configured for this external calendar");
+  if (!link) throw new Error("No booking link is configured for this calendar");
   return { connection, service, professional, link };
 }
 
@@ -9410,7 +9538,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
     service: serviceText,
     professional: professionalText,
     deliveryProvider: linkDelivery.provider,
-    message: "Booking link sent. Customer must confirm the appointment through the external booking system.",
+    message: "Booking link sent. Customer must choose a time and submit the booking through the link.",
   };
 }
 
@@ -11040,10 +11168,11 @@ function runtimeBusinessInstructions(config) {
   }));
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
+  const linkOnlyInternal = config.calendarProvider === "internal" && config.providerConfig?.directBooking === false;
   const linkOnlyCalendly = config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false;
-  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly;
+  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly || linkOnlyInternal;
   const simpleVagaro = config.calendarProvider === "vagaro" && config.providerConfig?.vagaroMode === "simple";
-  const externalBookingName = linkOnlyCalendly ? "Calendly" : "Vagaro";
+  const externalBookingName = linkOnlyInternal ? "RingPort booking page" : linkOnlyCalendly ? "Calendly" : "Vagaro";
   const goals = (config.businessProfile?.receptionistGoals || []).map((goal) => ({
     id: goal.id,
     name: goal.name,
@@ -11062,7 +11191,7 @@ Business-managed receptionist configuration:
     simpleVagaro
       ? "External Vagaro Simple mode. The public service catalog is available, but live availability is not. Offer to text the booking link so the customer can view openings and book in Vagaro."
       : externalBooking
-      ? `External ${externalBookingName} booking link. ${simpleVagaro ? "Live availability is not visible." : "Check live availability first when available."} Text the booking link and do not say the appointment is booked until the external system confirms it.`
+      ? `${externalBookingName} booking link. ${simpleVagaro ? "Live availability is not visible." : linkOnlyInternal ? "The customer can see live availability on the page." : "Check live availability first when available."} Text the booking link and do not say the appointment is booked until the customer submits it.`
       : config.calendarProvider === "google_calendar"
         ? "Direct Google Calendar booking. Check live availability and create the event only after the caller confirms the exact time."
       : config.calendarProvider === "calendly"
@@ -11109,8 +11238,8 @@ ${config.calendarProvider === "vagaro" ? "- For questions about Vagaro services,
 - When a caller gives their name, pass it as name in the next relevant tool call so the CRM lead uses their real name instead of the caller phone label.
 - The inbound caller number already counts as the phone number. Do not ask for phone again unless the caller wants a different callback number.
 - ${
-  simpleVagaro
-    ? "If the caller asks to book or accepts the offer to receive the booking link, call send_booking_link. Do not require a requested time or additional intake details before sending it."
+  simpleVagaro || linkOnlyInternal
+    ? `If the caller asks to book or accepts the offer to receive the booking link, call send_booking_link. Do not require a requested time or additional intake details before sending it. ${linkOnlyInternal ? "The RingPort booking page collects the configured intake fields." : ""}`
     : `If the caller asks to book and has given a time, collect only missing required intake fields, then ${externalBooking ? `call send_booking_link and tell them the link lets them confirm in ${externalBookingName}.` : "call schedule_appointment."}`
 }
 - Do not repeat the same confirmation question after the caller already answered it.
@@ -11118,7 +11247,7 @@ ${config.calendarProvider === "vagaro" ? "- For questions about Vagaro services,
 - If the caller asks you to tell the business something or gives an operational update such as running late, a changed arrival time, cancellation, reschedule request, access instructions, urgent issue, or callback request, confirm the final corrected detail and call transfer_message immediately. Do not merely promise to pass it along.
 - Only tell the caller the business was notified, updated, or sent their message when transfer_message returns notified=true. If it returns recorded=true and notified=false, say it was recorded for follow-up and do not claim the owner received an alert.
 
-${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? `For ${externalBookingName}, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to confirm through the link.` : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
+${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? `For ${externalBookingName}, never claim direct booking. Use send_booking_link after the caller wants to proceed, and explain they need to choose and submit a time through the link.` : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
 
 function sanitizeMetaAiQualification(value) {
@@ -11357,8 +11486,9 @@ function toolDeclarations(config) {
   const appointmentRequired = ["start"];
   const transferTargets = activeTransferTargets(config);
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
+  const linkOnlyInternal = config.calendarProvider === "internal" && config.providerConfig?.directBooking === false;
   const linkOnlyCalendly = config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false;
-  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly;
+  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly || linkOnlyInternal;
   const simpleVagaro = config.calendarProvider === "vagaro" && config.providerConfig?.vagaroMode === "simple";
   const goals = config.businessProfile?.receptionistGoals || [];
   const collectsEmail = intakeCollectsEmail(config) || config.calendarProvider === "calendly";
@@ -11425,7 +11555,9 @@ function toolDeclarations(config) {
             description:
               simpleVagaro
                 ? "Send the Vagaro booking link by text after the customer agrees. The customer uses it to see live availability and book."
-                : `Send the external booking link by text after checking availability. Use this for ${linkOnlyCalendly ? "Calendly" : "Vagaro"} instead of directly booking the appointment.`,
+                : linkOnlyInternal
+                  ? "Send the RingPort booking link by text after the customer agrees. The page shows live availability and collects the configured appointment details."
+                  : `Send the booking link by text after checking availability. Use this for ${linkOnlyCalendly ? "Calendly" : "Vagaro"} instead of directly booking the appointment.`,
             parameters: {
               type: "OBJECT",
               properties: {
@@ -11448,7 +11580,7 @@ function toolDeclarations(config) {
             name: "schedule_appointment",
             description:
               externalBooking
-                ? `For ${linkOnlyCalendly ? "Calendly" : "Vagaro"}, do not directly book. This records a booking-link request and sends the external booking link.`
+                ? `For ${linkOnlyInternal ? "the RingPort booking page" : linkOnlyCalendly ? "Calendly" : "Vagaro"}, do not directly book. This records a booking-link request and sends the booking link.`
                 : config.appointmentMode === "instant"
                   ? "Book a confirmed appointment in an available calendar slot."
                   : "Create a pending appointment request in an available calendar slot.",
@@ -11778,7 +11910,11 @@ async function runToolCall(profile, config, functionCall, context = {}) {
   }
 
   if (functionCall.name === "schedule_appointment") {
-    if (config.calendarProvider === "vagaro" || (config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false)) {
+    if (
+      config.calendarProvider === "vagaro" ||
+      (config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false) ||
+      (config.calendarProvider === "internal" && config.providerConfig?.directBooking === false)
+    ) {
       const settings = await getSettings();
       const linkArgs = {
         ...args,
@@ -14110,6 +14246,267 @@ async function publicAppointmentContext(token) {
   return { appointment, profile, config };
 }
 
+function enforcePublicBookingRateLimit(req, businessProfileId) {
+  const now = Date.now();
+  const windowMs = 60 * 60 * 1000;
+  if (publicBookingAttempts.size > 5000) {
+    for (const [entryKey, timestamps] of publicBookingAttempts) {
+      if (!timestamps.some((timestamp) => now - timestamp < windowMs)) publicBookingAttempts.delete(entryKey);
+    }
+  }
+  const key = `${businessProfileId}:${adRequestIp(req)}`;
+  const recent = (publicBookingAttempts.get(key) || []).filter((timestamp) => now - timestamp < windowMs);
+  if (recent.length >= 10) {
+    const error = new Error("Too many booking attempts. Please wait and try again.");
+    error.statusCode = 429;
+    throw error;
+  }
+  recent.push(now);
+  publicBookingAttempts.set(key, recent);
+}
+
+async function publicInternalBookingContext(token) {
+  const link = await prisma.bookingLink.findUnique({
+    where: { clickToken: String(token || "") },
+    include: { connection: true, businessProfile: true },
+  });
+  if (!link || !link.active || link.provider !== "internal" || link.connection?.status !== "active") {
+    throw new Error("This booking link is unavailable");
+  }
+  const profile = link.businessProfile;
+  if (!profile || profile.archivedAt) throw new Error("This booking link is unavailable");
+  const trialEnded = profile.accountStatus === "trial" && profile.trialEndsAt && new Date(profile.trialEndsAt) <= new Date();
+  if (profile.accountStatus === "expired" || trialEnded) throw new Error("Online booking is paused for this business");
+  const config = await ensureBusinessConfig(profile);
+  const linkMode = config.calendarProvider === "internal" && config.providerConfig?.directBooking === false;
+  if (!linkMode || Number(config.providerConfig?.connectionId || 0) !== link.connectionId) {
+    throw new Error("Online booking is not enabled for this business");
+  }
+  return { link, connection: link.connection, profile, config };
+}
+
+function publicBookingIntakeFields(config) {
+  return (config.intakeFields || []).map((field) => ({
+    key: field.fieldKey,
+    label: field.label,
+    type: field.fieldType,
+    required: field.required,
+    options: Array.isArray(field.options) ? field.options : [],
+  }));
+}
+
+function publicBookingIntake(config, body = {}) {
+  let input = body.intakeData;
+  if (typeof input === "string" && input.trim()) {
+    try {
+      input = JSON.parse(input);
+    } catch {
+      throw new Error("Appointment details could not be read");
+    }
+  }
+  input = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const intakeData = {};
+  for (const field of config.intakeFields || []) {
+    const raw = input[field.fieldKey];
+    const value = Array.isArray(raw) ? raw.map((item) => String(item || "").trim()).filter(Boolean) : String(raw ?? "").trim();
+    if (field.required && (!value || (Array.isArray(value) && !value.length))) throw new Error(`${field.label} is required`);
+    if (value) intakeData[field.fieldKey] = value;
+  }
+  const findValue = (...keys) => keys.map((key) => intakeData[key]).find(Boolean) || "";
+  const customerName = String(findValue("name", "full_name", "customer_name") || body.customerName || "Customer").trim().slice(0, 160);
+  const rawPhone = findValue("phone", "phone_number", "mobile", "mobile_phone") || body.phone;
+  const phone = rawPhone ? normalizeE164Phone(rawPhone) : "";
+  if (rawPhone && !/^\+[1-9]\d{7,14}$/.test(phone)) throw new Error("Enter a valid phone number including area code");
+  const rawEmail = findValue("email", "email_address", "customer_email") || body.email;
+  const email = rawEmail ? cleanOptionalEmail(rawEmail) : "";
+  if (rawEmail && !email) throw new Error("Enter a valid email address");
+  const reason = String(findValue("reason", "appointment_reason", "service", "service_name") || body.reason || "").trim().slice(0, 1000);
+  if (phone) intakeData.phone = phone;
+  if (email) intakeData.email = email;
+  if (customerName) intakeData.name = intakeData.name || customerName;
+  const jobNotes = String(body.jobNotes || "").trim().slice(0, 2000);
+  if (jobNotes) intakeData.job_notes = jobNotes;
+  return { intakeData, customerName, phone: phone || null, email: email || null, reason: reason || null };
+}
+
+function appointmentPhotoMime(buffer) {
+  if (!Buffer.isBuffer(buffer)) return "";
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  return "";
+}
+
+function appointmentPhotoFilename(value, index = 0) {
+  const filename = path.basename(String(value || `job-photo-${index + 1}`))
+    .replace(/[^A-Za-z0-9._ -]+/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (filename || `job-photo-${index + 1}`).slice(0, 180);
+}
+
+function publicAppointmentPhotoUpload(req, res, next) {
+  appointmentPhotoUpload.array("photos", APPOINTMENT_PHOTO_MAX_FILES)(req, res, (error) => {
+    if (!error) return next();
+    const message =
+      error.code === "LIMIT_FILE_SIZE"
+        ? "Each photo must be 4 MB or smaller"
+        : error.code === "LIMIT_FILE_COUNT"
+          ? `You can upload up to ${APPOINTMENT_PHOTO_MAX_FILES} photos`
+          : error.message || "Photos could not be uploaded";
+    return res.status(error.code === "LIMIT_FILE_SIZE" ? 413 : 400).json({ error: message });
+  });
+}
+
+function validatedAppointmentPhotos(files = []) {
+  return files.map((file, index) => {
+    const detectedMime = appointmentPhotoMime(file.buffer);
+    if (!detectedMime || detectedMime !== String(file.mimetype || "").toLowerCase()) {
+      throw new Error(`Photo ${index + 1} is not a valid JPG, PNG, or WebP image`);
+    }
+    return {
+      filename: appointmentPhotoFilename(file.originalname, index),
+      mimeType: detectedMime,
+      byteSize: file.size,
+      data: file.buffer,
+    };
+  });
+}
+
+app.get("/api/public/booking/:token", async (req, res) => {
+  try {
+    const { profile, config } = await publicInternalBookingContext(req.params.token);
+    const availability = await listCalendarSlots({
+      prisma,
+      profile,
+      config,
+      fromDate: req.query.from,
+      days: Math.min(30, Math.max(1, Number(req.query.days || 21))),
+      durationMinutes: config.slotDurationMinutes,
+      ...bookingProviderHelpers(),
+    });
+    res.set("Cache-Control", "no-store");
+    res.json({
+      business: { name: profile.businessName, website: profile.website || "" },
+      appointmentMode: config.appointmentMode,
+      durationMinutes: availability.durationMinutes,
+      timezone: availability.timezone,
+      intakeFields: publicBookingIntakeFields(config),
+      attachments: {
+        enabled: Boolean(config.providerConfig?.allowPhotoUploads),
+        maxFiles: APPOINTMENT_PHOTO_MAX_FILES,
+        maxFileSizeMb: APPOINTMENT_PHOTO_MAX_BYTES / (1024 * 1024),
+        acceptedTypes: [...APPOINTMENT_PHOTO_TYPES],
+      },
+      slots: availability.slots.slice(0, 180),
+    });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+app.post("/api/public/booking/:token", publicAppointmentPhotoUpload, async (req, res) => {
+  try {
+    const { link, connection, profile, config } = await publicInternalBookingContext(req.params.token);
+    const customer = publicBookingIntake(config, req.body);
+    const photoUploadsEnabled = Boolean(config.providerConfig?.allowPhotoUploads);
+    if (!photoUploadsEnabled) delete customer.intakeData.job_notes;
+    if (req.files?.length && !photoUploadsEnabled) throw new Error("Photo uploads are not enabled for this booking link");
+    const photos = validatedAppointmentPhotos(req.files || []);
+    if (photos.length) customer.intakeData.job_photo_count = photos.length;
+    enforcePublicBookingRateLimit(req, profile.id);
+    const appointment = await prisma.$transaction(async (tx) => {
+      const booked = await bookCalendarAppointment({
+        prisma: tx,
+        profile,
+        config,
+        start: req.body.start,
+        durationMinutes: config.slotDurationMinutes,
+        customer: { name: customer.customerName, phone: customer.phone, email: customer.email },
+        intakeData: customer.intakeData,
+        reason: customer.reason,
+        ...bookingProviderHelpers(),
+      });
+      if (photos.length) {
+        await tx.appointmentAttachment.createMany({
+          data: photos.map((photo) => ({ appointmentId: booked.id, ...photo })),
+        });
+      }
+      return booked;
+    });
+    let matched = null;
+    try {
+      const mirror = await prisma.bookingAppointment.create({
+        data: {
+          businessProfileId: profile.id,
+          connectionId: connection.id,
+          provider: "internal",
+          externalId: `internal:${appointment.id}`,
+          customerName: appointment.customerName,
+          phone: appointment.phone,
+          email: appointment.email,
+          status: appointment.status,
+          source: "public_booking_link",
+          scheduledStart: appointment.scheduledStart,
+          scheduledEnd: appointment.scheduledEnd,
+          timezone: appointment.timezone,
+          bookingUrl: link.url,
+          manageUrl: appointmentManageUrl({ settings: await getSettings(), appointment }),
+          notes: appointment.reason,
+          raw: { internalAppointmentId: appointment.id, confirmationCode: appointmentConfirmationLabel(appointment) },
+        },
+      });
+      matched = await matchBookingLinkSendToAppointment({
+        connection,
+        appointment: mirror,
+        payload: { bookingSource: req.body.bookingSource, phone: appointment.phone, email: appointment.email },
+      });
+    } catch (error) {
+      console.warn(`[booking] internal link attribution failed for appointment ${appointment.id}: ${error.message}`);
+    }
+    const settings = await getSettings();
+    const lead = matched?.leadId ? await prisma.lead.findUnique({ where: { id: matched.leadId } }) : null;
+    const summaryDelivery = await sendAppointmentSummary({
+      settings,
+      profile,
+      config,
+      appointment,
+      lead,
+      source: "public_booking_link",
+    });
+    const businessSummaryDelivery = await sendBusinessAppointmentSummary({
+      settings,
+      profile,
+      config,
+      appointment,
+      source: "public_booking_link",
+    });
+    res.status(201).json({
+      ok: true,
+      appointment: {
+        id: appointment.id,
+        status: appointment.status,
+        customerName: appointment.customerName,
+        scheduledStart: appointment.scheduledStart,
+        scheduledEnd: appointment.scheduledEnd,
+        attachmentCount: photos.length,
+      },
+      business: { name: profile.businessName },
+      confirmationCode: appointmentConfirmationLabel(appointment),
+      appointmentTime: formatAppointmentTime(appointment, config.timezone),
+      manageUrl: summaryDelivery.manageUrl,
+      summaryDelivery,
+      businessSummaryDelivery,
+    });
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
 function publicAppointmentPayload({ appointment, profile, config, settings, availability = null }) {
   const manageUrl = appointmentManageUrl({ settings, appointment });
   return {
@@ -15678,6 +16075,24 @@ app.delete("/api/business-admin/booking/connections/:provider", async (req, res)
   }
 });
 
+app.put("/api/business-admin/booking/internal", async (req, res) => {
+  try {
+    const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const settings = await getSettings();
+    await ensureInternalBookingConnection({
+      profile,
+      config,
+      settings,
+      req,
+      directBooking: req.body.directBooking !== false,
+      allowPhotoUploads: Boolean(req.body.allowPhotoUploads),
+    });
+    res.json(await bookingDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
 app.put("/api/business-admin/booking/vagaro", async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
@@ -16998,6 +17413,30 @@ app.get("/api/business-admin/calendar", async (req, res) => {
     res.json(availability);
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/business-admin/appointments/:appointmentId/attachments/:attachmentId", async (req, res) => {
+  try {
+    const { profile } = await adminContext(req.query.business_name, req.query.website, req.user);
+    const attachment = await prisma.appointmentAttachment.findFirst({
+      where: {
+        id: Number(req.params.attachmentId),
+        appointmentId: Number(req.params.appointmentId),
+        appointment: { businessName: profile.businessName, website: profile.website },
+      },
+    });
+    if (!attachment) return res.status(404).json({ error: "Appointment photo was not found" });
+    res.set({
+      "Cache-Control": "private, max-age=300",
+      "Content-Type": attachment.mimeType,
+      "Content-Length": String(attachment.byteSize),
+      "Content-Disposition": `inline; filename="${appointmentPhotoFilename(attachment.filename)}"`,
+      "X-Content-Type-Options": "nosniff",
+    });
+    return res.send(Buffer.from(attachment.data));
+  } catch (error) {
+    return res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
   }
 });
 

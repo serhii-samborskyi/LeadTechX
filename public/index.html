@@ -411,6 +411,28 @@
                 <label>Provider<select id="calendarProvider"><option value="internal">RingPort calendar</option><option value="vagaro">Vagaro</option><option value="google_calendar">Google Calendar</option><option value="calendly">Calendly</option></select></label>
                 <button id="saveVagaroSettingsButton" class="primary" type="button">Save booking system</button>
               </div>
+              <div id="internalCalendarSettingsPanel" class="calendar-oauth-panel">
+                <div class="calendar-connection-heading">
+                  <div><strong>RingPort calendar</strong><small>Choose how customers finish booking</small></div>
+                </div>
+                <div class="form-grid booking-provider-grid">
+                  <label>Receptionist booking method
+                    <select id="internalBookingMethod">
+                      <option value="direct">Book during the conversation</option>
+                      <option value="link">Send the customer a booking link</option>
+                    </select>
+                  </label>
+                  <label class="check-label"><input id="internalPhotoUploads" type="checkbox" /> Let customers add job notes and photos</label>
+                </div>
+                <div id="internalBookingLinkControls" hidden>
+                  <div class="crm-webhook-controls booking-provider-actions">
+                    <input id="internalBookingUrl" type="url" readonly placeholder="Save to create the customer booking link" />
+                    <button id="copyInternalBookingLinkButton" type="button">Copy link</button>
+                    <a id="openInternalBookingLinkButton" class="button-link" href="#" target="_blank" rel="noopener">Open page</a>
+                  </div>
+                  <small>Customers see live availability, enter the required appointment details, and receive the same RingPort confirmation.</small>
+                </div>
+              </div>
               <div id="vagaroSettingsPanel" class="vagaro-settings-panel" hidden>
                 <div class="form-grid booking-provider-grid">
                   <label>Vagaro mode<select id="vagaroMode"><option value="simple">Simple - business link only</option><option value="api">API - live availability</option></select></label>

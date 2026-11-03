@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Book an appointment | RingPort</title>
+    <link rel="icon" type="image/png" href="/assets/ringport-icon.png" />
+    <link rel="apple-touch-icon" href="/assets/ringport-icon.png" />
+    <link rel="stylesheet" href="/booking/booking.css" />
+  </head>
+  <body>
+    <main class="booking-shell">
+      <header class="booking-brand" aria-label="Powered by RingPort">
+        <img src="/assets/ringport-icon.png" alt="" />
+        <span>Powered by RingPort</span>
+      </header>
+
+      <section id="loadingState" class="state-card" aria-live="polite">
+        <span class="loading-mark" aria-hidden="true"></span>
+        <h1>Loading available times</h1>
+        <p>One moment while we check the calendar.</p>
+      </section>
+
+      <section id="errorState" class="state-card" hidden aria-live="assertive">
+        <span class="state-icon error-icon"><i data-lucide="calendar-x"></i></span>
+        <h1>Booking is unavailable</h1>
+        <p id="errorMessage">This link may no longer be active.</p>
+        <button id="retryButton" type="button">Try again</button>
+      </section>
+
+      <section id="bookingApp" class="booking-card" hidden>
+        <header class="booking-heading">
+          <p class="eyebrow"><i data-lucide="calendar-days"></i> Online booking</p>
+          <h1 id="businessName">Book an appointment</h1>
+          <p id="bookingIntro">Choose an available time, then tell us how to reach you.</p>
+          <div class="booking-meta">
+            <span><i data-lucide="clock-3"></i><span id="durationLabel"></span></span>
+            <span><i data-lucide="map-pin"></i><span id="timezoneLabel"></span></span>
+          </div>
+        </header>
+
+        <form id="bookingForm" novalidate>
+          <fieldset class="booking-section">
+            <legend><span>1</span> Choose a time</legend>
+            <label class="field-label" for="dateSelect">Date <span class="required-mark" aria-hidden="true">*</span></label>
+            <select id="dateSelect" required></select>
+            <div id="slotGrid" class="slot-grid" role="radiogroup" aria-label="Available appointment times"></div>
+            <p id="noSlotsMessage" class="empty-message" hidden>No open times are available on this date.</p>
+          </fieldset>
+
+          <fieldset class="booking-section">
+            <legend><span>2</span> Your details</legend>
+            <div id="intakeFields" class="field-grid"></div>
+            <div id="jobAttachments" class="job-attachments" hidden>
+              <div class="attachment-heading">
+                <div>
+                  <strong>Job notes and photos</strong>
+                  <small>Optional</small>
+                </div>
+                <p>Add anything that helps the business prepare before arriving.</p>
+              </div>
+              <label class="dynamic-field wide" for="jobNotes">
+                <span>Notes for the business</span>
+                <textarea id="jobNotes" maxlength="2000" placeholder="Describe the area, access instructions, damage, or anything else they should know."></textarea>
+              </label>
+              <label class="photo-picker" for="jobPhotos">
+                <i data-lucide="image-plus"></i>
+                <span><strong>Add photos</strong><small id="photoLimitLabel">Up to 5 photos, 4 MB each</small></span>
+                <input id="jobPhotos" type="file" accept="image/jpeg,image/png,image/webp" multiple />
+              </label>
+              <div id="photoPreviewGrid" class="photo-preview-grid" aria-live="polite"></div>
+              <p id="photoError" class="photo-error" role="alert" hidden></p>
+              <p class="upload-privacy"><i data-lucide="shield-alert"></i> Do not upload IDs, payment cards, or sensitive documents.</p>
+            </div>
+          </fieldset>
+
+          <div id="formError" class="form-error" role="alert" hidden></div>
+          <button id="submitButton" class="primary-button" type="submit" disabled>
+            <i data-lucide="calendar-check"></i>
+            <span id="submitLabel">Book appointment</span>
+          </button>
+          <p class="privacy-note"><i data-lucide="shield-check"></i> Your details are sent securely to this business.</p>
+        </form>
+      </section>
+
+      <section id="successState" class="state-card success-card" hidden aria-live="polite">
+        <span class="state-icon success-icon"><i data-lucide="check"></i></span>
+        <p class="eyebrow">Appointment submitted</p>
+        <h1 id="successTitle">You are booked</h1>
+        <div id="successSummary" class="success-summary"></div>
+        <a id="manageLink" class="primary-link" href="#">Manage appointment</a>
+        <p id="deliveryNote" class="delivery-note"></p>
+      </section>
+    </main>
+    <script src="/vendor/lucide/lucide.min.js"></script>
+    <script src="/booking/booking.js" type="module"></script>
+  </body>
+</html>

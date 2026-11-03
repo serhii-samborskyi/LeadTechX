@@ -274,7 +274,7 @@ model AvailabilityRule {
 }
 
 model Appointment {
-  id                Int                @id @default(autoincrement())
+  id                Int                     @id @default(autoincrement())
   businessName      String
   website           String?
   customerName      String
@@ -286,15 +286,29 @@ model Appointment {
   durationMinutes   Int?
   timezone          String?
   intakeData        Json?
-  calendarProvider  String             @default("internal")
-  bookingKey        String?            @unique
+  calendarProvider  String                  @default("internal")
+  bookingKey        String?                 @unique
   externalId        String?
   reason            String?
-  status            String             @default("requested")
-  createdAt         DateTime           @default(now())
+  status            String                  @default("requested")
+  createdAt         DateTime                @default(now())
   feedback          CustomerFeedback[]
   messageDeliveries MessageDelivery[]
   inboundMessages   MessageInbound[]
+  attachments       AppointmentAttachment[]
+}
+
+model AppointmentAttachment {
+  id            Int         @id @default(autoincrement())
+  appointmentId Int
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  filename      String
+  mimeType      String
+  byteSize      Int
+  data          Bytes
+  createdAt     DateTime    @default(now())
+
+  @@index([appointmentId, createdAt])
 }
 
 model BookingConnection {

@@ -250,6 +250,13 @@ const el = {
   goalClickCount: document.querySelector("#goalClickCount"),
   goalConversionCount: document.querySelector("#goalConversionCount"),
   calendarProvider: document.querySelector("#calendarProvider"),
+  internalCalendarSettingsPanel: document.querySelector("#internalCalendarSettingsPanel"),
+  internalBookingMethod: document.querySelector("#internalBookingMethod"),
+  internalPhotoUploads: document.querySelector("#internalPhotoUploads"),
+  internalBookingLinkControls: document.querySelector("#internalBookingLinkControls"),
+  internalBookingUrl: document.querySelector("#internalBookingUrl"),
+  copyInternalBookingLinkButton: document.querySelector("#copyInternalBookingLinkButton"),
+  openInternalBookingLinkButton: document.querySelector("#openInternalBookingLinkButton"),
   vagaroSettingsPanel: document.querySelector("#vagaroSettingsPanel"),
   vagaroMode: document.querySelector("#vagaroMode"),
   vagaroApiSettings: document.querySelector("#vagaroApiSettings"),
@@ -1584,6 +1591,7 @@ function calendarProviderName(provider) {
 
 function updateCalendarProviderUi() {
   const provider = el.calendarProvider?.value || state.admin?.calendarProvider || "internal";
+  const internal = provider === "internal";
   const vagaro = provider === "vagaro";
   const google = provider === "google_calendar";
   const calendly = provider === "calendly";
@@ -1593,6 +1601,13 @@ function updateCalendarProviderUi() {
   const apiMode = vagaro && vagaroMode === "api";
   const appointmentEditor = document.querySelector(".appointment-editor-card");
   const bookingDirectory = document.querySelector(".booking-directory-card");
+  if (el.internalCalendarSettingsPanel) el.internalCalendarSettingsPanel.hidden = !internal;
+  if (el.internalBookingLinkControls) el.internalBookingLinkControls.hidden = !internal || el.internalBookingMethod?.value !== "link";
+  if (el.internalPhotoUploads) {
+    const photoUploadAvailable = internal && el.internalBookingMethod?.value === "link";
+    el.internalPhotoUploads.disabled = !photoUploadAvailable;
+    if (el.internalPhotoUploads.closest("label")) el.internalPhotoUploads.closest("label").hidden = !photoUploadAvailable;
+  }
   if (el.vagaroSettingsPanel) el.vagaroSettingsPanel.hidden = !vagaro;
   if (el.vagaroStatus) el.vagaroStatus.hidden = !vagaro;
   if (el.googleCalendarSettingsPanel) el.googleCalendarSettingsPanel.hidden = !google;
@@ -1652,6 +1667,14 @@ function renderBooking(data = {}) {
   const googleConnection = (data.connections || []).find((item) => item.provider === "google_calendar") || null;
   const calendlyConnection = (data.connections || []).find((item) => item.provider === "calendly") || null;
   if (el.calendarProvider) el.calendarProvider.value = ["vagaro", "google_calendar", "calendly"].includes(provider) ? provider : "internal";
+  if (el.internalBookingMethod) el.internalBookingMethod.value = data.internalBooking?.directBooking === false ? "link" : "direct";
+  if (el.internalPhotoUploads) el.internalPhotoUploads.checked = data.internalBooking?.allowPhotoUploads === true;
+  if (el.internalBookingUrl) el.internalBookingUrl.value = data.internalBooking?.publicUrl || "";
+  if (el.copyInternalBookingLinkButton) el.copyInternalBookingLinkButton.disabled = !data.internalBooking?.publicUrl;
+  if (el.openInternalBookingLinkButton) {
+    el.openInternalBookingLinkButton.href = data.internalBooking?.publicUrl || "#";
+    el.openInternalBookingLinkButton.setAttribute("aria-disabled", String(!data.internalBooking?.publicUrl));
+  }
   if (el.vagaroMode) el.vagaroMode.value = vagaroConnection.settings?.vagaroMode === "simple" ? "simple" : vagaroConnection.id ? "api" : "simple";
   if (el.vagaroBusinessUrl) el.vagaroBusinessUrl.value = vagaroConnection.settings?.vagaroBusinessUrl || vagaroConnection.bookingUrl || "";
   if (el.vagaroClientId) el.vagaroClientId.value = vagaroConnection.apiClientId || "";
@@ -2497,6 +2520,23 @@ async function saveVagaroSettings() {
     if (!connection || connection.status !== "active") return connectCalendarProvider(provider);
     return saveOAuthCalendarProvider(provider);
   }
+  if (provider === "internal") {
+    setAdminStatus("Saving RingPort calendar");
+    const data = await apiJson("/api/business-admin/booking/internal", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...adminIdentity(),
+        directBooking: el.internalBookingMethod?.value !== "link",
+        allowPhotoUploads: el.internalBookingMethod?.value === "link" && el.internalPhotoUploads?.checked === true,
+      }),
+    });
+    state.admin = { ...state.admin, calendarProvider: "internal" };
+    renderBooking(data);
+    await loadCalendar();
+    setAdminStatus(data.internalBooking?.directBooking === false ? "Booking link mode enabled" : "Conversation booking enabled");
+    return;
+  }
   const enabled = provider === "vagaro";
   setAdminStatus(enabled ? "Saving Vagaro booking system" : "Switching to RingPort calendar");
   const fieldValue = (node) => String(node?.value || "").trim();
@@ -2716,11 +2756,38 @@ async function loadCalendar() {
       appointmentField(provider === "google_calendar" ? "Calendar event" : "Cancel/reschedule", manageUrl, manageUrl || null),
     ];
 
-    const builtInKeys = new Set(["name", "customer_name", "phone", "email", "reason"]);
+    const builtInKeys = new Set(["name", "customer_name", "phone", "email", "reason", "job_photo_count"]);
     for (const [key, value] of Object.entries(appointment.intakeData || {})) {
       if (!builtInKeys.has(key.toLowerCase())) fields.push(appointmentField(intakeLabel(key), value));
     }
     details.append(...fields.filter(Boolean));
+    const attachments = Array.isArray(appointment.attachments) ? appointment.attachments : [];
+    const photoGallery = document.createElement("div");
+    photoGallery.className = "appointment-photo-gallery";
+    if (attachments.length) {
+      const identity = adminIdentity();
+      const attachmentQuery = new URLSearchParams({ business_name: identity.businessName });
+      if (identity.website) attachmentQuery.set("website", identity.website);
+      const heading = document.createElement("strong");
+      heading.textContent = `${attachments.length} customer ${attachments.length === 1 ? "photo" : "photos"}`;
+      const grid = document.createElement("div");
+      grid.className = "appointment-photo-grid";
+      for (const attachment of attachments) {
+        const url = `/api/business-admin/appointments/${appointment.id}/attachments/${attachment.id}?${attachmentQuery}`;
+        const link = document.createElement("a");
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.title = attachment.filename || "Open customer photo";
+        const image = document.createElement("img");
+        image.src = url;
+        image.alt = attachment.filename || "Customer appointment photo";
+        image.loading = "lazy";
+        link.appendChild(image);
+        grid.appendChild(link);
+      }
+      photoGallery.append(heading, grid);
+    }
     const actions = document.createElement("div");
     actions.className = "appointment-actions";
     const reminder = document.createElement("button");
@@ -2786,7 +2853,9 @@ async function loadCalendar() {
       }
       actions.appendChild(cancelButton);
     }
-    row.append(summary, details, actions);
+    row.append(summary, details);
+    if (attachments.length) row.appendChild(photoGallery);
+    row.appendChild(actions);
     el.bookedAppointments.appendChild(row);
   }
   if (!data.appointments.length) {
@@ -5176,9 +5245,13 @@ el.metaConnectionList?.addEventListener("click", (event) => {
 });
 el.refreshCalendarButton.addEventListener("click", () => runAdmin(loadCalendar));
 el.calendarProvider.addEventListener("change", updateCalendarProviderUi);
+el.internalBookingMethod?.addEventListener("change", updateCalendarProviderUi);
 el.vagaroMode?.addEventListener("change", updateCalendarProviderUi);
 el.calendlyDirectBooking?.addEventListener("change", updateCalendarProviderUi);
 el.saveVagaroSettingsButton.addEventListener("click", () => runAdmin(saveVagaroSettings));
+el.copyInternalBookingLinkButton?.addEventListener("click", () =>
+  runAdmin(() => copyText(el.internalBookingUrl?.value || "", "Customer booking link copied")),
+);
 el.syncVagaroButton.addEventListener("click", () => runAdmin(syncVagaro));
 el.connectGoogleCalendarButton?.addEventListener("click", () => runAdmin(() => connectCalendarProvider("google_calendar")));
 el.disconnectGoogleCalendarButton?.addEventListener("click", () => runAdmin(() => disconnectCalendarProvider("google_calendar")));

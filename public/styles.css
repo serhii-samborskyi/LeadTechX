@@ -5635,6 +5635,46 @@ dd {
   margin-top: 12px;
 }
 
+.appointment-photo-gallery {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.appointment-photo-gallery > strong {
+  font-size: 0.78rem;
+}
+
+.appointment-photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 88px));
+  gap: 8px;
+}
+
+.appointment-photo-grid a {
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f3f8f5;
+}
+
+.appointment-photo-grid a:focus-visible {
+  outline: 3px solid rgb(47 128 104 / 28%);
+  outline-offset: 2px;
+}
+
+.appointment-photo-grid img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 160ms var(--ease-out);
+}
+
+.appointment-photo-grid a:hover img {
+  transform: scale(1.03);
+}
+
 .appointment-field {
   min-width: 0;
 }

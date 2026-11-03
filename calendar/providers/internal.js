@@ -27,6 +27,12 @@ export async function listSlots({ prisma, profile, config, fromDate, days = 14, 
       status: { notIn: ["cancelled", "rejected"] },
     },
     orderBy: { scheduledStart: "asc" },
+    include: {
+      attachments: {
+        select: { id: true, filename: true, mimeType: true, byteSize: true, createdAt: true },
+        orderBy: { createdAt: "asc" },
+      },
+    },
   });
 
   const rules = new Map(config.availabilityRules.map((rule) => [rule.dayOfWeek, rule]));
