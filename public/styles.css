@@ -3683,6 +3683,29 @@ dd {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.booking-photo-upload-option {
+  align-items: flex-start;
+  padding-top: 25px;
+  white-space: normal;
+}
+
+.booking-photo-upload-option > span {
+  display: grid;
+  gap: 3px;
+}
+
+.booking-photo-upload-option strong {
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+
+.booking-photo-upload-option small {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
 .booking-provider-header {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto;
@@ -6621,6 +6644,10 @@ a.appointment-field-value {
   .booking-service-link-tools,
   .data-row.appointment-row {
     grid-template-columns: 1fr;
+  }
+
+  .booking-photo-upload-option {
+    padding-top: 0;
   }
 
   .public-flow-actions {

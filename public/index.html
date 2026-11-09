@@ -409,7 +409,7 @@
               </div>
               <div class="booking-provider-header">
                 <label>Provider<select id="calendarProvider"><option value="internal">RingPort calendar</option><option value="vagaro">Vagaro</option><option value="google_calendar">Google Calendar</option><option value="calendly">Calendly</option></select></label>
-                <button id="saveVagaroSettingsButton" class="primary" type="button">Save booking system</button>
+                <button id="saveVagaroSettingsButton" class="primary" type="button">Save booking method</button>
               </div>
               <div id="internalCalendarSettingsPanel" class="calendar-oauth-panel">
                 <div class="calendar-connection-heading">
@@ -422,7 +422,10 @@
                       <option value="link">Send the customer a booking link</option>
                     </select>
                   </label>
-                  <label class="check-label"><input id="internalPhotoUploads" type="checkbox" /> Let customers add job notes and photos</label>
+                  <label class="check-label booking-photo-upload-option">
+                    <input id="internalPhotoUploads" type="checkbox" />
+                    <span><strong>Let customers add job notes and photos</strong><small>The notes box and photo picker appear on the customer booking page.</small></span>
+                  </label>
                 </div>
                 <div id="internalBookingLinkControls" hidden>
                   <div class="crm-webhook-controls booking-provider-actions">

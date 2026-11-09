@@ -1622,7 +1622,7 @@ function updateCalendarProviderUi() {
     el.saveVagaroSettingsButton.textContent = ["google_calendar", "calendly"].includes(provider) && connection?.status !== "active"
       ? `Connect ${calendarProviderName(provider)}`
       : provider === "internal"
-        ? "Use RingPort calendar"
+        ? "Save booking method"
         : "Save booking system";
   }
   if (appointmentEditor) {
@@ -2513,6 +2513,37 @@ async function markGoalSendConverted(id) {
   setAdminStatus("Conversion recorded");
 }
 
+async function saveInternalBookingSettings({ refreshCalendar = true, announce = true } = {}) {
+  if (announce) setAdminStatus("Saving RingPort booking method");
+  const data = await apiJson("/api/business-admin/booking/internal", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      directBooking: el.internalBookingMethod?.value !== "link",
+      allowPhotoUploads: el.internalBookingMethod?.value === "link" && el.internalPhotoUploads?.checked === true,
+    }),
+  });
+  state.admin = { ...state.admin, calendarProvider: "internal" };
+  renderBooking(data);
+  if (refreshCalendar) await loadCalendar();
+  if (announce) {
+    const photoStatus = data.internalBooking?.allowPhotoUploads ? " · customer notes and photos enabled" : "";
+    setAdminStatus(data.internalBooking?.directBooking === false ? `Booking link mode enabled${photoStatus}` : "Conversation booking enabled");
+  }
+  return data;
+}
+
+async function saveCalendarSettings() {
+  const internal = el.calendarProvider?.value === "internal";
+  const bookingData = internal ? await saveInternalBookingSettings({ refreshCalendar: false, announce: false }) : null;
+  await saveBusinessConfig();
+  if (internal) {
+    const photoStatus = bookingData?.internalBooking?.allowPhotoUploads ? " Customer notes and photo uploads are enabled." : "";
+    setAdminStatus(`Calendar settings saved.${photoStatus}`);
+  }
+}
+
 async function saveVagaroSettings() {
   const provider = el.calendarProvider.value;
   if (["google_calendar", "calendly"].includes(provider)) {
@@ -2520,23 +2551,7 @@ async function saveVagaroSettings() {
     if (!connection || connection.status !== "active") return connectCalendarProvider(provider);
     return saveOAuthCalendarProvider(provider);
   }
-  if (provider === "internal") {
-    setAdminStatus("Saving RingPort calendar");
-    const data = await apiJson("/api/business-admin/booking/internal", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...adminIdentity(),
-        directBooking: el.internalBookingMethod?.value !== "link",
-        allowPhotoUploads: el.internalBookingMethod?.value === "link" && el.internalPhotoUploads?.checked === true,
-      }),
-    });
-    state.admin = { ...state.admin, calendarProvider: "internal" };
-    renderBooking(data);
-    await loadCalendar();
-    setAdminStatus(data.internalBooking?.directBooking === false ? "Booking link mode enabled" : "Conversation booking enabled");
-    return;
-  }
+  if (provider === "internal") return saveInternalBookingSettings();
   const enabled = provider === "vagaro";
   setAdminStatus(enabled ? "Saving Vagaro booking system" : "Switching to RingPort calendar");
   const fieldValue = (node) => String(node?.value || "").trim();
@@ -5261,7 +5276,7 @@ el.goalRecentSends?.addEventListener("click", (event) => {
   if (button.dataset.action === "convert-goal-send") runAdmin(() => markGoalSendConverted(Number(row?.dataset.sendId)));
 });
 el.saveBusinessProfileButton.addEventListener("click", () => runAdmin(saveBusinessProfile));
-el.saveCalendarButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
+el.saveCalendarButton.addEventListener("click", () => runAdmin(saveCalendarSettings));
 el.saveNotificationSettingsButton?.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.connectMetaButton?.addEventListener("click", () => runAdmin(connectMetaChannels));
 el.metaConnectionList?.addEventListener("click", (event) => {
