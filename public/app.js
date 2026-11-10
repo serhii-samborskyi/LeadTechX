@@ -228,6 +228,12 @@ const el = {
   transferActive: document.querySelector("#transferActive"),
   addTransferTargetButton: document.querySelector("#addTransferTargetButton"),
   transferTargetList: document.querySelector("#transferTargetList"),
+  goalCalendarSummary: document.querySelector("#goalCalendarSummary"),
+  openCalendarSettingsFromGoals: document.querySelector("#openCalendarSettingsFromGoals"),
+  goalSummaryGrid: document.querySelector("#goalSummaryGrid"),
+  goalColumns: document.querySelector("#goalColumns"),
+  goalStarterSection: document.querySelector("#goalStarterSection"),
+  newCustomGoalButton: document.querySelector("#newCustomGoalButton"),
   goalId: document.querySelector("#goalId"),
   goalEditorDisclosure: document.querySelector("#goalEditorDisclosure"),
   goalEditorTitle: document.querySelector("#goalEditorTitle"),
@@ -1828,6 +1834,7 @@ function renderBooking(data = {}) {
   }
   if (!events.length) el.vagaroWebhookEvents.textContent = "No Vagaro webhook events received yet.";
   updateCalendarProviderUi();
+  renderGoalCalendarContext();
 }
 
 const PLAN_FEATURE_LABELS = {
@@ -2326,14 +2333,74 @@ function goalActionLabel(value) {
     send_link: "Send link",
     purchase_link: "Buy or pay",
     application_link: "Application",
-    booking_link: "External booking",
+    booking_link: "Other booking link",
   }[value] || "Send link";
+}
+
+const GOAL_TEMPLATES = Object.freeze({
+  payment: {
+    name: "Take a payment",
+    actionType: "purchase_link",
+    triggerInstructions: "Offer when the caller is ready to pay a deposit, invoice, or balance.",
+    qualificationInstructions: "Confirm what they are paying for and the amount if known. Do not collect card details during the call.",
+    confirmationMessage: "I sent the secure payment link. You can complete the payment there.",
+  },
+  quote: {
+    name: "Request a quote",
+    actionType: "send_link",
+    triggerInstructions: "Offer when the caller wants a written estimate or needs to share job details before receiving a price.",
+    qualificationInstructions: "Confirm the service needed, location, and best contact details before sending the form.",
+    confirmationMessage: "I sent the quote request link. Please add the remaining details there.",
+  },
+  application: {
+    name: "Start an application",
+    actionType: "application_link",
+    triggerInstructions: "Offer after the caller says they want to apply or asks how to get started.",
+    qualificationInstructions: "Confirm the basic eligibility details this business needs. Do not pressure the caller.",
+    confirmationMessage: "I sent the application link. You can continue there when you are ready.",
+  },
+  purchase: {
+    name: "Buy online",
+    actionType: "purchase_link",
+    triggerInstructions: "Offer when the caller is ready to order or asks where they can buy online.",
+    qualificationInstructions: "Confirm the product or service they want so the link is relevant.",
+    confirmationMessage: "I sent the purchase link. You can review the details and complete the order there.",
+  },
+});
+
+function goalCalendarSummaryText() {
+  const booking = state.booking || {};
+  const activeConnection = booking.activeConnection?.status === "active" ? booking.activeConnection : null;
+  const provider = activeConnection?.provider || state.admin?.calendarProvider || "internal";
+  const connection = calendarConnection(provider);
+
+  if (provider === "internal") {
+    return booking.internalBooking?.directBooking === false
+      ? "RingPort calendar is using booking-link mode. The receptionist sends the calendar link when a caller wants an appointment."
+      : "RingPort calendar is using receptionist booking. The receptionist can choose an available time and book during the conversation.";
+  }
+  if (connection?.status !== "active") {
+    return `${calendarProviderName(provider)} is selected but is not connected yet. Appointment booking will be available after setup is completed.`;
+  }
+  if (provider === "google_calendar") {
+    return "Google Calendar is connected. The receptionist can check availability and book during the conversation.";
+  }
+  if (provider === "calendly") {
+    return connection.settings?.directBooking === false
+      ? "Calendly is using booking-link mode. The receptionist sends the Calendly link and the customer chooses a time there."
+      : "Calendly is connected for direct booking. The receptionist can choose an event type and book during the conversation.";
+  }
+  return "Vagaro is using booking-link mode. The receptionist sends the Vagaro link and the customer completes the appointment there.";
+}
+
+function renderGoalCalendarContext() {
+  if (el.goalCalendarSummary) el.goalCalendarSummary.textContent = goalCalendarSummaryText();
 }
 
 function resetGoalForm() {
   if (!el.goalId) return;
   el.goalId.value = "";
-  el.goalEditorTitle.textContent = "Add a goal";
+  el.goalEditorTitle.textContent = "Create a custom goal";
   el.goalName.value = "";
   el.goalActionType.value = "send_link";
   el.goalDestinationUrl.value = "";
@@ -2345,6 +2412,33 @@ function resetGoalForm() {
   el.goalPrimary.checked = false;
   el.goalActive.checked = true;
   el.saveGoalButton.textContent = "Save goal";
+}
+
+function openCustomGoalEditor() {
+  resetGoalForm();
+  el.goalEditorDisclosure.open = true;
+  el.goalEditorTitle.scrollIntoView({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => el.goalName?.focus(), 250);
+}
+
+function applyGoalTemplate(templateKey) {
+  const template = GOAL_TEMPLATES[templateKey];
+  if (!template) return;
+  resetGoalForm();
+  el.goalEditorTitle.textContent = `Add goal: ${template.name}`;
+  el.goalName.value = template.name;
+  el.goalActionType.value = template.actionType;
+  el.goalTriggerInstructions.value = template.triggerInstructions;
+  el.goalQualificationInstructions.value = template.qualificationInstructions;
+  el.goalConfirmationMessage.value = template.confirmationMessage;
+  el.goalEditorDisclosure.open = true;
+  el.goalEditorTitle.scrollIntoView({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => el.goalDestinationUrl?.focus(), 250);
+}
+
+function cancelGoalForm() {
+  resetGoalForm();
+  el.goalEditorDisclosure.open = false;
 }
 
 function editGoal(goal) {
@@ -2381,8 +2475,9 @@ function renderGoals(data = {}) {
   el.goalConversionCount.textContent = String(totals.converted || 0);
   el.goalList.innerHTML = "";
   const goals = Array.isArray(data.goals) ? data.goals : [];
-  if (!goals.length) el.goalEditorDisclosure.open = true;
-  if (!goals.length) emptyListMessage(el.goalList, "No link goals yet. Add one when your receptionist should guide a caller to a specific next step.");
+  if (el.goalSummaryGrid) el.goalSummaryGrid.hidden = !goals.length;
+  if (el.goalColumns) el.goalColumns.hidden = !goals.length;
+  renderGoalCalendarContext();
   for (const goal of goals) {
     const card = document.createElement("article");
     card.className = `goal-card${goal.active ? "" : " is-disabled"}`;
@@ -5257,7 +5352,20 @@ el.transferTargetList.addEventListener("click", (event) => {
   if (button.dataset.action === "delete-transfer-target") runAdmin(() => deleteTransferTarget(row));
 });
 el.saveGoalButton?.addEventListener("click", () => runAdmin(saveGoal));
-el.resetGoalButton?.addEventListener("click", resetGoalForm);
+el.resetGoalButton?.addEventListener("click", cancelGoalForm);
+el.newCustomGoalButton?.addEventListener("click", openCustomGoalEditor);
+el.goalStarterSection?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-goal-template]");
+  if (button) applyGoalTemplate(button.dataset.goalTemplate);
+});
+el.openCalendarSettingsFromGoals?.addEventListener("click", () => {
+  selectOwnerPage("appointments", "calendar", { scroll: false });
+  const settings = document.querySelector(".calendar-settings-disclosure");
+  if (settings) {
+    settings.open = true;
+    settings.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+});
 el.goalList?.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;

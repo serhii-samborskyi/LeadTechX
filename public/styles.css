@@ -4321,11 +4321,85 @@ dd {
   font-size: 0.84rem;
 }
 
+.goal-calendar-guide {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 18px;
+  border: 1px solid #bdd9cd;
+  border-radius: 8px;
+  background: #f4faf7;
+}
+
+.goal-calendar-guide-heading,
+.goal-starter-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.goal-calendar-guide h4,
+.goal-starter-heading h4 {
+  margin: 0 0 4px;
+}
+
+.goal-calendar-guide p,
+.goal-starter-heading p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.goal-calendar-guide-heading > div,
+.goal-starter-heading > div {
+  min-width: 0;
+}
+
+.goal-calendar-guide-heading > button,
+.goal-starter-heading > button {
+  flex: 0 0 auto;
+}
+
+.goal-purpose-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.goal-purpose-list > div {
+  padding: 12px 14px;
+  background: #fff;
+}
+
+.goal-purpose-list dt {
+  margin-bottom: 3px;
+  color: var(--ink);
+  font-weight: 750;
+}
+
+.goal-purpose-list dd {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
 .goal-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
-  margin-bottom: 14px;
+  margin-bottom: 18px;
+}
+
+.goal-summary-grid[hidden],
+.goal-columns[hidden] {
+  display: none;
 }
 
 .goal-summary-grid > div {
@@ -4354,6 +4428,49 @@ dd {
   margin-bottom: 20px;
 }
 
+.goal-starter-section {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.goal-template-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.goal-template-grid > button {
+  display: grid;
+  gap: 5px;
+  min-height: 98px;
+  padding: 14px;
+  border-color: var(--line);
+  background: #fff;
+  text-align: left;
+}
+
+.goal-template-grid > button:hover,
+.goal-template-grid > button:focus-visible {
+  border-color: #8fbbaa;
+  background: var(--accent-soft);
+}
+
+.goal-template-grid strong {
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.goal-template-grid small {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
 .goal-editor-card textarea {
   min-height: 74px;
   font-family: inherit;
@@ -4377,6 +4494,7 @@ dd {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
   gap: 20px;
+  margin-bottom: 18px;
 }
 
 .goal-columns h4 {
@@ -6102,6 +6220,10 @@ a.appointment-field-value {
   .goal-columns {
     grid-template-columns: 1fr;
   }
+
+  .goal-template-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -6148,6 +6270,22 @@ a.appointment-field-value {
 
   .goal-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .goal-calendar-guide-heading,
+  .goal-starter-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .goal-calendar-guide-heading > button,
+  .goal-starter-heading > button {
+    width: 100%;
+  }
+
+  .goal-purpose-list,
+  .goal-template-grid {
+    grid-template-columns: 1fr;
   }
 
   .goal-card-heading,

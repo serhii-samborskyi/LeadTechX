@@ -35,6 +35,7 @@ import {
   normalizedCallSilenceWarningSeconds,
   telephonyAudioLevel,
 } from "./call-silence-guard.js";
+import { bookingPrefillFromCollectedDetails } from "./booking-prefill.js";
 import { registerMetaPlatform } from "./meta-platform.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -9631,10 +9632,22 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
   const toPhone = normalizeE164Phone(args.phone) || lead?.phone || null;
   if (!toPhone) throw new Error("A caller phone number is required before sending a booking link");
   const customerName = usableCallerName(args.name || args.customerName || lead?.name) || "Customer";
+  const customerEmail = cleanOptionalEmail(args.email) || cleanOptionalEmail(lead?.email) || null;
+  const serviceText = service?.name || args.serviceName || "";
+  const intakePrefill =
+    connection.provider === "internal"
+      ? bookingPrefillFromCollectedDetails({
+          fields: config.intakeFields,
+          args: { ...args, serviceName: args.serviceName || serviceText },
+          lead,
+          customerName,
+          phone: toPhone,
+          email: customerEmail,
+        })
+      : {};
   const clickToken = issueToken().token;
   const shortCode = await generateBookingShortCode();
   const trackedUrl = bookingLinkSendTrackingUrl({ settings, config, token: clickToken, shortCode });
-  const serviceText = service?.name || args.serviceName || "";
   const professionalText = professional?.displayName || args.professionalName || "";
   const requestedTime = String(args.requestedTime || args.start || "").trim();
   const followup = bookingFollowupConfig(config);
@@ -9662,7 +9675,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
       provider: connection.provider,
       customerName,
       phone: toPhone,
-      email: args.email ? String(args.email).trim().toLowerCase() : lead?.email || null,
+      email: customerEmail,
       leadId: lead?.id || null,
       serviceId: service?.id || null,
       serviceExternalId: service?.externalId || null,
@@ -9713,6 +9726,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
         trackedUrl,
         destinationUrl: link.url,
         bookingSource: bookingSourceValue({ clickToken }),
+        intakePrefill,
         service: serviceText,
         professional: professionalText,
         requestedTime,
@@ -11805,6 +11819,16 @@ function toolDeclarations(config) {
   const goals = config.businessProfile?.receptionistGoals || [];
   const collectsEmail = intakeCollectsEmail(config) || config.calendarProvider === "calendly";
   const optionalEmailProperty = collectsEmail ? { email: { type: "STRING", description: "Customer email if configured and known." } } : {};
+  const bookingLinkProperties = {
+    name: { type: "STRING", description: "Customer name if known." },
+    phone: { type: "STRING", description: "Customer phone. If omitted, the inbound caller number is used." },
+    ...optionalEmailProperty,
+    serviceName: { type: "STRING" },
+    serviceId: { type: "STRING" },
+    professionalName: { type: "STRING" },
+    professionalId: { type: "STRING" },
+    requestedTime: { type: "STRING", description: "Requested appointment date/time the customer asked about." },
+  };
   for (const field of config.intakeFields) {
     appointmentProperties[field.fieldKey] = {
       type: "STRING",
@@ -11813,6 +11837,14 @@ function toolDeclarations(config) {
         : field.label,
     };
     if (field.required) appointmentRequired.push(field.fieldKey);
+    if (linkOnlyInternal && !bookingLinkProperties[field.fieldKey]) {
+      bookingLinkProperties[field.fieldKey] = {
+        type: "STRING",
+        description: field.options?.length
+          ? `${field.label}, if the customer already provided it. Allowed values: ${field.options.join(", ")}`
+          : `${field.label}, if the customer already provided it.`,
+      };
+    }
   }
   if (config.calendarProvider === "calendly") {
     if (!appointmentProperties.name) appointmentProperties.name = { type: "STRING", description: "Customer's full name, required by Calendly." };
@@ -11872,16 +11904,7 @@ function toolDeclarations(config) {
                   : `Send the booking link by text after checking availability. Use this for ${linkOnlyCalendly ? "Calendly" : "Vagaro"} instead of directly booking the appointment.`,
             parameters: {
               type: "OBJECT",
-              properties: {
-                name: { type: "STRING", description: "Customer name if known." },
-                phone: { type: "STRING", description: "Customer phone. If omitted, the inbound caller number is used." },
-                ...optionalEmailProperty,
-                serviceName: { type: "STRING" },
-                serviceId: { type: "STRING" },
-                professionalName: { type: "STRING" },
-                professionalId: { type: "STRING" },
-                requestedTime: { type: "STRING", description: "Requested appointment date/time the customer asked about." },
-              },
+              properties: bookingLinkProperties,
             },
           },
         ]
@@ -14606,6 +14629,29 @@ function publicBookingIntakeFields(config) {
   }));
 }
 
+async function publicBookingPrefill({ bookingSource = "", link, profile, config }) {
+  const clickToken = bookingSourceToken(bookingSource);
+  if (!clickToken) return {};
+  const send = await prisma.bookingLinkSend.findUnique({
+    where: { clickToken },
+    include: { lead: true },
+  });
+  if (!send || send.businessProfileId !== profile.id || send.bookingLinkId !== link.id) return {};
+  const metadata = send.metadata && typeof send.metadata === "object" && !Array.isArray(send.metadata) ? send.metadata : {};
+  const savedPrefill =
+    metadata.intakePrefill && typeof metadata.intakePrefill === "object" && !Array.isArray(metadata.intakePrefill)
+      ? metadata.intakePrefill
+      : {};
+  return bookingPrefillFromCollectedDetails({
+    fields: config.intakeFields,
+    args: savedPrefill,
+    lead: send.lead,
+    customerName: send.customerName,
+    phone: send.phone,
+    email: send.email,
+  });
+}
+
 function publicBookingIntake(config, body = {}) {
   let input = body.intakeData;
   if (typeof input === "string" && input.trim()) {
@@ -14690,7 +14736,7 @@ function validatedAppointmentPhotos(files = []) {
 
 app.get("/api/public/booking/:token", async (req, res) => {
   try {
-    const { profile, config } = await publicInternalBookingContext(req.params.token);
+    const { link, profile, config } = await publicInternalBookingContext(req.params.token);
     const availability = await listCalendarSlots({
       prisma,
       profile,
@@ -14700,6 +14746,7 @@ app.get("/api/public/booking/:token", async (req, res) => {
       durationMinutes: config.slotDurationMinutes,
       ...bookingProviderHelpers(),
     });
+    const prefill = await publicBookingPrefill({ bookingSource: req.query.bookingSource, link, profile, config });
     res.set("Cache-Control", "no-store");
     res.json({
       business: { name: profile.businessName, website: profile.website || "" },
@@ -14707,6 +14754,7 @@ app.get("/api/public/booking/:token", async (req, res) => {
       durationMinutes: availability.durationMinutes,
       timezone: availability.timezone,
       intakeFields: publicBookingIntakeFields(config),
+      prefill,
       attachments: {
         enabled: Boolean(config.providerConfig?.allowPhotoUploads),
         maxFiles: APPOINTMENT_PHOTO_MAX_FILES,

@@ -2,6 +2,13 @@ const token = decodeURIComponent(location.pathname.split("/").filter(Boolean).at
 const source = new URLSearchParams(location.search).get("bookingSource") || "";
 const state = { data: null, selectedDate: "", selectedStart: "", submitting: false, photos: [] };
 
+function bookingApiUrl() {
+  const query = new URLSearchParams();
+  if (source) query.set("bookingSource", source);
+  const suffix = query.toString();
+  return `/api/public/booking/${encodeURIComponent(token)}${suffix ? `?${suffix}` : ""}`;
+}
+
 const el = {
   loading: document.querySelector("#loadingState"),
   error: document.querySelector("#errorState"),
@@ -219,12 +226,12 @@ function render(data, { preserveForm = false } = {}) {
     el.date.disabled = false;
   }
   el.fields.replaceChildren(...data.intakeFields.map(fieldInput));
-  if (preserveForm) {
-    for (const [name, value] of Object.entries(preservedValues)) {
-      const input = el.fields.querySelector(`[name="${CSS.escape(name)}"]`);
-      if (input) input.value = value;
-    }
-  } else {
+  const initialValues = preserveForm ? preservedValues : data.prefill || {};
+  for (const [name, value] of Object.entries(initialValues)) {
+    const input = el.fields.querySelector(`[name="${CSS.escape(name)}"]`);
+    if (input) input.value = value;
+  }
+  if (!preserveForm) {
     clearPhotoPreviews();
   }
   const attachmentsEnabled = data.attachments?.enabled === true;
@@ -242,7 +249,7 @@ function render(data, { preserveForm = false } = {}) {
 async function load() {
   if (!token) throw new Error("The booking link is missing.");
   show("loading");
-  const data = await api(`/api/public/booking/${encodeURIComponent(token)}`);
+  const data = await api(bookingApiUrl());
   render(data);
 }
 
@@ -316,7 +323,7 @@ el.form.addEventListener("submit", async (event) => {
     setFormError(error.message);
     if (/not available|just booked/i.test(error.message)) {
       try {
-        const data = await api(`/api/public/booking/${encodeURIComponent(token)}`);
+        const data = await api(bookingApiUrl());
         render(data, { preserveForm: true });
         setFormError("That time was just booked. Please choose another available time.");
       } catch {

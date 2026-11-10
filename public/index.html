@@ -326,21 +326,53 @@
           <section class="admin-view" data-view="goals">
             <div class="admin-view-heading">
               <h3>Receptionist goals</h3>
-              <p>Give the receptionist a specific link to send when a caller is ready to buy, apply, register, or take another action.</p>
+              <p>Optional actions the receptionist can offer after understanding what a caller wants.</p>
             </div>
-            <div class="goal-summary-grid" aria-label="Goal performance">
+            <div class="goal-calendar-guide">
+              <div class="goal-calendar-guide-heading">
+                <div>
+                  <h4>Appointments already use your calendar</h4>
+                  <p id="goalCalendarSummary">RingPort handles appointment requests through the booking method selected in Appointments.</p>
+                </div>
+                <button id="openCalendarSettingsFromGoals" type="button">Review calendar setup</button>
+              </div>
+              <dl class="goal-purpose-list">
+                <div><dt>Appointments</dt><dd>Schedule a date and time through your selected calendar mode.</dd></div>
+                <div><dt>Goals</dt><dd>Send a different link for payments, quotes, applications, purchases, or another next step.</dd></div>
+              </dl>
+            </div>
+            <div class="goal-summary-grid" id="goalSummaryGrid" aria-label="Goal performance" hidden>
               <div><span>Active goals</span><strong id="goalActiveCount">0</strong></div>
               <div><span>Links sent</span><strong id="goalSentCount">0</strong></div>
               <div><span>Link clicks</span><strong id="goalClickCount">0</strong></div>
               <div><span>Conversions</span><strong id="goalConversionCount">0</strong></div>
             </div>
+            <div class="goal-columns" id="goalColumns" hidden>
+              <div><h4>Configured goals</h4><div class="data-list" id="goalList"></div></div>
+              <div><h4>Recent sends</h4><div class="data-list compact-list" id="goalRecentSends"></div></div>
+            </div>
+            <section class="goal-starter-section" id="goalStarterSection" aria-labelledby="goalStarterHeading">
+              <div class="goal-starter-heading">
+                <div>
+                  <h4 id="goalStarterHeading">Choose a starting point</h4>
+                  <p>Pick a common goal to prefill the form. Nothing becomes active until you add your link and save.</p>
+                </div>
+                <button id="newCustomGoalButton" type="button">Create custom goal</button>
+              </div>
+              <div class="goal-template-grid">
+                <button type="button" data-goal-template="payment"><strong>Take a payment</strong><small>Send a secure deposit, invoice, or balance link.</small></button>
+                <button type="button" data-goal-template="quote"><strong>Request a quote</strong><small>Collect job details through an estimate form.</small></button>
+                <button type="button" data-goal-template="application"><strong>Start an application</strong><small>Guide a qualified caller to an application form.</small></button>
+                <button type="button" data-goal-template="purchase"><strong>Buy online</strong><small>Send a product, order, or checkout link.</small></button>
+              </div>
+            </section>
             <details class="section-disclosure goal-editor-disclosure" id="goalEditorDisclosure">
-              <summary><span><strong id="goalEditorTitle">Add a goal</strong><small>The agent sends its link only after the caller shows the intent you describe.</small></span></summary>
+              <summary><span><strong id="goalEditorTitle">Create a custom goal</strong><small>Add a link-based action only when this business needs one beyond appointment booking.</small></span></summary>
               <div class="section-disclosure-body goal-editor-card">
               <input id="goalId" type="hidden" />
               <div class="form-grid goal-editor-grid">
                 <label>Goal name<input id="goalName" placeholder="Start an application" /></label>
-                <label>Action<select id="goalActionType"><option value="send_link">Send a link</option><option value="purchase_link">Buy or pay</option><option value="application_link">Start an application</option><option value="booking_link">Book externally</option></select></label>
+                <label>Action<select id="goalActionType"><option value="send_link">Send a link</option><option value="purchase_link">Buy or pay</option><option value="application_link">Start an application</option><option value="booking_link">Other booking link</option></select><small>Normal appointment booking is controlled in Appointments.</small></label>
                 <label class="wide-field">Destination link<input id="goalDestinationUrl" type="url" placeholder="https://yourbusiness.com/apply" /></label>
                 <label class="wide-field">When should the agent offer it?<textarea id="goalTriggerInstructions" rows="3" placeholder="Offer after the caller says they want to apply or asks how to get started."></textarea></label>
                 <label class="wide-field">What should the agent qualify first?<textarea id="goalQualificationInstructions" rows="3" placeholder="Confirm their service area and intended start date. Do not pressure them."></textarea></label>
@@ -352,14 +384,10 @@
               </div>
               <div class="goal-editor-actions">
                 <button id="saveGoalButton" class="primary" type="button">Save goal</button>
-                <button id="resetGoalButton" type="button">Clear</button>
+                <button id="resetGoalButton" type="button">Cancel</button>
               </div>
               </div>
             </details>
-            <div class="goal-columns">
-              <div><h4>Configured goals</h4><div class="data-list" id="goalList"></div></div>
-              <div><h4>Recent sends</h4><div class="data-list compact-list" id="goalRecentSends"></div></div>
-            </div>
           </section>
 
           <section class="admin-view" data-view="transfers">
