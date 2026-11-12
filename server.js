@@ -40,6 +40,7 @@ import {
   bookingPrefillFromCollectedDetails,
   missingRequiredBookingPrefillFields,
 } from "./booking-prefill.js";
+import { crmGroupMatchesSearch, groupCrmContactRows, standaloneCrmContact } from "./crm-grouping.js";
 import { registerMetaPlatform } from "./meta-platform.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -19680,6 +19681,90 @@ function crmDateWhere(query = {}, timezone = "America/Chicago") {
   };
 }
 
+const crmLeadDetailsInclude = {
+  voiceCall: {
+    select: {
+      id: true,
+      callControlId: true,
+      fromNumber: true,
+      toNumber: true,
+      status: true,
+      hangupCause: true,
+      recordingUrl: true,
+      transcript: true,
+      healthFlags: true,
+      metrics: true,
+      startedAt: true,
+      answeredAt: true,
+      endedAt: true,
+      events: {
+        orderBy: { createdAt: "desc" },
+        take: 20,
+        select: { eventType: true, detail: true, createdAt: true },
+      },
+    },
+  },
+  qualificationCalls: {
+    include: {
+      voiceCall: {
+        select: {
+          id: true,
+          callControlId: true,
+          fromNumber: true,
+          toNumber: true,
+          status: true,
+          hangupCause: true,
+          recordingUrl: true,
+          transcript: true,
+          healthFlags: true,
+          metrics: true,
+          startedAt: true,
+          answeredAt: true,
+          endedAt: true,
+          events: {
+            orderBy: { createdAt: "desc" },
+            take: 10,
+            select: { eventType: true, detail: true, createdAt: true },
+          },
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 5,
+  },
+  feedback: {
+    orderBy: { createdAt: "desc" },
+    take: 5,
+    include: { messageDeliveries: { orderBy: { createdAt: "desc" }, take: 3 } },
+  },
+  leadWebhookEvents: { orderBy: { createdAt: "desc" }, take: 5 },
+  messageDeliveries: { orderBy: { createdAt: "desc" }, take: 20 },
+  inboundMessages: { orderBy: { createdAt: "desc" }, take: 5 },
+  bookingLinkSends: {
+    orderBy: { sentAt: "desc" },
+    take: 10,
+    include: {
+      bookingLink: { select: { id: true, label: true, url: true } },
+      bookingAppointment: { select: { id: true, status: true, createdAt: true } },
+      matchedAppointment: { select: { id: true, status: true, bookingStatus: true, scheduledStart: true, createdAt: true } },
+      clicks: { orderBy: { createdAt: "desc" }, take: 5 },
+    },
+  },
+  bookingAppointments: {
+    orderBy: { createdAt: "desc" },
+    take: 10,
+  },
+};
+
+function crmStatusCountsForContacts(contacts) {
+  const counts = {};
+  for (const contact of contacts) {
+    const status = normalizeCrmStatus(contact.status, "new");
+    counts[status] = Number(counts[status] || 0) + 1;
+  }
+  return counts;
+}
+
 app.get("/api/business-admin/crm", async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.query.business_name, req.query.website, req.user);
@@ -19700,89 +19785,64 @@ app.get("/api/business-admin/crm", async (req, res) => {
           ],
         }
       : {};
+    const requestedLimit = Number(req.query.limit || 100);
+    const limit = Math.min(200, Math.max(1, Number.isFinite(requestedLimit) ? requestedLimit : 100));
+
+    if (channel === "inbound") {
+      const baseFilters = [leadWhereForProfile(profile), crmChannelWhere(channel), dateRange.where];
+      const snapshots = await prisma.lead.findMany({
+        where: { AND: baseFilters },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          email: true,
+          need: true,
+          status: true,
+          source: true,
+          summary: true,
+          notes: true,
+          createdAt: true,
+          updatedAt: true,
+          voiceCall: { select: { fromNumber: true, startedAt: true } },
+        },
+      });
+      const matchingContacts = groupCrmContactRows(snapshots, { normalizePhone: normalizeE164Phone })
+        .filter((contact) => crmGroupMatchesSearch(contact, search));
+      const statusCounts = crmStatusCountsForContacts(matchingContacts);
+      const selectedContacts = matchingContacts
+        .filter((contact) => !status || normalizeCrmStatus(contact.status, "new") === status)
+        .slice(0, limit);
+      const selectedIds = selectedContacts.flatMap((contact) => contact.interactionLeadIds);
+      const detailRows = selectedIds.length
+        ? await prisma.lead.findMany({
+            where: { id: { in: selectedIds } },
+            include: crmLeadDetailsInclude,
+          })
+        : [];
+      const detailsByKey = new Map(
+        groupCrmContactRows(detailRows, { normalizePhone: normalizeE164Phone })
+          .map((contact) => [contact.crmContactKey, contact]),
+      );
+      const leads = selectedContacts.map((contact) => detailsByKey.get(contact.crmContactKey)).filter(Boolean);
+      return res.json({
+        leads,
+        statuses: Array.from(crmStatuses),
+        statusCounts,
+        channel,
+        range: dateRange.range,
+      });
+    }
+
     const baseFilters = [leadWhereForProfile(profile), crmChannelWhere(channel), dateRange.where, searchWhere];
-    const leads = await prisma.lead.findMany({
-      where: {
-        AND: [...baseFilters, status ? { status } : {}],
-      },
-      include: {
-        voiceCall: {
-          select: {
-            id: true,
-            callControlId: true,
-            fromNumber: true,
-            toNumber: true,
-            status: true,
-            hangupCause: true,
-            recordingUrl: true,
-            transcript: true,
-            healthFlags: true,
-            metrics: true,
-            startedAt: true,
-            answeredAt: true,
-            endedAt: true,
-            events: {
-              orderBy: { createdAt: "desc" },
-              take: 20,
-              select: { eventType: true, detail: true, createdAt: true },
-            },
-          },
-        },
-        qualificationCalls: {
-          include: {
-            voiceCall: {
-              select: {
-                id: true,
-                callControlId: true,
-                fromNumber: true,
-                toNumber: true,
-                status: true,
-                hangupCause: true,
-                recordingUrl: true,
-                transcript: true,
-                healthFlags: true,
-                metrics: true,
-                startedAt: true,
-                answeredAt: true,
-                endedAt: true,
-                events: {
-                  orderBy: { createdAt: "desc" },
-                  take: 10,
-                  select: { eventType: true, detail: true, createdAt: true },
-                },
-              },
-            },
-          },
-          orderBy: { createdAt: "desc" },
-          take: 5,
-        },
-        feedback: {
-          orderBy: { createdAt: "desc" },
-          take: 5,
-          include: { messageDeliveries: { orderBy: { createdAt: "desc" }, take: 3 } },
-        },
-        leadWebhookEvents: { orderBy: { createdAt: "desc" }, take: 5 },
-        messageDeliveries: { orderBy: { createdAt: "desc" }, take: 20 },
-        inboundMessages: { orderBy: { createdAt: "desc" }, take: 5 },
-        bookingLinkSends: {
-          orderBy: { sentAt: "desc" },
-          take: 10,
-          include: {
-            bookingLink: { select: { id: true, label: true, url: true } },
-            bookingAppointment: { select: { id: true, status: true, createdAt: true } },
-            matchedAppointment: { select: { id: true, status: true, bookingStatus: true, scheduledStart: true, createdAt: true } },
-            clicks: { orderBy: { createdAt: "desc" }, take: 5 },
-          },
-        },
-        bookingAppointments: {
-          orderBy: { createdAt: "desc" },
-          take: 10,
-        },
-      },
+    const rawLeads = await prisma.lead.findMany({
+      where: { AND: [...baseFilters, status ? { status } : {}] },
+      include: crmLeadDetailsInclude,
       orderBy: { updatedAt: "desc" },
-      take: Math.min(200, Math.max(1, Number(req.query.limit || 100))),
+      take: limit,
     });
-    const statusCounts = await prisma.lead.groupBy({
+    const leads = rawLeads.map(standaloneCrmContact);
+    const statusCountRows = await prisma.lead.groupBy({
       by: ["status"],
       where: { AND: baseFilters },
       _count: { _all: true },
@@ -19790,7 +19850,7 @@ app.get("/api/business-admin/crm", async (req, res) => {
     res.json({
       leads,
       statuses: Array.from(crmStatuses),
-      statusCounts: Object.fromEntries(statusCounts.map((row) => [row.status, row._count._all])),
+      statusCounts: Object.fromEntries(statusCountRows.map((row) => [row.status, row._count._all])),
       channel,
       range: dateRange.range,
     });

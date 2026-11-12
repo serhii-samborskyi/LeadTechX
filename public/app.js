@@ -3,8 +3,8 @@ const languageParam = params.get("language");
 const agentNameParam = params.get("agent_name");
 const CRM_CHANNEL_DETAILS = {
   inbound: {
-    heading: "Inbound leads",
-    description: "Incoming call leads and post-call follow-up status.",
+    heading: "Inbound customers",
+    description: "Unique callers grouped by phone, with every interaction kept in their history.",
   },
   outbound: {
     heading: "Outbound leads",
@@ -3314,6 +3314,89 @@ function crmBookingStageBadge(stage) {
   return badge;
 }
 
+function crmInteractionHistory(lead) {
+  const interactions = Array.isArray(lead.interactions) ? lead.interactions : [];
+  if (interactions.length < 2) return null;
+
+  const section = document.createElement("section");
+  section.className = "crm-interaction-history";
+  const heading = document.createElement("div");
+  heading.className = "crm-interaction-heading";
+  const title = document.createElement("strong");
+  title.textContent = "Interaction history";
+  const count = document.createElement("span");
+  count.textContent = `${interactions.length} interactions`;
+  heading.append(title, count);
+
+  const list = document.createElement("div");
+  list.className = "crm-interaction-list";
+  for (const interaction of interactions) {
+    const call = interaction.voiceCall;
+    const item = document.createElement("details");
+    item.className = "crm-interaction";
+    const summary = document.createElement("summary");
+    const primary = document.createElement("div");
+    primary.className = "crm-interaction-primary";
+    const time = document.createElement("strong");
+    const occurredAt = call?.startedAt || interaction.createdAt;
+    time.textContent = occurredAt ? new Date(occurredAt).toLocaleString() : "Time unavailable";
+    const context = document.createElement("span");
+    context.textContent = interaction.need || interaction.source || "Incoming call";
+    primary.append(time, context);
+
+    const secondary = document.createElement("div");
+    secondary.className = "crm-interaction-secondary";
+    const status = document.createElement("span");
+    status.className = `crm-interaction-status status-${interaction.status || "new"}`;
+    status.textContent = titleFromKey(interaction.status || "new");
+    const durationSeconds = Number(call?.metrics?.durationSeconds);
+    if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
+      const duration = document.createElement("span");
+      duration.className = "crm-interaction-duration";
+      duration.textContent = durationSeconds >= 60 ? `${Math.round(durationSeconds / 60)} min` : `${Math.round(durationSeconds)} sec`;
+      secondary.appendChild(duration);
+    }
+    const icon = document.createElement("i");
+    icon.setAttribute("data-lucide", "chevron-down");
+    secondary.append(status, icon);
+    summary.append(primary, secondary);
+
+    const body = document.createElement("div");
+    body.className = "crm-interaction-body";
+    const summaryText = interaction.summary || "";
+    if (summaryText) {
+      const summaryCopy = document.createElement("p");
+      summaryCopy.textContent = summaryText;
+      body.appendChild(summaryCopy);
+    }
+    if (call?.recordingUrl) {
+      const recording = document.createElement("a");
+      recording.href = call.recordingUrl;
+      recording.target = "_blank";
+      recording.rel = "noopener noreferrer";
+      recording.textContent = "Open call recording";
+      body.appendChild(recording);
+    }
+    const transcriptText = interaction.transcript || call?.transcript || "";
+    if (transcriptText) {
+      const transcript = document.createElement("pre");
+      transcript.className = "transcript crm-interaction-transcript";
+      transcript.textContent = transcriptText;
+      body.appendChild(transcript);
+    }
+    if (!body.childElementCount) {
+      const empty = document.createElement("p");
+      empty.className = "crm-interaction-empty";
+      empty.textContent = "No summary or transcript was captured for this interaction.";
+      body.appendChild(empty);
+    }
+    item.append(summary, body);
+    list.appendChild(item);
+  }
+  section.append(heading, list);
+  return section;
+}
+
 function renderCrm(leads) {
   el.crmList.innerHTML = "";
   for (const lead of leads) {
@@ -3323,7 +3406,8 @@ function renderCrm(leads) {
     card.dataset.id = lead.id;
 
     const summary = document.createElement("summary");
-    summary.setAttribute("aria-label", `Open details for ${lead.name || lead.phone || "lead"}`);
+    const entityLabel = state.crmChannel === "inbound" ? "customer" : "lead";
+    summary.setAttribute("aria-label", `Open ${entityLabel} details for ${lead.name || lead.phone || entityLabel}`);
     const title = document.createElement("div");
     title.className = "crm-summary-main";
     const name = document.createElement("strong");
@@ -3337,6 +3421,9 @@ function renderCrm(leads) {
         crmSummaryMetaItem("calendar-clock", "", leadTime ? new Date(leadTime).toLocaleString() : null),
         crmSummaryMetaItem("clipboard-list", "", lead.need || lead.source || "No need yet"),
         lead.email ? crmSummaryMetaItem("mail", "", lead.email) : null,
+        Number(lead.interactionCount || 1) > 1
+          ? crmSummaryMetaItem("history", "", `${lead.interactionCount} interactions`)
+          : null,
       ].filter(Boolean),
     );
     title.append(name, meta);
@@ -3430,7 +3517,7 @@ function renderCrm(leads) {
       <label>Rating<input class="crm-row-feedback-rating" type="number" min="1" max="5" step="1" /></label>
       <label class="wide-field">Feedback / complaint<textarea class="crm-row-feedback-text" rows="3"></textarea></label>
       <label class="wide-field">Advanced captured data<textarea class="crm-row-fields" rows="4"></textarea></label>
-      <button data-action="save-crm" type="button">Save lead</button>
+      <button data-action="save-crm" type="button">Save ${entityLabel}</button>
       <button data-action="record-feedback" type="button">Record feedback</button>
       <button data-action="qualify-crm" type="button">Call and qualify</button>
       <button data-action="retry-qualification" type="button">Retry queue</button>
@@ -3439,7 +3526,7 @@ function renderCrm(leads) {
       <button data-action="send-review" type="button">Send review</button>
       <button data-action="send-missed-followup" type="button">Send follow-up</button>
       <button data-action="escalate-complaint" type="button">Escalate complaint</button>
-      <button class="danger-button" data-action="delete-crm" type="button">Remove lead</button>
+      <button class="danger-button" data-action="delete-crm" type="button">Remove ${entityLabel}</button>
     `;
     editor.querySelector(".crm-row-name").value = lead.name || "";
     editor.querySelector(".crm-row-phone").value = lead.phone || "";
@@ -3462,7 +3549,7 @@ function renderCrm(leads) {
     const editSection = document.createElement("details");
     editSection.className = "compact-disclosure crm-edit-disclosure";
     const editSummary = document.createElement("summary");
-    editSummary.textContent = "Edit lead and follow-up actions";
+    editSummary.textContent = `Edit ${entityLabel} and follow-up actions`;
     editSection.append(editSummary, editor);
 
     const summaryText = lead.summary || call?.transcript?.split("\n").slice(0, 3).join("\n") || "No summary yet.";
@@ -3470,14 +3557,16 @@ function renderCrm(leads) {
     summaryBlock.className = "crm-summary";
     summaryBlock.textContent = summaryText;
 
+    const interactionHistory = crmInteractionHistory(lead);
     const transcriptText = lead.transcript || call?.transcript || "";
-    if (transcriptText) {
+    body.append(grid, summaryBlock);
+    if (interactionHistory) body.appendChild(interactionHistory);
+    body.appendChild(editSection);
+    if (!interactionHistory && transcriptText) {
       const transcript = document.createElement("pre");
       transcript.className = "transcript crm-transcript";
       transcript.textContent = transcriptText;
-      body.append(grid, summaryBlock, editSection, transcript);
-    } else {
-      body.append(grid, summaryBlock, editSection);
+      body.appendChild(transcript);
     }
     if (qualificationCalls.length) {
       const attempts = document.createElement("div");
@@ -3634,10 +3723,13 @@ function renderCrm(leads) {
     el.crmList.appendChild(card);
   }
   if (!leads.length) {
+    const inbound = state.crmChannel === "inbound";
     renderEmptyGuidance(
       el.crmList,
-      "No leads in this period",
-      "Incoming calls and form leads will appear here when customers contact the business.",
+      inbound ? "No customers in this period" : "No leads in this period",
+      inbound
+        ? "Customers will appear here when they call the business. Repeat calls stay in one interaction history."
+        : "Ad, form, webhook, and qualification leads will appear here.",
     );
   }
   window.lucide?.createIcons();
@@ -3732,7 +3824,7 @@ async function loadWebhookEvents() {
 
 async function loadCrm() {
   if (!state.admin) return;
-  setAdminStatus("Loading leads");
+  setAdminStatus("Loading CRM");
   const query = new URLSearchParams({ business_name: el.businessName.value.trim() });
   if (el.website.value.trim()) query.set("website", el.website.value.trim());
   if (el.crmSearch.value.trim()) query.set("search", el.crmSearch.value.trim());
@@ -3746,7 +3838,7 @@ async function loadCrm() {
   renderCrm(data.leads || []);
   renderCrmStatusCounts(data.statusCounts || {});
   updateHomeDashboard();
-  setAdminStatus("Leads loaded");
+  setAdminStatus("CRM loaded");
 }
 
 async function copyLeadWebhook() {
