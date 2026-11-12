@@ -99,7 +99,8 @@ const el = Object.fromEntries(
     "profileArea",
     "profileServices",
     "profileLanguage",
-    "profileVagaroEnabled",
+    "profileCalendarProvider",
+    "profileCalendarHelp",
     "profileVagaroField",
     "profileVagaroUrl",
     "phoneSection",
@@ -548,7 +549,28 @@ function setProfileLanguage(value) {
   el.profileLanguage.value = language;
 }
 
+const fastCalendarProviderHelp = {
+  internal: "Book directly in RingPort's built-in calendar.",
+  vagaro: "Add the public Vagaro business link below to import services and send customers to book.",
+  google_calendar: "Connect Google Calendar after account setup. RingPort calendar stays active for this demo.",
+  calendly: "Connect Calendly after account setup. RingPort calendar stays active for this demo.",
+};
+
+function setProfileCalendarProvider(value) {
+  const requested = String(value || "internal").trim().toLowerCase();
+  const provider = [...el.profileCalendarProvider.options].some((option) => option.value === requested)
+    ? requested
+    : "internal";
+  el.profileCalendarProvider.value = provider;
+  el.profileCalendarHelp.textContent = fastCalendarProviderHelp[provider];
+  const usesVagaro = provider === "vagaro";
+  el.profileVagaroField.hidden = !usesVagaro;
+  el.profileVagaroUrl.required = usesVagaro;
+  return provider;
+}
+
 function profilePayload() {
+  const calendarProvider = setProfileCalendarProvider(el.profileCalendarProvider.value);
   return {
     accessToken: state.accessToken,
     summary: el.profileSummary.value,
@@ -558,7 +580,8 @@ function profilePayload() {
     serviceArea: el.profileArea.value,
     services: el.profileServices.value,
     language: el.profileLanguage.value,
-    vagaroBusinessUrl: el.profileVagaroEnabled.checked ? el.profileVagaroUrl.value : "",
+    calendarProvider,
+    vagaroBusinessUrl: calendarProvider === "vagaro" ? el.profileVagaroUrl.value : "",
   };
 }
 
@@ -689,9 +712,9 @@ function renderProfileFields(profile) {
   el.profileServices.value = editableProfileValue(profile.services);
   setProfileLanguage(profile.language);
   el.profileVagaroUrl.value = profile.vagaroBusinessUrl || "";
-  el.profileVagaroEnabled.checked = Boolean(profile.vagaroBusinessUrl);
-  el.profileVagaroField.hidden = !el.profileVagaroEnabled.checked;
-  el.profileVagaroUrl.required = el.profileVagaroEnabled.checked;
+  setProfileCalendarProvider(
+    profile.calendarProviderPreference || (profile.vagaroBusinessUrl ? "vagaro" : profile.activeCalendarProvider),
+  );
   state.renderingProfile = false;
   state.profileDirty = false;
   el.profileSaveButton.disabled = false;
@@ -700,7 +723,7 @@ function renderProfileFields(profile) {
 
 async function saveProfile({ silent = false } = {}) {
   if (!state.accessToken || !state.profileDirty) return state.profile;
-  if (el.profileVagaroEnabled.checked && !el.profileVagaroUrl.value.trim()) {
+  if (el.profileCalendarProvider.value === "vagaro" && !el.profileVagaroUrl.value.trim()) {
     el.profileMessage.textContent = "Enter the Vagaro business link";
     el.profileVagaroUrl.focus();
     throw new Error("Enter the Vagaro business link");
@@ -721,9 +744,11 @@ async function saveProfile({ silent = false } = {}) {
         : `${data.vagaroSync?.servicesImported || 0} Vagaro services synced`;
       el.profileMessage.textContent = data.vagaroSync
         ? `Profile saved · ${vagaroCatalogLabel}${data.vagaroSync.policyEntriesExcluded ? ` · ${data.vagaroSync.policyEntriesExcluded} policy entries excluded` : ""}`
-        : data.vagaroDisconnected
-          ? "Profile saved · Vagaro disconnected"
-          : "Profile saved";
+        : data.calendarConnectionRequired
+          ? `Profile saved. Connect ${data.calendarConnectionRequired === "google_calendar" ? "Google Calendar" : "Calendly"} after account setup.`
+          : data.vagaroDisconnected
+            ? "Profile saved · Vagaro disconnected"
+            : "Profile saved";
     }
     return data.profile;
   } catch (error) {
@@ -1067,10 +1092,9 @@ async function initialize() {
 
 el.talkButton.addEventListener("click", startCall);
 el.stopButton.addEventListener("click", () => stopCall());
-el.profileVagaroEnabled.addEventListener("change", () => {
-  el.profileVagaroField.hidden = !el.profileVagaroEnabled.checked;
-  el.profileVagaroUrl.required = el.profileVagaroEnabled.checked;
-  if (el.profileVagaroEnabled.checked) el.profileVagaroUrl.focus();
+el.profileCalendarProvider.addEventListener("change", () => {
+  const provider = setProfileCalendarProvider(el.profileCalendarProvider.value);
+  if (provider === "vagaro") el.profileVagaroUrl.focus();
 });
 function markProfileDirty() {
   if (state.renderingProfile) return;

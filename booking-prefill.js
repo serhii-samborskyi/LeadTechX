@@ -35,6 +35,28 @@ function optionValue(field, value) {
   return options.find((option) => option.toLowerCase() === value.toLowerCase()) || "";
 }
 
+export function bookingLinkRequiredFieldKeys(fields = []) {
+  return [...new Set(
+    (fields || [])
+      .filter((field) => field?.required)
+      .filter((field) => {
+        const key = normalizedKey(field.fieldKey || field.label);
+        const type = normalizedKey(field.fieldType);
+        return type !== "phone" && !["phone", "phone_number", "mobile", "mobile_phone"].includes(key);
+      })
+      .map((field) => String(field.fieldKey || "").trim())
+      .filter(Boolean),
+  )];
+}
+
+export function missingRequiredBookingPrefillFields({ fields = [], prefill = {} } = {}) {
+  const values = objectValue(prefill);
+  return (fields || [])
+    .filter((field) => field?.required)
+    .filter((field) => !cleanValue(values[field.fieldKey]))
+    .map((field) => ({ key: field.fieldKey, label: field.label || field.fieldKey }));
+}
+
 export function bookingPrefillFromCollectedDetails({
   fields = [],
   args = {},

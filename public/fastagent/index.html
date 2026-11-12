@@ -76,13 +76,16 @@
               <label><span>Service area <i data-lucide="pencil-line" aria-hidden="true"></i></span><textarea id="profileArea" rows="3" placeholder="Not found"></textarea></label>
               <label class="wide"><span>Services <i data-lucide="pencil-line" aria-hidden="true"></i></span><textarea id="profileServices" rows="4" placeholder="Not found"></textarea></label>
               <label class="wide compact"><span>Agent language <i data-lucide="pencil-line" aria-hidden="true"></i></span><select id="profileLanguage"><option selected>English</option><option>Spanish</option><option>French</option><option>German</option><option>Italian</option><option>Portuguese</option><option>Polish</option><option>Ukrainian</option><option>Russian</option><option>Arabic</option><option>Hindi</option><option>Japanese</option><option>Korean</option><option>Chinese</option></select></label>
-              <div class="wide fast-profile-toggle">
-                <div><strong>Use Vagaro</strong><small>Import services from a Vagaro business page</small></div>
-                <label class="fast-switch">
-                  <input id="profileVagaroEnabled" type="checkbox" role="switch" aria-label="Use Vagaro" aria-controls="profileVagaroField" />
-                  <span class="fast-switch-track" aria-hidden="true"></span>
-                </label>
-              </div>
+              <label class="wide compact fast-booking-provider">
+                <span>Booking system <i data-lucide="pencil-line" aria-hidden="true"></i></span>
+                <select id="profileCalendarProvider" aria-describedby="profileCalendarHelp" aria-controls="profileVagaroField">
+                  <option value="internal">RingPort calendar</option>
+                  <option value="vagaro">Vagaro</option>
+                  <option value="google_calendar">Google Calendar</option>
+                  <option value="calendly">Calendly</option>
+                </select>
+                <small id="profileCalendarHelp" class="fast-field-help">Book directly in RingPort's built-in calendar.</small>
+              </label>
               <label class="wide" id="profileVagaroField" hidden><span>Vagaro business link <i data-lucide="pencil-line" aria-hidden="true"></i></span><input id="profileVagaroUrl" type="text" inputmode="url" autocomplete="url" placeholder="https://www.vagaro.com/yourbusiness/services" /></label>
             </div>
             <p class="form-message" id="profileMessage"></p>

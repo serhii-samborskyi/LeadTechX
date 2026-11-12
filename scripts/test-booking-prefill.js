@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 
-import { bookingPrefillFromCollectedDetails } from "../booking-prefill.js";
+import {
+  bookingLinkRequiredFieldKeys,
+  bookingPrefillFromCollectedDetails,
+  missingRequiredBookingPrefillFields,
+} from "../booking-prefill.js";
 
 const fields = [
   { fieldKey: "name", label: "Full name", fieldType: "text", options: [] },
@@ -45,4 +49,27 @@ const configuredOnly = bookingPrefillFromCollectedDetails({
 });
 
 assert.deepEqual(configuredOnly, { phone_number: "+17735550123" });
+
+const bookingLinkFields = [
+  { fieldKey: "name", label: "Full name", fieldType: "text", required: true },
+  { fieldKey: "phone", label: "Phone number", fieldType: "phone", required: true },
+  { fieldKey: "reason", label: "Reason for appointment", fieldType: "text", required: true },
+  { fieldKey: "job_notes", label: "Job notes", fieldType: "text", required: false },
+];
+
+assert.deepEqual(bookingLinkRequiredFieldKeys(bookingLinkFields), ["name", "reason"]);
+assert.deepEqual(
+  missingRequiredBookingPrefillFields({
+    fields: bookingLinkFields,
+    prefill: { name: "Dora Robinson", phone: "+13125550123" },
+  }),
+  [{ key: "reason", label: "Reason for appointment" }],
+);
+assert.deepEqual(
+  missingRequiredBookingPrefillFields({
+    fields: bookingLinkFields,
+    prefill: { name: "Dora Robinson", phone: "+13125550123", reason: "Front door lockout" },
+  }),
+  [],
+);
 console.log("Booking prefill tests passed");
