@@ -215,6 +215,8 @@ let trialReminderWorkerTimer = null;
 let trialReminderWorkerRunning = false;
 let complimentaryPlanWorkerTimer = null;
 let complimentaryPlanWorkerRunning = false;
+let phoneOnboardingWorkerTimer = null;
+let phoneOnboardingWorkerRunning = false;
 const aiRateLimitHits = new Map();
 const publicBookingAttempts = new Map();
 let prismaReconnectPromise = null;
@@ -5632,9 +5634,9 @@ function toolCompletionNotice(functionName, result) {
       return "I found that business, but it already has an account. I'll explain what that means.";
     }
     if (result?.ok) {
-      return result?.setupLinkSent
-        ? "The receptionist is ready, and I sent the setup link to this phone."
-        : "The receptionist is ready, but I could not send the setup link automatically.";
+      return result?.queued
+        ? "Your receptionist is being prepared in the background. You can hang up, and I’ll send your secure setup link as soon as it is ready."
+        : "Your onboarding request was saved.";
     }
   }
   return "";
@@ -5643,7 +5645,7 @@ function toolCompletionNotice(functionName, result) {
 function toolFailureNotice(functionName) {
   if (!TOOL_WAIT_NOTICE_ENABLED) return "";
   if (functionName === "build_business_agent") {
-    return "I'm sorry, I hit a problem while looking up that business. I'll explain what happened and try another path.";
+    return "I'm sorry, I could not queue that setup yet. I'll explain what information is still needed.";
   }
   return "";
 }
@@ -9098,6 +9100,28 @@ async function sendClaimEmail({ settings, email, setupUrl, businessName }) {
   return true;
 }
 
+async function sendPhoneOnboardingEmail({ settings, email, subject, text, html = "" }) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) throw new Error("Enter a valid email address");
+  const smtpUser = await systemSecret("smtp_username", "SMTP_USERNAME");
+  const smtpPassword = await systemSecret("smtp_password", "SMTP_PASSWORD");
+  if (!settings.smtpHost || !settings.smtpFromEmail) throw new Error("Email delivery is not configured");
+  const transporter = nodemailer.createTransport({
+    host: settings.smtpHost,
+    port: settings.smtpPort,
+    secure: settings.smtpSecure,
+    auth: smtpUser ? { user: smtpUser, pass: smtpPassword } : undefined,
+  });
+  await transporter.sendMail({
+    from: { name: settings.smtpFromName || "RingPort", address: settings.smtpFromEmail },
+    to: normalizedEmail,
+    subject: String(subject || "Your RingPort setup"),
+    text: String(text || ""),
+    ...(html ? { html } : {}),
+  });
+  return true;
+}
+
 const MOBILE_ANONYMOUS_VOICE_LIMIT_SECONDS = 5 * 60;
 const MOBILE_EMAIL_CODE_TTL_MINUTES = 15;
 const MOBILE_EMAIL_CODE_MAX_ATTEMPTS = 5;
@@ -10613,6 +10637,31 @@ async function persistBlueBubblesInboundMessage(payload) {
 
 async function routeBlueBubblesInboundMessage(inbound) {
   if (inbound.status === "ignored" || !inbound.fromPhone || !inbound.text) return { routed: false, reason: "ignored" };
+  if (/^\s*(stop|unsubscribe|cancel|end|quit)\s*[.!]?\s*$/i.test(inbound.text)) {
+    const session = await prisma.onboardingSession.findFirst({
+      where: { callerPhone: inbound.fromPhone, textConsentAt: { not: null }, claimedAt: null },
+      include: { voiceCall: { select: { callControlId: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+    if (session) {
+      const canUseEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(session.email || "").trim());
+      await prisma.onboardingSession.update({
+        where: { id: session.id },
+        data: {
+          textConsentSource: "opted_out_by_reply",
+          textOptedOutAt: new Date(),
+          deliveryPreference: canUseEmail ? "email" : "none",
+          claimLinkNextReminderAt: canUseEmail && session.claimLinkClickCount === 0 ? new Date() : null,
+        },
+      });
+      await logOnboardingSessionEvent(session, "onboarding.text_opt_out", { canUseEmail });
+      await prisma.messageInbound.update({
+        where: { id: inbound.id },
+        data: { status: "routed", purpose: "onboarding_text_opt_out" },
+      });
+      return { routed: true, reason: "onboarding_text_opt_out", onboardingSessionId: session.id };
+    }
+  }
   const active = activeOnboardingTextSessions.get(inbound.fromPhone);
   if (!active) return { routed: false, reason: "no_active_onboarding_call" };
   const route = await active.onMessage(inbound);
@@ -11116,8 +11165,8 @@ async function pauseBookingFollowupsForInboundMessage(inbound) {
   return { count: result.count };
 }
 
-async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, profile = null }) {
-  const message = `Your RingPort agent for ${businessName} is ready. Review it and finish setup: ${setupUrl}`;
+async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, profile = null, voiceCallId = null, metadata = {} }) {
+  const message = `Your RingPort agent for ${businessName} is ready. Review it and finish setup: ${setupUrl}\nReply STOP to opt out.`;
   return deliverBusinessMessage({
     settings,
     profile,
@@ -11125,11 +11174,12 @@ async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, pro
     message,
     purpose: "onboarding_claim",
     setupUrl,
-    metadata: { setupUrl },
+    voiceCallId,
+    metadata: { setupUrl, ...metadata },
   });
 }
 
-async function createPhoneClaimLink({ profile, email, settings }) {
+async function createPhoneClaimLink({ profile, email, settings, onboardingSessionId = null }) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const hasEmail = Boolean(normalizedEmail);
   if (hasEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) throw new Error("Enter a valid email address");
@@ -11147,41 +11197,412 @@ async function createPhoneClaimLink({ profile, email, settings }) {
       expiresAt: claimExpiresAt,
     },
   });
-  let linkedProfile = profile;
-  if (hasEmail) {
-    const trial = await startBusinessTrial({
-      businessProfileId: profile.id,
-      settings,
-      source: "phone_onboarding_email_claim",
-    });
-    linkedProfile = trial.profile;
-  }
+  const linkedProfile = profile;
   const baseUrl = String(settings.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
   if (!/^https?:\/\//i.test(baseUrl)) throw new Error("Public base URL is not configured");
   await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
-  const access = issueToken();
   const trialEndsAt = linkedProfile.trialEndsAt instanceof Date ? linkedProfile.trialEndsAt : linkedProfile.trialEndsAt ? new Date(linkedProfile.trialEndsAt) : null;
   const fastAgentExpiresAt = trialEndsAt && trialEndsAt > claimExpiresAt ? trialEndsAt : claimExpiresAt;
-  await prisma.fastAgentSession.create({
+  const fastAgentSessionRecord = await prisma.fastAgentSession.create({
     data: {
-      tokenHash: access.tokenHash,
+      tokenHash: claim.tokenHash,
       businessProfileId: linkedProfile.id,
       expiresAt: fastAgentExpiresAt,
     },
   });
+  const shortCode = await ensureFastAgentShortCode(fastAgentSessionRecord);
   const setupUrl = new URL("/fastagent/", baseUrl);
-  setupUrl.searchParams.set("token", access.token);
+  setupUrl.searchParams.set("token", claim.token);
   setupUrl.searchParams.set("claim_token", claim.token);
   setupUrl.searchParams.set("business_name", linkedProfile.businessName);
   if (linkedProfile.website) setupUrl.searchParams.set("website", linkedProfile.website);
+  const trackingUrl = new URL(`/o/${shortCode}`, baseUrl);
+  if (onboardingSessionId) {
+    await prisma.onboardingSession.update({
+      where: { id: onboardingSessionId },
+      data: {
+        claimLinkTokenHash: claim.tokenHash,
+        claimLinkShortCode: shortCode,
+        claimLinkExpiresAt: claimExpiresAt,
+      },
+    });
+  }
   const passwordSetupUrl = `${baseUrl}/set-password/?token=${encodeURIComponent(claim.token)}`;
   return {
     email: hasEmail ? normalizedEmail : null,
     emailRequired: !hasEmail,
     setupUrl: setupUrl.toString(),
+    trackingUrl: trackingUrl.toString(),
+    shortCode,
     passwordSetupUrl,
-    accessToken: access.token,
+    accessToken: claim.token,
+    tokenHash: claim.tokenHash,
+    expiresAt: claimExpiresAt,
   };
+}
+
+const PHONE_ONBOARDING_MAX_BUILD_ATTEMPTS = 3;
+const PHONE_ONBOARDING_MAX_BUILDS_PER_CALLER_DAY = 3;
+
+function cleanOnboardingIntake(value = {}) {
+  const source = jsonObject(value);
+  const cleanText = (input, limit = 500) => String(input || "").replace(/\s+/g, " ").trim().slice(0, limit);
+  return {
+    ownerName: cleanText(source.ownerName, 160),
+    email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(source.email || "").trim().toLowerCase())
+      ? String(source.email).trim().toLowerCase()
+      : "",
+    businessType: cleanText(source.businessType, 240),
+    businessDescription: cleanText(source.businessDescription, 1200),
+    services: cleanText(source.services, 1500),
+    serviceArea: cleanText(source.serviceArea, 500),
+    address: cleanText(source.address, 500),
+    hours: cleanText(source.hours, 500),
+    businessPhone: normalizeE164Phone(source.businessPhone) || cleanText(source.businessPhone, 80),
+  };
+}
+
+async function logOnboardingSessionEvent(session, eventType, detail = {}) {
+  const callControlId = session?.voiceCall?.callControlId ||
+    (session?.voiceCallId
+      ? (await prisma.voiceCall.findUnique({ where: { id: session.voiceCallId }, select: { callControlId: true } }))?.callControlId
+      : null);
+  if (callControlId) await logVoiceCallEvent(callControlId, eventType, detail);
+}
+
+async function mergeOnboardingIntakeIntoProfile(profile, intakeValue) {
+  const intake = cleanOnboardingIntake(intakeValue);
+  const existingRaw = jsonObject(profile.rawData);
+  const choose = (provided, researched, fallback = "unknown") => provided || (researched && researched !== "unknown" ? researched : "") || fallback;
+  const researchedSummary = profile.summary && profile.summary !== "unknown" ? profile.summary : "";
+  const summary = intake.businessDescription ||
+    (intake.businessType
+      ? `${profile.businessName} is a ${intake.businessType}.${researchedSummary ? ` ${researchedSummary}` : ""}`
+      : researchedSummary || "Business details are ready to review.");
+  const services = choose(intake.services, profile.services);
+  const serviceArea = choose(intake.serviceArea, profile.serviceArea);
+  const hours = choose(intake.hours, profile.hours);
+  const phone = choose(intake.businessPhone, existingRaw.phone, "");
+  const email = choose(intake.email, existingRaw.email, "");
+  const address = choose(intake.address, existingRaw.address, "");
+  const rawData = {
+    ...existingRaw,
+    phone,
+    email,
+    address,
+    summary,
+    services,
+    serviceArea,
+    hours,
+    onboardingIntake: intake,
+    onboardingSource: "phone",
+  };
+  const values = {
+    businessName: profile.businessName,
+    website: profile.website,
+    summary,
+    services,
+    serviceArea,
+    hours,
+    contact: [phone, email, address].filter((item) => item && item !== "unknown").join(" | "),
+    rawData,
+  };
+  return prisma.businessProfile.update({
+    where: { id: profile.id },
+    data: { ...values, systemPrompt: buildSystemPrompt(values) },
+  });
+}
+
+function phoneOnboardingTrackingUrl(settings, session, channel = "unknown") {
+  const baseUrl = configuredPublicBaseUrl(settings);
+  if (!baseUrl || !session?.claimLinkShortCode) return "";
+  const url = new URL(`/o/${session.claimLinkShortCode}`, `${baseUrl}/`);
+  url.searchParams.set("channel", String(channel || "unknown").slice(0, 24));
+  return url.toString();
+}
+
+async function deliverPhoneOnboardingLink({ session, profile, settings, isReminder = false }) {
+  const prefersEmail = session.deliveryPreference === "email" || !session.textConsentAt || Boolean(session.textOptedOutAt);
+  const email = String(session.email || "").trim().toLowerCase();
+  const result = { textSent: false, emailSent: false, provider: null, errors: [] };
+  const sendText = async () => {
+    const url = phoneOnboardingTrackingUrl(settings, session, "text");
+    const delivery = await deliverSetupLink({
+      settings,
+      profile,
+      toPhone: session.callerPhone,
+      setupUrl: url,
+      businessName: profile.businessName,
+      voiceCallId: session.voiceCallId,
+      metadata: { onboardingSessionId: session.id, reminder: isReminder },
+    });
+    result.textSent = true;
+    result.provider = delivery.provider;
+  };
+  const sendEmail = async () => {
+    if (!email) throw new Error("An email address is required for email delivery");
+    const url = phoneOnboardingTrackingUrl(settings, session, "email");
+    await sendClaimEmail({ settings, email, setupUrl: url, businessName: profile.businessName });
+    result.emailSent = true;
+  };
+  if (prefersEmail) {
+    try {
+      await sendEmail();
+    } catch (error) {
+      result.errors.push(error.message);
+    }
+  } else {
+    try {
+      await sendText();
+    } catch (error) {
+      result.errors.push(error.message);
+      if (email) {
+        try {
+          await sendEmail();
+        } catch (emailError) {
+          result.errors.push(emailError.message);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+async function processPhoneOnboardingBuild(sessionId) {
+  let session = await prisma.onboardingSession.findUnique({
+    where: { id: sessionId },
+    include: { voiceCall: { select: { callControlId: true } } },
+  });
+  if (!session || session.status !== "building") return;
+  try {
+    const settings = await getSettings();
+    const businessName = normalizeBusinessName(session.businessName);
+    const website = normalizeWebsite(session.website);
+    if (!businessName) throw new Error("Business name is required before building the agent");
+    await logOnboardingSessionEvent(session, "onboarding.build_started", { attempt: session.buildAttempts, businessName, website });
+    const result = await provisionTrialBusiness({ businessName, website, settings });
+    if (result.claimed) {
+      const signInUrl = `${configuredPublicBaseUrl(settings)}/?sign_in=1`;
+      if (session.textConsentAt && !session.textOptedOutAt) {
+        await deliverBusinessMessage({
+          settings,
+          profile: null,
+          toPhone: session.callerPhone,
+          message: `${businessName} already has a RingPort account. Sign in here: ${signInUrl}`,
+          purpose: "onboarding_existing_account",
+          voiceCallId: session.voiceCallId,
+          metadata: { onboardingSessionId: session.id },
+        }).catch(() => null);
+      } else if (session.email) {
+        await sendPhoneOnboardingEmail({
+          settings,
+          email: session.email,
+          subject: `${businessName} already has a RingPort account`,
+          text: `This business already has a RingPort account. Sign in here: ${signInUrl}`,
+        }).catch(() => null);
+      }
+      await prisma.onboardingSession.update({
+        where: { id: session.id },
+        data: { status: "existing_account", buildCompletedAt: new Date(), buildNextAttemptAt: null },
+      });
+      await logOnboardingSessionEvent(session, "onboarding.existing_account", { businessName });
+      return;
+    }
+    const profile = await mergeOnboardingIntakeIntoProfile(result.profile, session.intakeData);
+    await ensureBusinessConfig(profile);
+    await prisma.voiceCall.update({ where: { id: session.voiceCallId }, data: { businessProfileId: profile.id } });
+    await createPhoneClaimLink({
+      profile,
+      email: session.email,
+      settings,
+      onboardingSessionId: session.id,
+    });
+    session = await prisma.onboardingSession.update({
+      where: { id: session.id },
+      data: {
+        status: "agent_ready",
+        businessName: profile.businessName,
+        website: profile.website,
+        businessProfileId: profile.id,
+        buildCompletedAt: new Date(),
+        buildNextAttemptAt: null,
+        lastError: null,
+      },
+      include: { voiceCall: { select: { callControlId: true } } },
+    });
+    await logOnboardingSessionEvent(session, "onboarding.agent_ready", {
+      businessProfileId: profile.id,
+      businessName: profile.businessName,
+      cached: result.cached,
+      campaignLabel: session.campaignLabel,
+    });
+    const delivery = await deliverPhoneOnboardingLink({ session, profile, settings });
+    const delivered = delivery.textSent || delivery.emailSent;
+    const now = new Date();
+    await prisma.onboardingSession.update({
+      where: { id: session.id },
+      data: {
+        status: delivered
+          ? "claim_link_sent"
+          : session.email || (session.textConsentAt && !session.textOptedOutAt)
+            ? "delivery_failed"
+            : "needs_email",
+        claimLinkSentAt: delivered ? now : null,
+        claimLinkTextSentAt: delivery.textSent ? now : null,
+        claimLinkEmailSentAt: delivery.emailSent ? now : null,
+        claimLinkNextReminderAt: delivered
+          ? new Date(now.getTime() + 2 * 60 * 60 * 1000)
+          : session.email || (session.textConsentAt && !session.textOptedOutAt)
+            ? new Date(now.getTime() + 5 * 60 * 1000)
+            : null,
+        messageProvider: delivery.provider,
+        lastError: delivery.errors.join("; ") || null,
+      },
+    });
+    await logOnboardingSessionEvent(session, delivered ? "onboarding.claim_link_sent" : "onboarding.claim_link_failed", {
+      textSent: delivery.textSent,
+      emailSent: delivery.emailSent,
+      provider: delivery.provider,
+      errors: delivery.errors,
+      campaignLabel: session.campaignLabel,
+    });
+    await prisma.trafficEvent.create({
+      data: {
+        eventKey: "fastagent_agent_built",
+        eventId: `phone_onboarding_built_${session.id}`,
+        source: "phone_onboarding",
+        platform: "phone",
+        landingPath: "/phone-onboarding",
+        trackingTags: jsonSafe({ campaign: session.campaignLabel || "unlabeled" }),
+        customData: jsonSafe({ onboarding_session_id: session.id, campaign_label: session.campaignLabel, business_profile_id: profile.id }),
+        businessProfileId: profile.id,
+      },
+    }).catch((error) => {
+      if (error?.code !== "P2002") throw error;
+    });
+  } catch (error) {
+    const current = await prisma.onboardingSession.findUnique({ where: { id: sessionId } });
+    const attempts = Number(current?.buildAttempts || 1);
+    const retry = attempts < PHONE_ONBOARDING_MAX_BUILD_ATTEMPTS;
+    const nextAttemptAt = retry ? new Date(Date.now() + Math.pow(2, attempts - 1) * 5 * 60 * 1000) : null;
+    await prisma.onboardingSession.update({
+      where: { id: sessionId },
+      data: {
+        status: retry ? "build_retry" : "build_failed",
+        buildNextAttemptAt: nextAttemptAt,
+        lastError: String(error.message || error).slice(0, 1000),
+      },
+    });
+    await logOnboardingSessionEvent(session, retry ? "onboarding.build_retry_scheduled" : "onboarding.build_failed", {
+      attempt: attempts,
+      nextAttemptAt,
+      message: error.message,
+    });
+  }
+}
+
+async function runPhoneOnboardingWorker() {
+  if (phoneOnboardingWorkerRunning) return;
+  phoneOnboardingWorkerRunning = true;
+  try {
+    const now = new Date();
+    await prisma.onboardingSession.updateMany({
+      where: {
+        status: "building",
+        buildStartedAt: { lte: new Date(now.getTime() - 15 * 60 * 1000) },
+        buildAttempts: { lt: PHONE_ONBOARDING_MAX_BUILD_ATTEMPTS },
+      },
+      data: {
+        status: "build_retry",
+        buildNextAttemptAt: now,
+        lastError: "Recovered an interrupted background build",
+      },
+    });
+    await prisma.onboardingSession.updateMany({
+      where: {
+        status: "building",
+        buildStartedAt: { lte: new Date(now.getTime() - 15 * 60 * 1000) },
+        buildAttempts: { gte: PHONE_ONBOARDING_MAX_BUILD_ATTEMPTS },
+      },
+      data: {
+        status: "build_failed",
+        buildNextAttemptAt: null,
+        lastError: "Background build stopped after repeated interrupted attempts",
+      },
+    });
+    const candidate = await prisma.onboardingSession.findFirst({
+      where: {
+        status: { in: ["build_queued", "build_retry"] },
+        OR: [{ buildNextAttemptAt: null }, { buildNextAttemptAt: { lte: now } }],
+      },
+      orderBy: { buildQueuedAt: "asc" },
+    });
+    if (candidate) {
+      const claimed = await prisma.onboardingSession.updateMany({
+        where: { id: candidate.id, status: candidate.status },
+        data: { status: "building", buildStartedAt: now, buildAttempts: { increment: 1 } },
+      });
+      if (claimed.count) await processPhoneOnboardingBuild(candidate.id);
+    }
+    const reminder = await prisma.onboardingSession.findFirst({
+      where: {
+        status: { in: ["claim_link_sent", "delivery_failed"] },
+        claimLinkClickCount: 0,
+        claimLinkReminderCount: { lt: 2 },
+        claimLinkNextReminderAt: { lte: now },
+        claimLinkExpiresAt: { gt: now },
+        businessProfileId: { not: null },
+      },
+      include: { businessProfile: true, voiceCall: { select: { callControlId: true } } },
+      orderBy: { claimLinkNextReminderAt: "asc" },
+    });
+    if (reminder?.businessProfile) {
+      const delivery = await deliverPhoneOnboardingLink({
+        session: reminder,
+        profile: reminder.businessProfile,
+        settings: await getSettings(),
+        isReminder: true,
+      });
+      const wasDeliveryFailure = reminder.status === "delivery_failed";
+      const delivered = delivery.textSent || delivery.emailSent;
+      const count = reminder.claimLinkReminderCount + (wasDeliveryFailure && delivered ? 0 : 1);
+      const nextDeliveryAttempt = !delivered && count < 2 ? new Date(Date.now() + 15 * 60 * 1000) : null;
+      const nextClickReminder = delivered ? new Date(Date.now() + 2 * 60 * 60 * 1000) : nextDeliveryAttempt;
+      await prisma.onboardingSession.update({
+        where: { id: reminder.id },
+        data: {
+          status: wasDeliveryFailure && delivered ? "claim_link_sent" : reminder.status,
+          claimLinkSentAt: wasDeliveryFailure && delivered ? new Date() : reminder.claimLinkSentAt,
+          claimLinkTextSentAt: delivery.textSent ? new Date() : reminder.claimLinkTextSentAt,
+          claimLinkEmailSentAt: delivery.emailSent ? new Date() : reminder.claimLinkEmailSentAt,
+          claimLinkReminderCount: count,
+          claimLinkNextReminderAt: wasDeliveryFailure
+            ? nextClickReminder
+            : count < 2
+              ? new Date(Date.now() + 22 * 60 * 60 * 1000)
+              : null,
+          lastError: delivery.textSent || delivery.emailSent ? null : delivery.errors.join("; ") || reminder.lastError,
+        },
+      });
+      await logOnboardingSessionEvent(reminder, wasDeliveryFailure ? "onboarding.claim_link_delivery_retry" : "onboarding.claim_link_reminder", {
+        reminderNumber: count,
+        textSent: delivery.textSent,
+        emailSent: delivery.emailSent,
+        errors: delivery.errors,
+      });
+    }
+  } finally {
+    phoneOnboardingWorkerRunning = false;
+  }
+}
+
+function schedulePhoneOnboardingWorker(delayMs = 3000) {
+  if (phoneOnboardingWorkerTimer) return;
+  const run = () => safeBackground("phone onboarding funnel", runPhoneOnboardingWorker);
+  const startupTimer = setTimeout(run, delayMs);
+  if (typeof startupTimer.unref === "function") startupTimer.unref();
+  phoneOnboardingWorkerTimer = setInterval(run, 15 * 1000);
+  if (typeof phoneOnboardingWorkerTimer.unref === "function") phoneOnboardingWorkerTimer.unref();
 }
 
 async function extractOnboardingBusinessDetailsFromTranscript({ transcript, sourceText, settings }) {
@@ -12133,27 +12554,48 @@ function onboardingToolDeclarations() {
     {
       name: "build_business_agent",
       description:
-        "Mandatory only after send_onboarding_confirmation_text has been sent and the caller confirmed YES by phone or text. Builds the real trial receptionist and sends the setup link automatically.",
+        "Queue the real trial receptionist after the caller has confirmed the captured details. The build continues after the call ends and sends a tracked setup link automatically.",
       parameters: {
         type: "OBJECT",
         properties: {
           businessName: { type: "STRING" },
-          website: { type: "STRING" },
+          website: { type: "STRING", description: "Optional website, if the caller has one." },
+          ownerName: { type: "STRING" },
+          businessType: { type: "STRING" },
+          businessDescription: { type: "STRING" },
+          services: { type: "STRING" },
+          serviceArea: { type: "STRING" },
+          address: { type: "STRING" },
+          hours: { type: "STRING" },
+          businessPhone: { type: "STRING" },
+          email: { type: "STRING", description: "Required when the caller chose email delivery." },
+          deliveryChannel: { type: "STRING", description: "text or email" },
         },
-        required: ["businessName", "website"],
+        required: ["businessName"],
       },
     },
     {
       name: "send_onboarding_confirmation_text",
       description:
-        "Required before building: text the caller the business name and website you heard so they can reply YES or send corrected details while still on the onboarding call.",
+        "Send the captured details for confirmation. Use text only after explicit permission to text this number; otherwise collect an email and use email delivery.",
       parameters: {
         type: "OBJECT",
         properties: {
           businessName: { type: "STRING" },
           website: { type: "STRING" },
+          ownerName: { type: "STRING" },
+          businessType: { type: "STRING" },
+          businessDescription: { type: "STRING" },
+          services: { type: "STRING" },
+          serviceArea: { type: "STRING" },
+          address: { type: "STRING" },
+          hours: { type: "STRING" },
+          businessPhone: { type: "STRING" },
+          deliveryChannel: { type: "STRING", description: "text or email" },
+          smsConsent: { type: "BOOLEAN", description: "True only if the caller explicitly agreed to receive the confirmation and setup link by text." },
+          email: { type: "STRING", description: "Confirmed destination when deliveryChannel is email." },
         },
-        required: ["businessName", "website"],
+        required: ["businessName", "deliveryChannel"],
       },
     },
     {
@@ -13116,6 +13558,10 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
         ? session.businessProfile.rawData
         : {};
     const textOrUnknown = (value) => String(value || "").trim() || "unknown";
+    const businessName = normalizeBusinessName(req.body.businessName || session.businessProfile.businessName);
+    if (!businessName) throw new Error("Business name is required");
+    const websiteSubmitted = Object.prototype.hasOwnProperty.call(req.body, "website");
+    const website = websiteSubmitted ? normalizeWebsite(req.body.website) : session.businessProfile.website;
     const summary = textOrUnknown(req.body.summary);
     const hours = textOrUnknown(req.body.hours);
     const services = textOrUnknown(req.body.services);
@@ -13180,8 +13626,8 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
     }
     const rawData = {
       ...existingRaw,
-      businessName: session.businessProfile.businessName,
-      website: session.businessProfile.website,
+      businessName,
+      website,
       summary,
       hours,
       services,
@@ -13192,8 +13638,8 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
       calendarProviderPreference: requestedCalendarProvider,
     };
     const values = {
-      businessName: session.businessProfile.businessName,
-      website: session.businessProfile.website,
+      businessName,
+      website,
       summary,
       hours,
       services,
@@ -13205,6 +13651,8 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
       where: { id: session.businessProfileId },
       data: {
         ...values,
+        cacheKey: businessCacheKey(businessName, website),
+        normalized: businessName,
         systemPrompt: buildSystemPrompt(values),
       },
     });
@@ -13221,6 +13669,9 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
         : null,
     });
   } catch (error) {
+    if (error?.code === "P2002") {
+      return res.status(409).json({ error: "A RingPort profile already exists for that business name and website" });
+    }
     res.status(400).json({ error: error.message });
   }
 });
@@ -13284,6 +13735,24 @@ app.post("/api/onboarding/fast-agent/checkout", async (req, res) => {
       claimRecord = await prisma.accountClaimToken.create({
         data: { tokenHash: issued.tokenHash, email, businessProfileId: session.businessProfileId, expiresAt },
       });
+    }
+
+    if (session.shortCode && claimRecord) {
+      const phoneOnboarding = await prisma.onboardingSession.findUnique({
+        where: { claimLinkShortCode: session.shortCode },
+        select: { id: true },
+      });
+      if (phoneOnboarding) {
+        await prisma.onboardingSession.update({
+          where: { id: phoneOnboarding.id },
+          data: {
+            email: claimRecord.email || email || null,
+            claimLinkTokenHash: claimRecord.tokenHash,
+            claimLinkExpiresAt: claimRecord.expiresAt,
+            status: "checkout_started",
+          },
+        });
+      }
     }
 
     const baseUrl = await webhookBaseUrl(req);
@@ -13450,6 +13919,23 @@ app.post("/api/onboarding/claim", async (req, res) => {
     await prisma.accountClaimToken.create({
       data: { tokenHash: claim.tokenHash, email, businessProfileId: session.businessProfileId, expiresAt },
     });
+    const phoneOnboarding = await prisma.onboardingSession.findFirst({
+      where: session.shortCode
+        ? { claimLinkShortCode: session.shortCode }
+        : { businessProfileId: session.businessProfileId, claimedAt: null },
+      orderBy: { createdAt: "desc" },
+    });
+    if (phoneOnboarding) {
+      await prisma.onboardingSession.update({
+        where: { id: phoneOnboarding.id },
+        data: {
+          email,
+          claimLinkTokenHash: claim.tokenHash,
+          claimLinkExpiresAt: expiresAt,
+          status: "trial_started",
+        },
+      });
+    }
     const trial = await startBusinessTrial({
       businessProfileId: session.businessProfileId,
       settings,
@@ -13502,9 +13988,15 @@ app.get("/api/onboarding/claim", async (req, res) => {
   if (!claim || claim.usedAt || claim.expiresAt <= new Date()) {
     return res.status(404).json({ error: "This setup link is invalid or expired" });
   }
+  const phoneOnboarding = await prisma.onboardingSession.findFirst({
+    where: { claimLinkTokenHash: claim.tokenHash },
+    select: { intakeData: true },
+  });
+  const ownerName = cleanOnboardingIntake(phoneOnboarding?.intakeData).ownerName;
   res.json({
     email: claim.email || "",
     emailRequired: !claim.email,
+    ownerName,
     businessName: claim.businessProfile.businessName,
     expiresAt: claim.expiresAt,
   });
@@ -13539,6 +14031,21 @@ app.post("/api/onboarding/complete", async (req, res) => {
       await tx.accountClaimToken.update({ where: { id: claim.id }, data: { email, usedAt: new Date() } });
       return created;
     });
+    const completedAt = new Date();
+    const phoneOnboarding = await prisma.onboardingSession.findFirst({
+      where: { claimLinkTokenHash: claim.tokenHash },
+      select: { id: true, campaignLabel: true, voiceCallId: true, businessProfileId: true },
+    });
+    if (phoneOnboarding) {
+      await prisma.onboardingSession.update({
+        where: { id: phoneOnboarding.id },
+        data: { status: "claimed", claimedAt: completedAt, claimLinkNextReminderAt: null },
+      });
+      await logOnboardingSessionEvent(phoneOnboarding, "onboarding.claim_completed", {
+        businessProfileId: claim.businessProfileId,
+        campaignLabel: phoneOnboarding.campaignLabel,
+      });
+    }
     const session = issueToken();
     const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
     await prisma.session.create({ data: { tokenHash: session.tokenHash, userId: user.id, expiresAt } });
@@ -14289,6 +14796,39 @@ app.post("/webhooks/telnyx", async (req, res) => {
         }
       }
       if (isOnboarding) {
+        const callerPhone = normalizeE164Phone(payload.from) || String(payload.from || "").trim();
+        const recentOnboardingCalls = callerPhone
+          ? await prisma.voiceCall.count({
+              where: {
+                callMode: "onboarding",
+                fromNumber: callerPhone,
+                startedAt: { gte: new Date(Date.now() - 60 * 60 * 1000) },
+              },
+            })
+          : 0;
+        const onboardingBlockedReason = callerLooksUnknown(payload.from)
+          ? "unknown_caller"
+          : callerIsNanpTollFree(payload.from)
+            ? "toll_free_caller"
+            : recentOnboardingCalls > 5
+              ? "too_many_onboarding_calls"
+              : "";
+        if (onboardingBlockedReason) {
+          await prisma.voiceCall.update({
+            where: { id: voiceCall.id },
+            data: { status: "blocked", hangupCause: "onboarding_abuse_protection" },
+          });
+          await logVoiceCallEvent(payload.call_control_id, "onboarding.abuse_blocked", {
+            reason: onboardingBlockedReason,
+            callerPhone,
+            recentOnboardingCalls,
+          });
+          await telnyxRequest(`/calls/${encodeURIComponent(payload.call_control_id)}/actions/hangup`, {
+            method: "POST",
+            body: JSON.stringify({ command_id: crypto.randomUUID() }),
+          });
+          return res.json({ ok: true, action: "onboarding_abuse_blocked", reason: onboardingBlockedReason });
+        }
         const settings = await getSettings();
         await prisma.onboardingSession.upsert({
           where: { voiceCallId: voiceCall.id },
@@ -14419,7 +14959,14 @@ app.post("/webhooks/telnyx", async (req, res) => {
       });
       await prisma.onboardingSession.updateMany({
         where: { voiceCall: { callControlId: payload.call_control_id } },
-        data: { completedAt: new Date(), status: "completed" },
+        data: { completedAt: new Date() },
+      });
+      await prisma.onboardingSession.updateMany({
+        where: {
+          voiceCall: { callControlId: payload.call_control_id },
+          status: { notIn: ["build_queued", "building", "build_retry", "agent_ready", "claim_link_sent", "claim_link_clicked", "trial_started", "delivery_failed", "needs_email", "existing_account", "claimed"] },
+        },
+        data: { status: "call_completed" },
       });
     } else if (eventType === "call.recording.saved") {
       const recordingUrl = payload.recording_urls?.wav || payload.recording_urls?.mp3 || payload.recording_url || null;
@@ -15971,13 +16518,35 @@ app.get("/api/admin/calls", requireAuth, requireAdmin, async (_req, res) => {
 app.get("/api/admin/onboarding", requireAuth, requireAdmin, async (_req, res) => {
   const sessions = await prisma.onboardingSession.findMany({
     include: {
-      voiceCall: { select: { callControlId: true, status: true, startedAt: true, endedAt: true, recordingUrl: true } },
+      voiceCall: {
+        select: {
+          callControlId: true,
+          status: true,
+          startedAt: true,
+          endedAt: true,
+          recordingUrl: true,
+          events: {
+            where: { eventType: { startsWith: "onboarding." } },
+            select: { eventType: true, detail: true, createdAt: true },
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      },
       businessProfile: { select: { id: true, businessName: true, website: true, accountStatus: true } },
+      linkClicks: { select: { channel: true, createdAt: true }, orderBy: { createdAt: "asc" } },
     },
     orderBy: { createdAt: "desc" },
     take: 100,
   });
-  res.json({ sessions });
+  const funnel = {
+    calls: sessions.length,
+    confirmed: sessions.filter((session) => Boolean(session.buildQueuedAt)).length,
+    built: sessions.filter((session) => Boolean(session.buildCompletedAt && session.businessProfileId)).length,
+    delivered: sessions.filter((session) => Boolean(session.claimLinkSentAt)).length,
+    clicked: sessions.filter((session) => session.claimLinkClickCount > 0).length,
+    claimed: sessions.filter((session) => Boolean(session.claimedAt)).length,
+  };
+  res.json({ sessions, funnel });
 });
 
 app.get("/api/admin/telnyx/search", requireAuth, requireAdmin, async (req, res) => {
@@ -17204,6 +17773,72 @@ app.get("/goal/:token", async (req, res) => {
     return redirectGoalLink(req, res, goal);
   } catch (error) {
     res.status(400).send(error.message);
+  }
+});
+
+app.get("/o/:shortCode", async (req, res) => {
+  try {
+    const shortCode = String(req.params.shortCode || "").trim();
+    if (!FAST_AGENT_SHORT_CODE_PATTERN.test(shortCode)) return res.status(404).send("This setup link is invalid");
+    const session = await prisma.onboardingSession.findUnique({
+      where: { claimLinkShortCode: shortCode },
+      include: { businessProfile: true, voiceCall: { select: { callControlId: true } } },
+    });
+    if (!session || !session.businessProfile || !session.claimLinkExpiresAt || session.claimLinkExpiresAt <= new Date()) {
+      return res.status(410).send("This setup link has expired");
+    }
+    const channel = ["text", "email", "reminder"].includes(String(req.query.channel || ""))
+      ? String(req.query.channel)
+      : "unknown";
+    const clickedAt = new Date();
+    const ip = adRequestIp(req);
+    await prisma.$transaction([
+      prisma.onboardingLinkClick.create({
+        data: {
+          onboardingSessionId: session.id,
+          channel,
+          referrer: String(req.get("referer") || "").slice(0, 2048) || null,
+          userAgent: String(req.get("user-agent") || "").slice(0, 1000) || null,
+          ipHash: ip ? crypto.createHash("sha256").update(`onboarding-click:${ip}`).digest("hex") : null,
+        },
+      }),
+      prisma.onboardingSession.update({
+        where: { id: session.id },
+        data: {
+          claimLinkFirstClickedAt: session.claimLinkFirstClickedAt || clickedAt,
+          claimLinkLastClickedAt: clickedAt,
+          claimLinkClickCount: { increment: 1 },
+          claimLinkNextReminderAt: null,
+          status: session.status === "claim_link_sent" ? "claim_link_clicked" : session.status,
+        },
+      }),
+    ]);
+    await logOnboardingSessionEvent(session, "onboarding.claim_link_clicked", {
+      channel,
+      campaignLabel: session.campaignLabel,
+      businessProfileId: session.businessProfileId,
+    });
+    const destination = new URL(`/${shortCode}`, `${requestBaseUrl(req, await getSettings())}/`);
+    destination.searchParams.set("source", "phone_onboarding");
+    if (session.campaignLabel) destination.searchParams.set("campaign", session.campaignLabel);
+    const eventId = `phone_onboarding_click_${session.id}_${session.claimLinkClickCount + 1}`;
+    await recordTrafficEvent({
+      req,
+      eventKey: "fastagent_page_visit",
+      eventId,
+      sourceUrl: destination.toString(),
+      customData: {
+        business_profile_id: session.businessProfileId,
+        onboarding_session_id: session.id,
+        campaign_label: session.campaignLabel,
+        channel,
+      },
+      source: "phone_onboarding",
+    }).catch(() => null);
+    res.set("Cache-Control", "no-store");
+    return res.redirect(302, destination.toString());
+  } catch (error) {
+    return res.status(400).send(error.message);
   }
 });
 
@@ -20988,10 +21623,6 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   const outboundAudioQueue = [];
   let outboundAudioTimer = null;
   let onboardingAgentTurnText = "";
-  let onboardingAutoConfirmationPromise = null;
-  let onboardingAutoConfirmationLastAttemptAt = 0;
-  let onboardingAutoBuildPromise = null;
-  let onboardingAutoBuildLastAttemptAt = 0;
   let onboardingConfirmationTextSent = false;
   let onboardingDetailsConfirmed = false;
   let onboardingConfirmedBusinessName = "";
@@ -21014,7 +21645,6 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   let onboardingTranscript = onboardingSession?.transcript || "";
   let onboardingRealtimeTranscript = onboardingTranscript;
   let qualificationTranscript = qualificationAttempt?.transcript || "";
-  let provisioningPromise = null;
   let loggedCallerAudioPacket = false;
   let loggedGeminiSourcePacket = false;
   let loggedGeminiOutputPacket = false;
@@ -21208,55 +21838,6 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
     ).catch((error) => {
       console.warn(`[db] qualification transcript persistence skipped: ${error.message}`);
     });
-  };
-
-  const buildOnboardingAgent = async (businessName, website, lookupData = null) => {
-    if (!isOnboarding) throw new Error("This is not an onboarding call");
-    if (provisioningPromise) return provisioningPromise;
-    provisioningPromise = (async () => {
-      await prisma.onboardingSession.update({
-        where: { id: onboardingSession.id },
-        data: { status: "researching", businessName, website: normalizeWebsite(website), lookupData: lookupData || undefined },
-      });
-      const result = await provisionTrialBusiness({ businessName, website, settings });
-      if (result.claimed) {
-        await prisma.onboardingSession.update({
-          where: { id: onboardingSession.id },
-          data: { status: "existing_account", businessName, website: normalizeWebsite(website) },
-        });
-        return { ok: false, existingAccount: true, message: "This business already has an account." };
-      }
-      profile = result.profile;
-      config = await ensureBusinessConfig(profile);
-      onboardingSession = await prisma.onboardingSession.update({
-        where: { id: onboardingSession.id },
-        data: {
-          status: "agent_ready",
-          businessName: profile.businessName,
-          website: profile.website,
-          businessProfileId: profile.id,
-          lookupData: lookupData || undefined,
-        },
-      });
-      await prisma.voiceCall.update({ where: { id: call.id }, data: { businessProfileId: profile.id } });
-      await logVoiceCallEvent(callControlId, "onboarding.agent_ready", {
-        businessProfileId: profile.id,
-        businessName: profile.businessName,
-        cached: result.cached,
-      });
-      return {
-        ok: true,
-        businessName: profile.businessName,
-        website: profile.website,
-        summary: profile.summary,
-        hours: profile.hours,
-        services: profile.services,
-        demoPhoneNumber: result.demoAssignment?.voiceNumber?.phoneNumber || null,
-      };
-    })().finally(() => {
-      provisioningPromise = null;
-    });
-    return provisioningPromise;
   };
 
   const onboardingPreparation = isOnboarding
@@ -21620,22 +22201,10 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
         emailRequired: true,
       };
     }
-    const claim = await createPhoneClaimLink({ profile, email, settings });
-    const delivery = await deliverSetupLink({
-      settings,
-      profile,
-      toPhone: call.fromNumber,
-      setupUrl: claim.setupUrl,
-      businessName: profile.businessName,
-    });
-    if (claim.email) {
-      await sendClaimEmail({
-        settings,
-        email: claim.email,
-        setupUrl: claim.setupUrl,
-        businessName: profile.businessName,
-      }).catch(() => false);
-    }
+    const claim = await createPhoneClaimLink({ profile, email, settings, onboardingSessionId: onboardingSession.id });
+    const preparedSession = await prisma.onboardingSession.findUnique({ where: { id: onboardingSession.id } });
+    const delivery = await deliverPhoneOnboardingLink({ session: preparedSession, profile, settings });
+    if (!delivery.textSent && !delivery.emailSent) throw new Error(delivery.errors.join("; ") || "Setup link delivery failed");
     onboardingSetupLinkSent = true;
     onboardingSession = await prisma.onboardingSession.update({
       where: { id: onboardingSession.id },
@@ -21643,11 +22212,15 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
         status: "claim_link_sent",
         email: claim.email || onboardingSession.email || null,
         claimLinkSentAt: new Date(),
+        claimLinkTextSentAt: delivery.textSent ? new Date() : null,
+        claimLinkEmailSentAt: delivery.emailSent ? new Date() : null,
         messageProvider: delivery.provider,
       },
     });
     await logVoiceCallEvent(callControlId, "onboarding.claim_link_sent", {
       provider: delivery.provider,
+      textSent: delivery.textSent,
+      emailSent: delivery.emailSent,
       email: claim.email,
       emailRequired: claim.emailRequired,
     });
@@ -21658,68 +22231,144 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
     const args = functionCall.args || {};
     if (functionCall.name === "build_business_agent") {
       if (!onboardingConfirmationTextSent) {
-        throw new Error("Send the confirmation text before building the agent");
+        throw new Error("Send the captured details for confirmation before building the agent");
       }
       if (!onboardingDetailsConfirmed) {
-        throw new Error("Wait for the caller to confirm the texted business details by saying yes or replying YES");
+        throw new Error("Wait for the caller to confirm the captured business details");
       }
       const buildBusinessName = normalizeBusinessName(onboardingConfirmedBusinessName || args.businessName);
       const buildWebsite = normalizeWebsite(onboardingConfirmedWebsite || args.website);
       if (!buildBusinessName) throw new Error("Business name is required before building the agent");
-      if (!buildWebsite) throw new Error("Website is required before building the agent");
-      const result = await buildOnboardingAgent(
-        buildBusinessName,
-        buildWebsite,
-      );
-      if (!result?.ok) return result;
-      try {
-        const setupLink = await sendOnboardingSetupLink({});
-        return { ...result, setupLinkSent: Boolean(setupLink?.sent), setupLink };
-      } catch (error) {
-        await logVoiceCallEvent(callControlId, "onboarding.claim_link_failed", { message: error.message });
-        return { ...result, setupLinkSent: false, setupLinkError: error.message };
+      const recentBuilds = await prisma.onboardingSession.count({
+        where: {
+          callerPhone: call.fromNumber,
+          id: { not: onboardingSession.id },
+          buildQueuedAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        },
+      });
+      if (recentBuilds >= PHONE_ONBOARDING_MAX_BUILDS_PER_CALLER_DAY) {
+        throw new Error("This phone number has reached today's onboarding build limit");
       }
+      const deliveryChannel = String(args.deliveryChannel || onboardingSession.deliveryPreference || "text").toLowerCase() === "email"
+        ? "email"
+        : "text";
+      const email = String(args.email || onboardingSession.email || "").trim().toLowerCase();
+      if (deliveryChannel === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new Error("Collect a valid email address before choosing email delivery");
+      }
+      if (deliveryChannel === "text" && (!onboardingSession.textConsentAt || onboardingSession.textOptedOutAt)) {
+        throw new Error("The caller must explicitly agree before receiving the setup link by text");
+      }
+      const intakeData = cleanOnboardingIntake(onboardingSession.intakeData);
+      for (const [key, value] of Object.entries(cleanOnboardingIntake(args))) {
+        if (value) intakeData[key] = value;
+      }
+      if (email) intakeData.email = email;
+      onboardingSession = await prisma.onboardingSession.update({
+        where: { id: onboardingSession.id },
+        data: {
+          status: "build_queued",
+          businessName: buildBusinessName,
+          website: buildWebsite,
+          email: email || null,
+          deliveryPreference: deliveryChannel,
+          intakeData: jsonSafe(intakeData),
+          buildQueuedAt: new Date(),
+          buildNextAttemptAt: new Date(),
+          buildAttempts: 0,
+          lastError: null,
+        },
+      });
+      await logVoiceCallEvent(callControlId, "onboarding.build_queued", {
+        businessName: buildBusinessName,
+        website: buildWebsite,
+        deliveryChannel,
+        campaignLabel: onboardingSession.campaignLabel,
+      });
+      safeBackground("phone onboarding build queued from call", runPhoneOnboardingWorker);
+      return {
+        ok: true,
+        queued: true,
+        callerMayHangUp: true,
+        deliveryChannel,
+        message: "The build is queued. It will continue after this call and send a tracked setup link when ready.",
+      };
     }
     if (functionCall.name === "send_onboarding_confirmation_text") {
       const businessName = normalizeBusinessName(args.businessName);
-      if (!businessName) throw new Error("Business name is required before texting a confirmation");
+      if (!businessName) throw new Error("Business name is required before sending a confirmation");
       const website = normalizeWebsite(args.website);
-      if (!website) throw new Error("Website is required before texting a confirmation");
+      const deliveryChannel = String(args.deliveryChannel || "text").trim().toLowerCase() === "email" ? "email" : "text";
+      const email = String(args.email || "").trim().toLowerCase();
+      const smsConsent = args.smsConsent === true;
+      if (deliveryChannel === "text" && !smsConsent) {
+        throw new Error("Ask for explicit permission before texting this number, or use email delivery");
+      }
+      if (deliveryChannel === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new Error("A valid email address is required for email delivery");
+      }
+      const intakeData = cleanOnboardingIntake(args);
       const message = [
         "Please confirm I heard this correctly:",
         `Business: ${businessName}`,
-        `Website: ${website}`,
-        "Reply YES if correct, or text the correct name and website.",
-      ].join("\n");
-      const delivery = await deliverBusinessMessage({
-        settings,
-        profile,
-        toPhone: call.fromNumber,
-        message,
-        purpose: "onboarding_confirmation",
-        voiceCallId: call.id,
-        providerOverride: "bluebubbles",
-        metadata: { businessName, website },
-      });
+        website ? `Website: ${website}` : "Website: none provided",
+        intakeData.businessType ? `Business type: ${intakeData.businessType}` : "",
+        intakeData.services ? `Services: ${intakeData.services}` : "",
+        intakeData.serviceArea ? `Service area: ${intakeData.serviceArea}` : "",
+        intakeData.address ? `Address: ${intakeData.address}` : "",
+        intakeData.hours ? `Hours: ${intakeData.hours}` : "",
+        intakeData.businessPhone ? `Business phone: ${intakeData.businessPhone}` : "",
+        deliveryChannel === "text" ? "Reply YES if correct, or reply with a correction." : "Please confirm these details with the onboarding agent.",
+        deliveryChannel === "text" ? "Reply STOP to opt out." : "",
+      ].filter(Boolean).join("\n");
+      let provider = "email";
+      if (deliveryChannel === "text") {
+        const delivery = await deliverBusinessMessage({
+          settings,
+          profile,
+          toPhone: call.fromNumber,
+          message,
+          purpose: "onboarding_confirmation",
+          voiceCallId: call.id,
+          metadata: { businessName, website, onboardingSessionId: onboardingSession.id },
+        });
+        provider = delivery.provider;
+      } else {
+        await sendPhoneOnboardingEmail({
+          settings,
+          email,
+          subject: `Confirm your ${businessName} RingPort setup`,
+          text: message,
+          html: `<p>${message.split("\n").map((line) => String(line).replace(/[<>&"]/g, "")).join("<br>")}</p>`,
+        });
+      }
       onboardingSession = await prisma.onboardingSession.update({
         where: { id: onboardingSession.id },
         data: {
           status: "awaiting_confirmation",
           businessName,
           website,
-          messageProvider: delivery.provider,
+          email: email || null,
+          intakeData: jsonSafe(intakeData),
+          deliveryPreference: deliveryChannel,
+          textConsentAt: deliveryChannel === "text" ? new Date() : null,
+          textConsentSource: deliveryChannel === "text" ? "phone_verbal" : null,
+          textOptedOutAt: deliveryChannel === "text" ? null : onboardingSession.textOptedOutAt,
+          messageProvider: provider,
         },
       });
       onboardingConfirmationTextSent = true;
       onboardingDetailsConfirmed = false;
       onboardingConfirmedBusinessName = businessName;
       onboardingConfirmedWebsite = website;
-      await logVoiceCallEvent(callControlId, "onboarding.confirmation_text_sent", {
-        provider: delivery.provider,
+      await logVoiceCallEvent(callControlId, "onboarding.confirmation_sent", {
+        provider,
+        deliveryChannel,
+        smsConsent,
         businessName,
         website,
       });
-      return { ok: true, sent: true, provider: delivery.provider, businessName, website };
+      return { ok: true, sent: true, provider, deliveryChannel, businessName, website };
     }
     if (functionCall.name === "send_setup_link") {
       return sendOnboardingSetupLink({ email: args.email });
@@ -21778,133 +22427,19 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
     ].some((pattern) => pattern.test(normalized));
   };
 
-  const ensureOnboardingBuiltFromTranscript = async (reason, sourceText = "") => {
-    if (!isOnboarding || profile || closing) return { ok: true, alreadyBuilt: true };
-    if (onboardingAutoBuildPromise) return onboardingAutoBuildPromise;
-    const now = Date.now();
-    if (now - onboardingAutoBuildLastAttemptAt < 15000) return { ok: false, skipped: true, reason: "recent_attempt" };
-    onboardingAutoBuildLastAttemptAt = now;
-    onboardingAutoBuildPromise = (async () => {
-      try {
-        await logVoiceCallEvent(callControlId, "onboarding.auto_build_triggered", {
-          reason,
-          sourceText: String(sourceText || "").slice(0, 500),
-        });
-        const details = await extractOnboardingBusinessDetailsFromTranscript({
-          transcript: onboardingRealtimeTranscript,
-          sourceText,
-          settings,
-        });
-        await logVoiceCallEvent(callControlId, "onboarding.auto_build_details", details);
-        const functionCall = {
-          name: "build_business_agent",
-          args: { businessName: details.businessName, website: details.website },
-        };
-        const result = await runPhoneToolWithWaitNotice(functionCall, () => runOnboardingTool(functionCall));
-        await logVoiceCallEvent(callControlId, "onboarding.auto_build_completed", {
-          reason,
-          ok: Boolean(result?.ok),
-          businessProfileId: profile?.id || null,
-          businessName: result?.businessName || details.businessName,
-          website: result?.website || details.website,
-          existingAccount: Boolean(result?.existingAccount),
-        });
-        sendGeminiUserText(
-          result?.ok
-            ? `Backend guard: build_business_agent has now completed successfully for ${result.businessName}. The real tool result is: ${JSON.stringify(result)}. If setupLinkSent is true, tell the caller the setup link was sent to this phone so they can finish registration. Do not offer to switch into the live agent.`
-            : `Backend guard: build_business_agent did not create a new receptionist. The real tool result is: ${JSON.stringify(result)}. Explain this accurately; do not claim a new receptionist is ready.`,
-        );
-        return result;
-      } catch (error) {
-        await logVoiceCallEvent(callControlId, "onboarding.auto_build_failed", {
-          reason,
-          message: error.message,
-        });
-        sendGeminiUserText(
-          `Backend guard: no receptionist has been built yet. ${error.message}. Ask the caller to confirm the business name and website again, then call build_business_agent. Do not claim the receptionist is ready.`,
-        );
-        return { ok: false, error: error.message };
-      } finally {
-        onboardingAutoBuildPromise = null;
-      }
-    })();
-    return onboardingAutoBuildPromise;
-  };
-
-  const ensureOnboardingConfirmationTextSentFromTranscript = async (reason, sourceText = "") => {
-    if (!isOnboarding || onboardingConfirmationTextSent || closing) return { ok: true, alreadySent: true };
-    if (onboardingAutoConfirmationPromise) return onboardingAutoConfirmationPromise;
-    const now = Date.now();
-    if (now - onboardingAutoConfirmationLastAttemptAt < 8000) {
-      return { ok: false, skipped: true, reason: "recent_attempt" };
-    }
-    onboardingAutoConfirmationLastAttemptAt = now;
-    onboardingAutoConfirmationPromise = (async () => {
-      try {
-        await logVoiceCallEvent(callControlId, "onboarding.auto_confirmation_text_triggered", {
-          reason,
-          sourceText: String(sourceText || "").slice(0, 500),
-        });
-        const fastDetails = extractOnboardingBusinessDetailsFast({
-          transcript: onboardingRealtimeTranscript,
-          sourceText,
-        });
-        const details =
-          fastDetails ||
-          (await extractOnboardingBusinessDetailsFromTranscript({
-            transcript: onboardingRealtimeTranscript,
-            sourceText,
-            settings,
-          }));
-        if (!details.website) throw new Error("Website is missing or unclear");
-        await logVoiceCallEvent(callControlId, "onboarding.auto_confirmation_text_details", {
-          ...details,
-          extraction: fastDetails ? "fast" : "ai",
-        });
-        const functionCall = {
-          name: "send_onboarding_confirmation_text",
-          args: { businessName: details.businessName, website: details.website },
-        };
-        const result = await runPhoneToolWithWaitNotice(functionCall, () => runOnboardingTool(functionCall));
-        await logVoiceCallEvent(callControlId, "onboarding.auto_confirmation_text_completed", {
-          ok: Boolean(result?.sent),
-          provider: result?.provider || null,
-          businessName: result?.businessName || details.businessName,
-          website: result?.website || details.website,
-        });
-        sendGeminiUserText(
-          result?.sent
-            ? `Backend guard: the confirmation text has now actually been sent to the caller with ${result.businessName} and ${result.website}. Tell them to reply YES by text or say yes on the phone if it is correct.`
-            : "Backend guard: the confirmation text was not sent. Ask for the company name and website again, then use send_onboarding_confirmation_text.",
-        );
-        return result;
-      } catch (error) {
-        await logVoiceCallEvent(callControlId, "onboarding.auto_confirmation_text_failed", {
-          reason,
-          message: error.message,
-        });
-        sendGeminiUserText(
-          `Backend guard: you have not actually sent the confirmation text. ${error.message}. Apologize briefly, ask for the company website if needed, then use send_onboarding_confirmation_text. Do not say the text was sent until that tool returns sent=true.`,
-        );
-        return { ok: false, error: error.message };
-      } finally {
-        onboardingAutoConfirmationPromise = null;
-      }
-    })();
-    return onboardingAutoConfirmationPromise;
-  };
-
   const enforceOnboardingToolClaims = (turnText) => {
     if (!isOnboarding || closing) return;
     const text = String(turnText || "").trim();
     if (!text) return;
     if (!onboardingConfirmationTextSent && onboardingClaimsConfirmationTextSentIntent(text)) {
-      safeBackground("onboarding auto confirmation text", () =>
-        ensureOnboardingConfirmationTextSentFromTranscript("agent_claimed_confirmation_text", text),
+      sendGeminiUserText(
+        "Backend guard: no confirmation has been delivered. Ask permission before texting, or collect an email, then call send_onboarding_confirmation_text. Do not claim it was sent.",
       );
     }
-    if (!profile && onboardingClaimsBuildIntent(text)) {
-      safeBackground("onboarding auto build", () => ensureOnboardingBuiltFromTranscript("agent_claimed_build", text));
+    if (!onboardingSession?.buildQueuedAt && onboardingClaimsBuildIntent(text)) {
+      sendGeminiUserText(
+        "Backend guard: the build has not been queued. Complete confirmation and call build_business_agent. Do not say the agent is being built until the tool returns queued=true.",
+      );
     }
     if (onboardingClaimsSwitchIntent(text)) {
       sendGeminiUserText(
@@ -21946,8 +22481,8 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
         }
         sendGeminiUserText(
           confirmedByText
-            ? `The caller just replied YES by text message and confirmed these business details: ${onboardingConfirmedBusinessName} (${onboardingConfirmedWebsite || "no website"}). Say "Okay, I'll build your agent now. This can take about a minute," then call build_business_agent. After it returns, the setup link will be sent automatically. Do not offer to switch into the live agent.`
-            : `The caller just replied by text message during this onboarding call: "${text}". Treat this as caller-provided information. If it corrects the business name or website, repeat the corrected details and use send_onboarding_confirmation_text again. Do not build until they reply YES by text or say yes on the phone after the confirmation text.`,
+            ? `The caller just replied YES and confirmed the details for ${onboardingConfirmedBusinessName} (${onboardingConfirmedWebsite || "no website"}). Call build_business_agent to queue the background build. When it returns queued=true, explain that they may hang up and the tracked setup link will arrive when ready, then end the call.`
+            : `The caller just replied during this onboarding call: "${text}". Treat it as caller-provided information. If it corrects any business detail, repeat the correction and send the updated confirmation through the same approved channel. Do not queue the build until they clearly confirm.`,
         );
         return {
           routed: true,
@@ -21976,9 +22511,9 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
     geminiWs = new WebSocket(`${GEMINI_WS_URL}?key=${encodeURIComponent(geminiApiKey)}`);
     const onboardingContextFromPreparation = (prepared) => {
       if (prepared?.found) {
-        return `Caller lookup found possible details: ${prepared.lookup.businessName} (${prepared.lookup.website || "website unknown"}). Do not build yet. Send these details to the caller with send_onboarding_confirmation_text, then ask them to reply YES by text or say yes on the phone if correct. If the details are wrong, collect the correction and text the corrected confirmation.`;
+        return `Caller lookup found possible details: ${prepared.lookup.businessName} (${prepared.lookup.website || "no website found"}). Verify what the business does, its main services, and service area. Ask whether you may text this number a confirmation and secure setup link. If they cannot receive texts or decline, collect an email. Send the details through the chosen channel, confirm them on the call, then queue the build.`;
       }
-      return `No usable company was returned by caller lookup. Ask for the company name and website. Once you have them, use send_onboarding_confirmation_text. Do not build until the caller confirms the texted details by replying YES or saying yes on the phone.`;
+      return `No usable company was returned by caller lookup. Ask for the company name, what the business does, main services, and city or service area. A website is optional. Ask whether you may text this number a confirmation and secure setup link; if not, collect an email. Send the details through the chosen channel, confirm them on the call, then queue the build.`;
     };
     const maybeSendOnboardingContext = async () => {
       if (!isOnboarding || onboardingContextSent || !onboardingGreetingComplete || !pendingOnboardingPreparation) return;
@@ -22026,19 +22561,18 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
 Phone onboarding context:
 - Caller phone: ${call.fromNumber || "unknown"}
 - Campaign source: ${onboardingSession?.campaignLabel || "unlabeled"}
-- Collect the company name and website. If lookup provides candidate details, use those as candidates.
-- Do not use send_onboarding_confirmation_text until both company name and website are known. If the website is missing or unclear, ask for it again.
-- Before building, always use send_onboarding_confirmation_text with the company name and website so the caller can see what was captured on their phone.
-- Before sending the confirmation text, say one short natural sentence like "I'm sending that now so you can check it on your phone," then immediately use send_onboarding_confirmation_text.
-- Never say you texted, sent, or delivered the confirmation unless send_onboarding_confirmation_text returned sent=true.
-- After sending the confirmation text, wait for the caller to reply YES by text or say that the texted details are correct on the phone. If they correct anything, send a new confirmation text and wait again.
-- Do not use build_business_agent until the confirmation text was sent and the caller confirmed it by text or phone.
-- When the caller confirms, say: "Okay, I'll build your agent now. This can take about a minute." Then immediately use build_business_agent.
-- Function use is mandatory. Never say the receptionist is built, ready, created, or complete unless build_business_agent returned ok=true in this call.
-- After build_business_agent returns ok=true, the setup link is sent automatically to this phone. Tell the caller the link was sent so they can finish account registration.
+- In about three minutes, collect only what is needed to prepare a useful first draft: company name, business type, main services, and city or service area. Ask for hours and a website when readily available, but a website is optional.
+- Treat caller-provided details as authoritative. The caller will see them prefilled in Fast Agent and can edit them before claiming the trial.
+- Before any text message, explicitly ask: "May I text this number a confirmation and your secure setup link?" Set smsConsent=true only after a clear yes.
+- If the caller declines text messages or cannot receive them, collect and confirm an email address, then use deliveryChannel=email.
+- Use send_onboarding_confirmation_text through the chosen channel before queuing the build. Never claim it was delivered unless the tool returns sent=true.
+- Read back the important details and wait for a clear confirmation on the phone. A text reply of YES also confirms them. If anything is corrected, send the updated confirmation again.
+- Do not use build_business_agent until the confirmation was delivered and the caller confirmed the details.
+- build_business_agent queues a background build; it does not keep the caller waiting. After it returns queued=true, say the setup will continue after the call and a tracked link will arrive when ready.
+- Never say the receptionist is already built or the setup link was already sent. The background worker sends it after the agent is ready.
+- Tell the caller they may hang up, then use end_call. Do not keep them on the line while research or setup runs.
 - Do not suggest switching into the live agent, live-testing the receptionist, connecting to the receptionist, or starting testing mode during phone onboarding.
-- Use send_setup_link only to retry the setup link if the automatic send failed or the caller asks for the link again.
-- Never claim a link was sent unless build_business_agent returns setupLinkSent=true or send_setup_link returns sent=true.
+- Use send_setup_link only for a caller who is still connected after a previously completed build.
 - Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, or asks to disconnect.
 - Keep responses brief and conversational.`;
       const qualificationPrompt = `${profile?.systemPrompt}
@@ -22114,7 +22648,7 @@ Live session identity and language:
         geminiReady = true;
         runBackground("log gemini.ready", () => logVoiceCallEvent(callControlId, "gemini.ready"));
         const greeting = isOnboarding
-          ? "Start the onboarding call now. In one short sentence, ask for the company name and website."
+          ? "Start the onboarding call now. Explain in one short sentence that you can prepare their AI receptionist, then ask for the company name and what the business does."
           : isQualification
             ? `Start the outbound qualification call. Ask for ${qualificationLead?.name || "the lead"} if appropriate, identify yourself as ${config.agentName || settings.agentName} calling for ${profile.businessName}, and ask if now is a good time for a quick follow-up.`
           : `Greet the caller briefly as ${config.agentName || settings.agentName}, the receptionist for ${profile.businessName}.`;
@@ -22848,6 +23382,7 @@ scheduleBookingFollowupWorker(5000);
 scheduleTrialPhoneNumberCleanupWorker(15000);
 scheduleTrialReminderWorker(20000);
 scheduleComplimentaryPlanWorker(25000);
+schedulePhoneOnboardingWorker(3000);
 
 server.listen(PORT, () => {
   const protocol = USE_HTTPS ? "https" : "http";

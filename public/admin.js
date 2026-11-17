@@ -194,6 +194,7 @@ const el = {
   sentDmDiagnostics: document.querySelector("#sentDmDiagnostics"),
   refreshOnboarding: document.querySelector("#refreshOnboarding"),
   onboardingList: document.querySelector("#onboardingList"),
+  onboardingFunnel: document.querySelector("#onboardingFunnel"),
 };
 
 let businesses = [];
@@ -1330,6 +1331,14 @@ async function loadOnboarding() {
   }
   el.onboardingRecordCalls.checked = Boolean(settings.onboardingRecordCalls);
   el.onboardingTranscription.checked = Boolean(settings.onboardingTranscription);
+  el.onboardingFunnel.innerHTML = "";
+  for (const [label, value] of Object.entries(sessionData.funnel || {})) {
+    const card = document.createElement("div");
+    card.innerHTML = "<span></span><strong></strong>";
+    card.querySelector("span").textContent = label.charAt(0).toUpperCase() + label.slice(1);
+    card.querySelector("strong").textContent = String(value);
+    el.onboardingFunnel.appendChild(card);
+  }
   el.onboardingList.innerHTML = "";
   for (const session of sessionData.sessions) {
     const item = document.createElement("details");
@@ -1345,9 +1354,18 @@ async function loadOnboarding() {
     const fields = [
       ["Website", session.businessProfile?.website || session.website],
       ["Email", session.email],
+      ["Delivery preference", session.deliveryPreference],
+      ["Text consent", session.textConsentAt ? `${new Date(session.textConsentAt).toLocaleString()} (${session.textConsentSource || "recorded"})` : null],
+      ["Text opted out", session.textOptedOutAt ? new Date(session.textOptedOutAt).toLocaleString() : null],
+      ["Build queued", session.buildQueuedAt ? new Date(session.buildQueuedAt).toLocaleString() : null],
+      ["Build completed", session.buildCompletedAt ? new Date(session.buildCompletedAt).toLocaleString() : null],
+      ["Build attempts", session.buildAttempts ? String(session.buildAttempts) : null],
       ["Message provider", session.messageProvider],
-      ["Persona tested", session.personaSwitchedAt ? new Date(session.personaSwitchedAt).toLocaleString() : null],
       ["Setup link sent", session.claimLinkSentAt ? new Date(session.claimLinkSentAt).toLocaleString() : null],
+      ["Text delivered", session.claimLinkTextSentAt ? new Date(session.claimLinkTextSentAt).toLocaleString() : null],
+      ["Email delivered", session.claimLinkEmailSentAt ? new Date(session.claimLinkEmailSentAt).toLocaleString() : null],
+      ["Link clicks", session.claimLinkClickCount ? `${session.claimLinkClickCount} · first ${new Date(session.claimLinkFirstClickedAt).toLocaleString()}` : null],
+      ["Claimed", session.claimedAt ? new Date(session.claimedAt).toLocaleString() : null],
       ["Recording", session.voiceCall.recordingUrl],
       ["Error", session.lastError],
     ];
@@ -1363,6 +1381,25 @@ async function loadOnboarding() {
       const transcript = document.createElement("pre");
       transcript.textContent = session.transcript;
       body.appendChild(transcript);
+    }
+    const events = Array.isArray(session.voiceCall?.events) ? session.voiceCall.events : [];
+    const linkClicks = Array.isArray(session.linkClicks)
+      ? session.linkClicks.map((click) => ({ eventType: `link.clicked.${click.channel}`, createdAt: click.createdAt, detail: {} }))
+      : [];
+    const history = [...events, ...linkClicks].sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt));
+    if (history.length) {
+      const timeline = document.createElement("div");
+      timeline.className = "onboarding-event-timeline";
+      const heading = document.createElement("h4");
+      heading.textContent = "Funnel history";
+      timeline.appendChild(heading);
+      for (const event of history) {
+        const row = document.createElement("p");
+        const detail = event.detail && typeof event.detail === "object" ? event.detail : {};
+        row.textContent = `${new Date(event.createdAt).toLocaleString()} · ${event.eventType}${detail.message ? ` · ${detail.message}` : ""}`;
+        timeline.appendChild(row);
+      }
+      body.appendChild(timeline);
     }
     item.append(summary, body);
     el.onboardingList.appendChild(item);

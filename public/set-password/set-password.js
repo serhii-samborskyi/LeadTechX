@@ -19,6 +19,7 @@ async function initialize() {
     const claim = await api(`/api/onboarding/claim?token=${encodeURIComponent(token)}`);
     title.textContent = `Keep ${claim.businessName}`;
     emailRequired = Boolean(claim.emailRequired);
+    document.querySelector("#ownerName").value = claim.ownerName || "";
     ownerEmail.value = claim.email || "";
     ownerEmail.required = emailRequired;
     ownerEmailLabel.hidden = !emailRequired;

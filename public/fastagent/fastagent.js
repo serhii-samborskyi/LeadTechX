@@ -92,6 +92,8 @@ const el = Object.fromEntries(
     "profileSaveButton",
     "copyAgentLinkButton",
     "profileMessage",
+    "profileBusinessName",
+    "profileWebsite",
     "profileSummary",
     "profilePhone",
     "profileAddress",
@@ -573,6 +575,8 @@ function profilePayload() {
   const calendarProvider = setProfileCalendarProvider(el.profileCalendarProvider.value);
   return {
     accessToken: state.accessToken,
+    businessName: el.profileBusinessName.value,
+    website: el.profileWebsite.value,
     summary: el.profileSummary.value,
     phone: el.profilePhone.value,
     address: el.profileAddress.value,
@@ -703,6 +707,10 @@ async function loadSubscriptionPlans() {
 
 function renderProfileFields(profile) {
   state.renderingProfile = true;
+  if (el.claimEmail && !el.claimEmail.value.trim() && profile.email) el.claimEmail.value = profile.email;
+  el.profileBusinessName.value = profile.businessName || "";
+  el.profileWebsite.value = profile.website || "";
+  el.agentTitle.textContent = `RingPort for ${profile.businessName || "your business"}`;
   el.agentSummary.textContent = profile.summary || "Your receptionist is ready.";
   el.profileSummary.value = editableProfileValue(profile.summary);
   el.profilePhone.value = editableProfileValue(profile.phone);
