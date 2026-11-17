@@ -46,6 +46,8 @@ import {
   DEFAULT_ONBOARDING_INSTRUCTIONS,
   ONBOARDING_CONVERSATION_RULES,
   ONBOARDING_OPENING_INSTRUCTION,
+  onboardingBuildClosingMessage,
+  phoneOnboardingLinkMessage,
 } from "./onboarding-conversation.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -5638,7 +5640,7 @@ function toolCompletionNotice(functionName, result) {
     }
     if (result?.ok) {
       return result?.queued
-        ? "Your receptionist is being prepared in the background. You can hang up, and I’ll send your secure setup link as soon as it is ready."
+        ? result.closingMessage || onboardingBuildClosingMessage(result.deliveryChannel)
         : "Your onboarding request was saved.";
     }
   }
@@ -11168,8 +11170,8 @@ async function pauseBookingFollowupsForInboundMessage(inbound) {
   return { count: result.count };
 }
 
-async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, profile = null, voiceCallId = null, metadata = {} }) {
-  const message = `Your RingPort agent for ${businessName} is ready. Review it and finish setup: ${setupUrl}\nReply STOP to opt out.`;
+async function deliverSetupLink({ settings, toPhone, setupUrl, businessName, profile = null, voiceCallId = null, metadata = {}, isReminder = false }) {
+  const message = phoneOnboardingLinkMessage({ businessName, setupUrl, isReminder });
   return deliverBusinessMessage({
     settings,
     profile,
@@ -11338,6 +11340,7 @@ async function deliverPhoneOnboardingLink({ session, profile, settings, isRemind
       businessName: profile.businessName,
       voiceCallId: session.voiceCallId,
       metadata: { onboardingSessionId: session.id, reminder: isReminder },
+      isReminder,
     });
     result.textSent = true;
     result.provider = delivery.provider;
@@ -21662,6 +21665,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   let suppressedInputChunks = 0;
   const loggedSuppressedInputReasons = new Set();
   let closing = false;
+  let pendingAgentHangup = null;
   let bridgeDetachedForTransfer = false;
   let transferDetachDetail = null;
   let activePhoneToolCalls = 0;
@@ -21909,6 +21913,8 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       });
       return;
     }
+    if (pendingAgentHangup?.timer) clearTimeout(pendingAgentHangup.timer);
+    pendingAgentHangup = null;
     closing = true;
     silenceGuard?.stop();
     await logVoiceCallEvent(callControlId, "hangup.requested", { reason });
@@ -21922,6 +21928,55 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
     }
   };
 
+  const finishPendingAgentHangup = () => {
+    const pending = pendingAgentHangup;
+    if (!pending || outboundAudioQueue.length || agentAudioPlaying || closing) return;
+    pendingAgentHangup = null;
+    if (pending.timer) clearTimeout(pending.timer);
+    logVoiceCallEvent(callControlId, "hangup.agent_audio_completed", {
+      reason: pending.reason,
+      waitedMs: Date.now() - pending.requestedAt,
+      outboundFramesQueued,
+      outboundFramesSent,
+    }).catch(() => {});
+    setTimeout(() => hangup(pending.reason), 350);
+  };
+
+  const requestHangupAfterAgentAudio = (reason = "normal_clearing") => {
+    if (closing || bridgeDetachedForTransfer) return;
+    if (pendingAgentHangup?.timer) clearTimeout(pendingAgentHangup.timer);
+    const hasAudio = agentAudioPlaying || outboundAudioQueue.length > 0;
+    if (!hasAudio) {
+      logVoiceCallEvent(callControlId, "hangup.no_agent_audio_pending", { reason }).catch(() => {});
+      setTimeout(() => hangup(reason), 800);
+      return;
+    }
+    const pending = {
+      reason,
+      requestedAt: Date.now(),
+      timer: null,
+    };
+    pending.timer = setTimeout(() => {
+      if (pendingAgentHangup !== pending) return;
+      pendingAgentHangup = null;
+      logVoiceCallEvent(callControlId, "hangup.agent_audio_fallback", {
+        reason,
+        waitedMs: Date.now() - pending.requestedAt,
+        outboundFramesQueued,
+        outboundFramesSent,
+      }).catch(() => {});
+      hangup(reason);
+    }, 15 * 1000);
+    pendingAgentHangup = pending;
+    logVoiceCallEvent(callControlId, "hangup.waiting_for_agent_audio", {
+      reason,
+      hasAudio: true,
+      queueDepth: outboundAudioQueue.length,
+      outboundFramesQueued,
+      outboundFramesSent,
+    }).catch(() => {});
+  };
+
   const detachBridgeAfterTransfer = async (result) => {
     if (bridgeDetachedForTransfer) return;
     bridgeDetachedForTransfer = true;
@@ -21930,6 +21985,8 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       transferMessageId: result?.transferMessageId || null,
       detachedAt: new Date().toISOString(),
     };
+    if (pendingAgentHangup?.timer) clearTimeout(pendingAgentHangup.timer);
+    pendingAgentHangup = null;
     closing = true;
     silenceGuard?.stop();
     clearTelnyxPlayback("call_transfer_detach", 0);
@@ -22078,6 +22135,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
         clearOutboundAudioQueue(250);
         maybeEnableCallerInputAfterPlayback();
         silenceGuard?.noteAgentPlaybackEnded();
+        finishPendingAgentHangup();
         return;
       }
       sendTelnyxAudioPayload(payload);
@@ -22329,7 +22387,8 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
         queued: true,
         callerMayHangUp: true,
         deliveryChannel,
-        message: "The build is queued. It will continue after this call and send a tracked setup link when ready.",
+        closingMessage: onboardingBuildClosingMessage(deliveryChannel),
+        message: "The build is queued. A tracked setup link will be sent when the agent is ready, and unopened links receive a reminder.",
       };
     }
     if (functionCall.name === "send_onboarding_confirmation_text") {
@@ -22519,7 +22578,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
         }
         sendGeminiUserText(
           confirmedByText
-            ? `The caller just replied YES and confirmed the details for ${onboardingConfirmedBusinessName} (${onboardingConfirmedWebsite || "no website"}). Call build_business_agent to queue the background build. When it returns queued=true, explain that they may hang up and the tracked setup link will arrive when ready, then end the call.`
+            ? `The caller just replied YES and confirmed the details for ${onboardingConfirmedBusinessName} (${onboardingConfirmedWebsite || "no website"}). Call build_business_agent to queue the background build. When it returns queued=true, say its closingMessage exactly, then use end_call.`
             : `The caller just replied during this onboarding call: "${text}". Treat it as caller-provided information. If it corrects any business detail, repeat the correction and send the updated confirmation through the same approved channel. Do not queue the build until they clearly confirm.`,
         );
         return {
@@ -22575,9 +22634,9 @@ Phone onboarding context:
 - Use send_onboarding_confirmation_text through the chosen channel before queuing the build. Never claim it was delivered unless the tool returns sent=true.
 - After sending the confirmation, ask whether it looks right and wait for a clear answer. A text reply of YES also confirms it. If anything is corrected, send the updated confirmation again.
 - Do not use build_business_agent until the confirmation was delivered and the caller confirmed the details.
-- build_business_agent queues a background build; it does not keep the caller waiting. After it returns queued=true, say the setup will continue after the call and a tracked link will arrive when ready.
+- build_business_agent queues a background build; it does not keep the caller waiting. After it returns queued=true, say the returned closingMessage exactly. It tells the caller that the agent will be built, a link to try it will be sent, and an unopened link will receive a reminder.
 - Never say the receptionist is already built or the setup link was already sent. The background worker sends it after the agent is ready.
-- Tell the caller they may hang up, then use end_call. Do not keep them on the line while research or setup runs.
+- After saying closingMessage, use end_call. Do not keep the caller on the line while research or setup runs.
 - Do not suggest switching into the live agent, live-testing the receptionist, connecting to the receptionist, or starting testing mode during phone onboarding.
 - Use send_setup_link only for a caller who is still connected after a previously completed build.
 - Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, or asks to disconnect.
@@ -22810,13 +22869,15 @@ Live session identity and language:
       if (message.toolCall) {
         activePhoneToolCalls += 1;
         try {
-          if (agentOutputActive()) clearTelnyxPlayback("tool_call_started", 100);
+          const functionCalls = message.toolCall.functionCalls || [];
+          const requestsEndCall = functionCalls.some((functionCall) => functionCall.name === "end_call");
+          if (agentOutputActive() && !requestsEndCall) clearTelnyxPlayback("tool_call_started", 100);
           const functionResponses = [];
           let shouldEndCall = false;
           let endReason = "Call completed";
           let personaPrompt = null;
           let detachAfterTransfer = null;
-          for (const functionCall of message.toolCall.functionCalls || []) {
+          for (const functionCall of functionCalls) {
             try {
               const toolContext = {
                 channel: "phone",
@@ -22869,7 +22930,7 @@ Live session identity and language:
             }
           }
           if (detachAfterTransfer) await detachBridgeAfterTransfer(detachAfterTransfer);
-          if (shouldEndCall) setTimeout(() => hangup(endReason), 1200);
+          if (shouldEndCall) requestHangupAfterAgentAudio(endReason);
         } finally {
           activePhoneToolCalls = Math.max(0, activePhoneToolCalls - 1);
           silenceGuard?.notePauseEnded();

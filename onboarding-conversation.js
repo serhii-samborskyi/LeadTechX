@@ -4,6 +4,20 @@ export const DEFAULT_ONBOARDING_INSTRUCTIONS =
 export const ONBOARDING_OPENING_INSTRUCTION =
   "Begin the call now. Say exactly: \"Hi, I'm RingPort's setup assistant. Tell me a little about your business.\" Then stop speaking and wait for the caller.";
 
+export function onboardingBuildClosingMessage(deliveryChannel = "text") {
+  const delivery = String(deliveryChannel || "text").trim().toLowerCase() === "email" ? "email" : "text";
+  return `Great, I'll build your agent now and ${delivery} you a link to try it. If the link isn't opened, I'll send a reminder. Thanks for calling RingPort.`;
+}
+
+export function phoneOnboardingLinkMessage({ businessName, setupUrl, isReminder = false }) {
+  const name = String(businessName || "your business").replace(/\s+/g, " ").trim() || "your business";
+  const url = String(setupUrl || "").trim();
+  const introduction = isReminder
+    ? `Just checking that you received your RingPort setup link for ${name}. Tap it to try your agent:`
+    : `Your RingPort agent for ${name} is ready. Try it and finish setup here:`;
+  return `${introduction}\n\n${url}\n\nReply STOP to opt out.`;
+}
+
 export const ONBOARDING_CONVERSATION_RULES = `Conversation pacing rules:
 - Use no more than two short sentences per turn and ask exactly one question at a time.
 - After asking a question, stop speaking and wait for the caller's answer. Never continue into the next question in the same turn.
