@@ -2,8 +2,9 @@ import * as internal from "./providers/internal.js";
 import * as vagaro from "./providers/vagaro.js";
 import * as googleCalendar from "./providers/google-calendar.js";
 import * as calendly from "./providers/calendly.js";
+import * as custom from "./providers/custom.js";
 
-const providers = { internal, vagaro, google_calendar: googleCalendar, calendly };
+const providers = { internal, vagaro, google_calendar: googleCalendar, calendly, custom };
 
 export function getCalendarProvider(name = "internal") {
   const provider = providers[name];

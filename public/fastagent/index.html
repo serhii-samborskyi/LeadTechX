@@ -80,15 +80,21 @@
               <label class="wide compact"><span>Agent language <i data-lucide="pencil-line" aria-hidden="true"></i></span><select id="profileLanguage"><option selected>English</option><option>Spanish</option><option>French</option><option>German</option><option>Italian</option><option>Portuguese</option><option>Polish</option><option>Ukrainian</option><option>Russian</option><option>Arabic</option><option>Hindi</option><option>Japanese</option><option>Korean</option><option>Chinese</option></select></label>
               <label class="wide compact fast-booking-provider">
                 <span>Booking system <i data-lucide="pencil-line" aria-hidden="true"></i></span>
-                <select id="profileCalendarProvider" aria-describedby="profileCalendarHelp" aria-controls="profileVagaroField">
+                <select id="profileCalendarProvider" aria-describedby="profileCalendarHelp" aria-controls="profileVagaroField profileCustomBookingField">
                   <option value="internal">RingPort calendar</option>
                   <option value="vagaro">Vagaro</option>
                   <option value="google_calendar">Google Calendar</option>
                   <option value="calendly">Calendly</option>
+                  <option value="custom">Custom booking link</option>
                 </select>
                 <small id="profileCalendarHelp" class="fast-field-help">Book directly in RingPort's built-in calendar.</small>
               </label>
               <label class="wide" id="profileVagaroField" hidden><span>Vagaro business link <i data-lucide="pencil-line" aria-hidden="true"></i></span><input id="profileVagaroUrl" type="text" inputmode="url" autocomplete="url" placeholder="https://www.vagaro.com/yourbusiness/services" /></label>
+              <label class="wide" id="profileCustomBookingField" hidden>
+                <span>Customer booking link <i data-lucide="pencil-line" aria-hidden="true"></i></span>
+                <input id="profileCustomBookingUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://yourbusiness.com/book" />
+                <small class="fast-field-help">RingPort collects the required details, then sends this tracked link. Customers finish on your website.</small>
+              </label>
             </div>
             <p class="form-message" id="profileMessage"></p>
           </form>
@@ -106,20 +112,31 @@
         </section>
 
         <section class="fast-section fast-claim">
-          <div><h2>Keep this receptionist</h2><p id="claimIntro">Set your password from the secure link sent to your email.</p></div>
+          <div class="fast-continue-heading"><h2 id="continueTitle">Choose how to continue</h2><p id="claimIntro">Activate a plan now, or start with a trial.</p></div>
+          <label class="fast-checkout-email" id="claimEmailField">
+            <span>Business email</span>
+            <input id="claimEmail" type="email" placeholder="you@business.com" autocomplete="email" form="claimForm" required />
+            <small>Used for your receipt and secure account setup.</small>
+          </label>
           <a class="button-link fast-finish-link" id="finishSetupLink" href="#" hidden><i data-lucide="key-round"></i><span>Finish account setup</span></a>
-          <form class="fast-inline-form" id="claimForm">
-            <input id="claimEmail" type="email" placeholder="you@business.com" autocomplete="email" required />
-            <button class="primary" type="submit"><i data-lucide="mail"></i><span>Send link</span></button>
-          </form>
           <div class="fast-paid-start" id="paidPlanSection" hidden>
-            <div class="fast-paid-divider"><span>Or start a paid plan now</span></div>
+            <div class="fast-paid-heading">
+              <h3>Activate your agent now</h3>
+              <p>Choose a plan and continue to secure checkout. No trial required.</p>
+            </div>
             <div class="fast-period-toggle" id="billingPeriodToggle" role="group" aria-label="Billing period">
               <button type="button" data-period="1">Monthly</button>
               <button type="button" data-period="12">Annual <span id="annualDiscountLabel">25% off</span></button>
             </div>
             <div class="fast-plan-list" id="paidPlanList"></div>
-            <button class="fast-paid-button" id="paidCheckoutButton" type="button"><i data-lucide="credit-card"></i><span>Start selected plan</span></button>
+            <button class="fast-paid-button" id="paidCheckoutButton" type="button"><i data-lucide="credit-card"></i><span>Start paid plan</span></button>
+            <small class="fast-checkout-note">You will create your password after payment.</small>
+          </div>
+          <div class="fast-trial-option" id="trialOption">
+            <div><h3>Want to try it first?</h3><p id="trialOptionCopy">Start a free trial and finish setup from the secure link in your email.</p></div>
+            <form id="claimForm">
+              <button class="fast-trial-button" type="submit"><i data-lucide="mail"></i><span>Start free trial</span></button>
+            </form>
           </div>
           <p class="form-message" id="claimMessage"></p>
         </section>

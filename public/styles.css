@@ -675,9 +675,42 @@ body {
   color: #fff;
 }
 
-.fast-claim > div p {
-  margin: 7px 0 18px;
+.fast-continue-heading {
+  margin-bottom: 18px;
+}
+
+.fast-continue-heading p,
+.fast-paid-heading p,
+.fast-trial-option p {
+  margin: 6px 0 0;
   color: #bed0c9;
+}
+
+.fast-checkout-email {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 18px;
+  color: #fff;
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.fast-checkout-email input {
+  min-height: 48px;
+  border-color: rgba(255, 255, 255, 0.28);
+  background: #fff;
+  color: #17221e;
+}
+
+.fast-checkout-email input:focus {
+  border-color: #72c79d;
+  box-shadow: 0 0 0 3px rgba(114, 199, 157, 0.2);
+}
+
+.fast-checkout-email small {
+  color: #bed0c9;
+  font-size: 0.76rem;
+  font-weight: 600;
 }
 
 .fast-claim .button-link {
@@ -697,26 +730,23 @@ body {
 
 .fast-paid-start {
   display: grid;
-  gap: 12px;
-  margin-top: 18px;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(114, 199, 157, 0.5);
+  border-radius: 10px;
+  background: rgba(114, 199, 157, 0.1);
 }
 
-.fast-paid-divider {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: #bed0c9;
-  font-size: 0.78rem;
-  font-weight: 800;
-  text-transform: uppercase;
+.fast-paid-heading h3,
+.fast-trial-option h3 {
+  margin: 0;
+  font-size: 1rem;
 }
 
-.fast-paid-divider::before,
-.fast-paid-divider::after {
-  content: "";
-  height: 1px;
-  flex: 1;
-  background: rgba(255, 255, 255, 0.18);
+.fast-paid-heading p,
+.fast-trial-option p {
+  font-size: 0.86rem;
+  line-height: 1.45;
 }
 
 .fast-period-toggle {
@@ -764,12 +794,16 @@ body {
 
 .fast-plan-option {
   display: grid;
+  align-content: start;
+  align-items: start;
+  justify-content: stretch;
+  justify-items: stretch;
   gap: 8px;
-  min-height: 112px;
-  padding: 13px;
+  min-height: 170px;
+  padding: 14px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
   color: #fff;
   text-align: left;
   box-shadow: none;
@@ -779,6 +813,10 @@ body {
 .fast-plan-option.active {
   border-color: #72c79d;
   background: rgba(114, 199, 157, 0.16);
+}
+
+.fast-plan-option.active {
+  box-shadow: inset 0 0 0 1px rgba(114, 199, 157, 0.55);
 }
 
 .fast-plan-option.waitlisted {
@@ -808,6 +846,29 @@ body {
   white-space: nowrap;
 }
 
+.fast-plan-minutes {
+  display: grid;
+  gap: 1px;
+  margin-top: 3px;
+}
+
+.fast-plan-minutes strong {
+  color: #fff;
+  font-size: 1.05rem;
+  line-height: 1.15;
+}
+
+.fast-plan-minutes span,
+.fast-plan-credits {
+  color: #d8f4e7;
+  font-size: 0.74rem;
+  font-weight: 750;
+}
+
+.fast-plan-credits {
+  color: #bed0c9;
+}
+
 .fast-plan-slot {
   justify-self: start;
   border-radius: 999px;
@@ -823,19 +884,60 @@ body {
   color: #ffd9cf;
 }
 
-.fast-plan-option small {
+.fast-plan-features {
   color: #bed0c9;
-  font-size: 0.78rem;
-  font-weight: 700;
+  font-size: 0.74rem;
+  font-weight: 650;
   line-height: 1.35;
 }
 
 .fast-paid-button {
-  justify-self: end;
+  width: 100%;
+  min-height: 50px;
+  justify-self: stretch;
   border-color: transparent;
   background: #fff;
   color: #20352e;
   font-weight: 850;
+}
+
+.fast-paid-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.fast-checkout-note {
+  color: #bed0c9;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.fast-trial-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.fast-trial-button {
+  min-height: 44px;
+  border-color: rgba(255, 255, 255, 0.36);
+  background: transparent;
+  color: #fff;
+  box-shadow: none;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.fast-trial-button:hover {
+  border-color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.fast-trial-button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .fast-transcript-wrap {
@@ -913,7 +1015,9 @@ body {
   .fast-profile-grid .wide { grid-column: auto; }
   .fast-inline-form { flex-wrap: wrap; }
   .fast-claim .button-link { width: 100%; }
-  .fast-claim .fast-inline-form button { width: 100%; }
+  .fast-plan-list { grid-template-columns: 1fr; }
+  .fast-trial-option { grid-template-columns: 1fr; }
+  .fast-trial-button { width: 100%; }
   .fast-paid-button { width: 100%; justify-self: stretch; }
 }
 
@@ -6852,6 +6956,10 @@ a.appointment-field-value {
   .data-row.booking-link-row,
   .booking-service-link-tools,
   .data-row.appointment-row {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-panel .booking-provider-grid {
     grid-template-columns: 1fr;
   }
 

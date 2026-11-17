@@ -42,6 +42,7 @@ run("npx", ["prisma", "validate"]);
 run(process.execPath, ["scripts/test-call-silence-guard.js"]);
 run(process.execPath, ["scripts/test-meta-platform.js"]);
 run(process.execPath, ["scripts/test-booking-prefill.js"]);
+run(process.execPath, ["scripts/test-custom-booking-provider.js"]);
 run(process.execPath, ["scripts/test-crm-grouping.js"]);
 run(process.execPath, ["scripts/test-onboarding-conversation.js"]);
 

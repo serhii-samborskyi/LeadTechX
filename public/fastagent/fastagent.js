@@ -1,3 +1,14 @@
+import { receiveLandingEmail } from "./landing-email.js";
+
+const emailParam = receiveLandingEmail({
+  location: window.location,
+  history: window.history,
+  sessionStorage: {
+    getItem: (key) => window.sessionStorage.getItem(key),
+    setItem: (key, value) => window.sessionStorage.setItem(key, value),
+    removeItem: (key) => window.sessionStorage.removeItem(key),
+  },
+});
 const params = new URLSearchParams(window.location.search);
 function normalizeWebsiteInput(value) {
   const trimmed = String(value || "").trim();
@@ -20,7 +31,6 @@ const accessTokenFromUrl = (params.get("token") || params.get("access_token") ||
 const mobileDeviceIdFromUrl = (params.get("mobile_device_id") || params.get("mobileDeviceId") || "").trim();
 const shortCodeFromPath = /^\/(\d{8})\/?$/.exec(window.location.pathname)?.[1] || "";
 const claimToken = (params.get("claim_token") || "").trim();
-const emailParam = (params.get("email") || params.get("owner_email") || params.get("ownerEmail") || "").trim();
 const requestedPlan = (params.get("plan") || params.get("plan_slug") || params.get("subscription_plan") || "").trim();
 const requestedPeriod = normalizeBillingPeriodInput(params.get("period") || params.get("billing_period") || params.get("billingPeriod"));
 const storageKey = placeId
@@ -60,6 +70,9 @@ const state = {
   requestedPlan,
   billingPeriodMonths: requestedPeriod,
   annualDiscountPercent: 25,
+  aiCallMinuteCredits: 20,
+  trialDays: 0,
+  trialCredits: 0,
   billingReady: false,
 };
 
@@ -105,6 +118,8 @@ const el = Object.fromEntries(
     "profileCalendarHelp",
     "profileVagaroField",
     "profileVagaroUrl",
+    "profileCustomBookingField",
+    "profileCustomBookingUrl",
     "phoneSection",
     "phoneLimit",
     "demoPhone",
@@ -113,6 +128,8 @@ const el = Object.fromEntries(
     "callerPhones",
     "callerMessage",
     "claimIntro",
+    "continueTitle",
+    "claimEmailField",
     "finishSetupLink",
     "claimForm",
     "claimEmail",
@@ -121,6 +138,8 @@ const el = Object.fromEntries(
     "annualDiscountLabel",
     "paidPlanList",
     "paidCheckoutButton",
+    "trialOption",
+    "trialOptionCopy",
     "claimMessage",
     "transcript",
   ].map((id) => [id, document.querySelector(`#${id}`)]),
@@ -129,6 +148,14 @@ const el = Object.fromEntries(
 if (el.planInput) el.planInput.value = requestedPlan;
 if (el.periodInput) el.periodInput.value = String(state.billingPeriodMonths);
 if (el.claimEmail && emailParam) el.claimEmail.value = emailParam;
+if (emailParam) {
+  const entryForm = document.querySelector(".fast-entry-form");
+  if (entryForm) {
+    const next = new URL(entryForm.action, location.href);
+    next.hash = new URLSearchParams({ email: emailParam }).toString();
+    entryForm.action = next.href;
+  }
+}
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -388,7 +415,7 @@ function updateBillingPeriodUi() {
   if (el.periodInput) el.periodInput.value = String(state.billingPeriodMonths);
   if (el.annualDiscountLabel) el.annualDiscountLabel.textContent = `${annualDiscountPercent()}% off`;
   const checkoutLabel = el.paidCheckoutButton?.querySelector("span");
-  if (checkoutLabel) checkoutLabel.textContent = state.billingPeriodMonths === 12 ? "Start annual plan" : "Start selected plan";
+  if (checkoutLabel) checkoutLabel.textContent = state.billingPeriodMonths === 12 ? "Start annual plan" : "Start paid plan";
   if (!el.billingPeriodToggle) return;
   for (const button of el.billingPeriodToggle.querySelectorAll("button[data-period]")) {
     const active = normalizeBillingPeriodInput(button.dataset.period) === state.billingPeriodMonths;
@@ -556,6 +583,7 @@ const fastCalendarProviderHelp = {
   vagaro: "Add the public Vagaro business link below to import services and send customers to book.",
   google_calendar: "Connect Google Calendar after account setup. RingPort calendar stays active for this demo.",
   calendly: "Connect Calendly after account setup. RingPort calendar stays active for this demo.",
+  custom: "Send customers a tracked link to your existing booking page.",
 };
 
 function setProfileCalendarProvider(value) {
@@ -566,8 +594,11 @@ function setProfileCalendarProvider(value) {
   el.profileCalendarProvider.value = provider;
   el.profileCalendarHelp.textContent = fastCalendarProviderHelp[provider];
   const usesVagaro = provider === "vagaro";
+  const usesCustomBooking = provider === "custom";
   el.profileVagaroField.hidden = !usesVagaro;
   el.profileVagaroUrl.required = usesVagaro;
+  el.profileCustomBookingField.hidden = !usesCustomBooking;
+  el.profileCustomBookingUrl.required = usesCustomBooking;
   return provider;
 }
 
@@ -586,13 +617,23 @@ function profilePayload() {
     language: el.profileLanguage.value,
     calendarProvider,
     vagaroBusinessUrl: calendarProvider === "vagaro" ? el.profileVagaroUrl.value : "",
+    customBookingUrl: calendarProvider === "custom" ? el.profileCustomBookingUrl.value : "",
+    customBookingLabel: "Book online",
   };
 }
 
+function numberLabel(value) {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(Math.max(0, Number(value || 0)));
+}
+
+function estimatedMonthlyAiMinutes(plan) {
+  const creditsPerMinute = Math.max(0, Number(state.aiCallMinuteCredits || 0));
+  if (!creditsPerMinute) return null;
+  return Math.floor(Math.max(0, Number(plan?.monthlyCredits || 0)) / creditsPerMinute);
+}
+
 function fastPlanFeatures(plan) {
-  const billing = planBillingForCurrentPeriod(plan);
   return [
-    billing.months === 12 ? `${billing.credits} credits for 12 months` : `${plan.monthlyCredits || 0} monthly credits`,
     `${plan.maxPhoneNumbers || 1} phone number${Number(plan.maxPhoneNumbers || 1) === 1 ? "" : "s"}`,
     plan.outboundQualificationEnabled ? "Outbound lead calling" : null,
     plan.smartReviewsEnabled ? "Review links and recovery" : null,
@@ -606,7 +647,9 @@ function selectPaidPlan(planId) {
   const nextPlan = (state.subscriptionPlans || []).find((plan) => Number(plan.id) === Number(planId));
   state.selectedPlanId = nextPlan && !planWaitlistedForCurrent(nextPlan) ? Number(nextPlan.id) : null;
   for (const card of el.paidPlanList.querySelectorAll(".fast-plan-option")) {
-    card.classList.toggle("active", Number(card.dataset.planId) === state.selectedPlanId);
+    const active = Number(card.dataset.planId) === state.selectedPlanId;
+    card.classList.toggle("active", active);
+    card.setAttribute("aria-pressed", active ? "true" : "false");
   }
   el.paidCheckoutButton.disabled = !canCheckoutSelectedPlan();
 }
@@ -668,10 +711,27 @@ function renderPaidPlans() {
     if (planWaitlistedForCurrent(plan)) card.classList.add("waitlisted");
     card.disabled = planWaitlistedForCurrent(plan);
     card.dataset.planId = String(plan.id);
-    card.innerHTML = '<span class="fast-plan-top"><strong></strong><b></b></span><span class="fast-plan-slot"></span><small></small>';
+    card.innerHTML = [
+      '<span class="fast-plan-top"><strong></strong><b></b></span>',
+      '<span class="fast-plan-minutes"><strong></strong><span>AI call minutes / month</span></span>',
+      '<span class="fast-plan-credits"></span>',
+      '<span class="fast-plan-slot"></span>',
+      '<small class="fast-plan-features"></small>',
+    ].join("");
     const billing = planBillingForCurrentPeriod(plan);
     card.querySelector("strong").textContent = plan.name || "Plan";
     card.querySelector("b").textContent = `${moneyFromCents(billing.priceCents)}${billing.months === 12 ? "/yr" : "/mo"}`;
+    const minutes = estimatedMonthlyAiMinutes(plan);
+    const minutesRow = card.querySelector(".fast-plan-minutes");
+    if (minutes === null) {
+      minutesRow.remove();
+    } else {
+      minutesRow.querySelector("strong").textContent = `About ${numberLabel(minutes)}`;
+    }
+    card.querySelector(".fast-plan-credits").textContent =
+      billing.months === 12
+        ? `${numberLabel(billing.credits)} credits included for 12 months`
+        : `${numberLabel(plan.monthlyCredits)} credits included monthly`;
     const slot = card.querySelector(".fast-plan-slot");
     if (plan.signupLimit) {
       slot.textContent = planWaitlistedForCurrent(plan)
@@ -684,7 +744,7 @@ function renderPaidPlans() {
     } else {
       slot.remove();
     }
-    card.querySelector("small").textContent = fastPlanFeatures(plan).join(" · ");
+    card.querySelector(".fast-plan-features").textContent = fastPlanFeatures(plan).join(" • ");
     card.addEventListener("click", () => selectPaidPlan(plan.id));
     el.paidPlanList.appendChild(card);
   }
@@ -697,7 +757,16 @@ async function loadSubscriptionPlans() {
     const data = await api("/api/onboarding/subscription-plans");
     state.subscriptionPlans = data.plans || [];
     state.annualDiscountPercent = Number(data.billing?.annualPrepayDiscountPercent ?? 25);
+    state.aiCallMinuteCredits = Number(data.billing?.aiCallMinuteCredits ?? 20);
+    state.trialDays = Number(data.trial?.days || 0);
+    state.trialCredits = Number(data.trial?.credits || 0);
     state.billingReady = Boolean(data.stripe?.ready);
+    if (el.trialOptionCopy && state.trialDays > 0) {
+      const trialMinutes = state.aiCallMinuteCredits > 0 ? Math.floor(state.trialCredits / state.aiCallMinuteCredits) : null;
+      el.trialOptionCopy.textContent = `Start a ${state.trialDays}-day free trial${
+        trialMinutes !== null ? ` with about ${numberLabel(trialMinutes)} AI call minutes` : ""
+      }. No credit card required.`;
+    }
   } catch {
     state.subscriptionPlans = [];
     state.billingReady = false;
@@ -720,6 +789,7 @@ function renderProfileFields(profile) {
   el.profileServices.value = editableProfileValue(profile.services);
   setProfileLanguage(profile.language);
   el.profileVagaroUrl.value = profile.vagaroBusinessUrl || "";
+  el.profileCustomBookingUrl.value = profile.customBookingUrl || "";
   setProfileCalendarProvider(
     profile.calendarProviderPreference || (profile.vagaroBusinessUrl ? "vagaro" : profile.activeCalendarProvider),
   );
@@ -735,6 +805,11 @@ async function saveProfile({ silent = false } = {}) {
     el.profileMessage.textContent = "Enter the Vagaro business link";
     el.profileVagaroUrl.focus();
     throw new Error("Enter the Vagaro business link");
+  }
+  if (el.profileCalendarProvider.value === "custom" && !el.profileCustomBookingUrl.value.trim()) {
+    el.profileMessage.textContent = "Enter the customer booking link";
+    el.profileCustomBookingUrl.focus();
+    throw new Error("Enter the customer booking link");
   }
   el.profileSaveButton.disabled = true;
   if (!silent) el.profileMessage.textContent = "Saving profile";
@@ -806,13 +881,19 @@ function renderAgent(data) {
   el.phoneLimit.textContent = data.demoCallerLimit ? `Up to ${data.demoCallerLimit} callers` : "";
   renderCallers(data.callerPhones);
   if (state.claimToken) {
-    el.claimIntro.textContent = "Review the details, test the receptionist, then finish account setup.";
+    el.continueTitle.textContent = "Finish setting up your agent";
+    el.claimIntro.textContent = "Complete account setup, or activate a paid plan now.";
+    el.claimEmailField.hidden = true;
+    el.trialOption.hidden = true;
     el.claimForm.hidden = true;
     el.finishSetupLink.hidden = false;
     el.finishSetupLink.href = `/set-password/?token=${encodeURIComponent(state.claimToken)}`;
     el.claimMessage.textContent = "Save any edits before finishing setup.";
   } else {
-    el.claimIntro.textContent = "Start your trial by sending a secure setup link to your email.";
+    el.continueTitle.textContent = "Choose how to continue";
+    el.claimIntro.textContent = "Activate a plan now, or start with a free trial.";
+    el.claimEmailField.hidden = false;
+    el.trialOption.hidden = false;
     el.claimForm.hidden = false;
     el.finishSetupLink.hidden = true;
     el.claimMessage.textContent = "";
@@ -1103,6 +1184,7 @@ el.stopButton.addEventListener("click", () => stopCall());
 el.profileCalendarProvider.addEventListener("change", () => {
   const provider = setProfileCalendarProvider(el.profileCalendarProvider.value);
   if (provider === "vagaro") el.profileVagaroUrl.focus();
+  if (provider === "custom") el.profileCustomBookingUrl.focus();
 });
 function markProfileDirty() {
   if (state.renderingProfile) return;
@@ -1224,9 +1306,10 @@ el.paidCheckoutButton.addEventListener("click", async () => {
   try {
     await saveProfile({ silent: true });
     const email = state.claimToken ? "" : el.claimEmail.value.trim();
-    if (!state.claimToken && !email) {
+    if (!state.claimToken && !el.claimEmail.checkValidity()) {
+      el.claimEmail.reportValidity();
       el.claimEmail.focus();
-      throw new Error("Enter your email before checkout.");
+      throw new Error(email ? "Enter a valid email before checkout." : "Enter your email before checkout.");
     }
     const data = await api("/api/onboarding/fast-agent/checkout", {
       method: "POST",

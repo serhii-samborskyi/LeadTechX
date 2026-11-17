@@ -561,6 +561,12 @@ function publicBusinessProfile(profile, config = null) {
     address: rawData.address || "",
     email: rawData.email || "",
     vagaroBusinessUrl: rawData.vagaroBusinessUrl || "",
+    customBookingUrl:
+      rawData.customBookingUrl ||
+      (activeCalendarProvider === "custom" ? profileConfig.providerConfig?.bookingUrl || "" : ""),
+    customBookingLabel:
+      rawData.customBookingLabel ||
+      (activeCalendarProvider === "custom" ? profileConfig.providerConfig?.label || "Book online" : "Book online"),
     calendarProviderPreference,
     activeCalendarProvider,
     language: profileConfig.language || "English",
@@ -6628,7 +6634,7 @@ function fastAgentShortUrl(req, settings, shortCode) {
 
 function normalizedBookingProvider(value) {
   const provider = String(value || "").trim().toLowerCase();
-  return ["vagaro", "google_calendar", "calendly"].includes(provider) ? provider : "internal";
+  return ["vagaro", "google_calendar", "calendly", "custom"].includes(provider) ? provider : "internal";
 }
 
 function normalizedVagaroMode(value, fallback = "api") {
@@ -8115,9 +8121,16 @@ async function bookingDataForProfile(profile, settings = null, req = null) {
   const activeConnection = connections.find((connection) => connection.provider === activeProvider) || null;
   const vagaroConnection = connections.find((connection) => connection.provider === "vagaro") || null;
   const internalConnection = connections.find((connection) => connection.provider === "internal") || null;
+  const customConnection = connections.find((connection) => connection.provider === "custom") || null;
   const internalLink = internalConnection
     ? await prisma.bookingLink.findFirst({
         where: { connectionId: internalConnection.id, active: true, serviceId: null, professionalId: null },
+        orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+      })
+    : null;
+  const customLink = customConnection
+    ? await prisma.bookingLink.findFirst({
+        where: { connectionId: customConnection.id, active: true, serviceId: null, professionalId: null },
         orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
       })
     : null;
@@ -8180,6 +8193,14 @@ async function bookingDataForProfile(profile, settings = null, req = null) {
       publicUrl: internalLink?.url || internalConnection?.bookingUrl || "",
       trackingUrl: internalLink
         ? bookingLinkTrackingUrl({ settings: activeSettings, req, config, link: await ensureBookingLinkShortCode(internalLink) })
+        : "",
+    },
+    customBooking: {
+      enabled: config.calendarProvider === "custom" && customConnection?.status === "active",
+      label: customLink?.label || customConnection?.displayName || "Book online",
+      url: customLink?.url || customConnection?.bookingUrl || "",
+      trackingUrl: customLink
+        ? bookingLinkTrackingUrl({ settings: activeSettings, req, config, link: await ensureBookingLinkShortCode(customLink) })
         : "",
     },
     platformConnections: {
@@ -8265,6 +8286,50 @@ async function ensureGeneralBookingLinkForConnection(connection, { label = "", u
     data: { active: false },
   });
   return link;
+}
+
+async function configureCustomBookingLink({ profile, config, bookingUrl, label = "Book online" }) {
+  const safeUrl = normalizeGoalDestinationUrl(bookingUrl);
+  const safeLabel = String(label || "Book online").trim().slice(0, 120) || "Book online";
+  const current = await prisma.bookingConnection.findUnique({
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "custom" } },
+  });
+  const currentSettings = current?.settings && typeof current.settings === "object" ? current.settings : {};
+  const connection = await prisma.bookingConnection.upsert({
+    where: { businessProfileId_provider: { businessProfileId: profile.id, provider: "custom" } },
+    create: {
+      businessProfileId: profile.id,
+      provider: "custom",
+      status: "active",
+      workflowMode: "booking_link",
+      displayName: safeLabel,
+      bookingUrl: safeUrl,
+      settings: { directBooking: false, label: safeLabel },
+    },
+    update: {
+      status: "active",
+      workflowMode: "booking_link",
+      displayName: safeLabel,
+      bookingUrl: safeUrl,
+      settings: { ...currentSettings, directBooking: false, label: safeLabel },
+    },
+  });
+  const link = await ensureGeneralBookingLinkForConnection(connection, { label: safeLabel, url: safeUrl, sortOrder: 0 });
+  await prisma.businessConfig.update({
+    where: { id: config.id },
+    data: {
+      calendarProvider: "custom",
+      providerConfig: {
+        provider: "custom",
+        connectionId: connection.id,
+        workflowMode: "booking_link",
+        directBooking: false,
+        bookingUrl: safeUrl,
+        label: safeLabel,
+      },
+    },
+  });
+  return { connection, link };
 }
 
 async function ensureInternalBookingConnection({
@@ -9630,7 +9695,7 @@ async function bookingServicesForAgent(profile, args = {}) {
 
 async function externalBookingLinkContext({ profile, args = {}, provider = "vagaro" }) {
   const normalizedProvider = normalizedBookingProvider(provider);
-  if (!["internal", "vagaro", "calendly"].includes(normalizedProvider)) throw new Error("This calendar does not use a booking link");
+  if (!["internal", "vagaro", "calendly", "custom"].includes(normalizedProvider)) throw new Error("This calendar does not use a booking link");
   const connection = await prisma.bookingConnection.findUnique({
     where: { businessProfileId_provider: { businessProfileId: profile.id, provider: normalizedProvider } },
     include: {
@@ -9676,7 +9741,7 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
   const customerEmail = cleanOptionalEmail(args.email) || cleanOptionalEmail(lead?.email) || null;
   const serviceText = service?.name || args.serviceName || "";
   const intakePrefill =
-    connection.provider === "internal"
+    ["internal", "custom"].includes(connection.provider)
       ? bookingPrefillFromCollectedDetails({
           fields: config.intakeFields,
           args: { ...args, serviceName: args.serviceName || serviceText },
@@ -9686,14 +9751,14 @@ async function sendExternalBookingLink({ settings, profile, config, args = {}, l
           email: customerEmail,
         })
       : {};
-  const missingRequiredFields = connection.provider === "internal"
+  const missingRequiredFields = ["internal", "custom"].includes(connection.provider)
     ? missingRequiredBookingPrefillFields({ fields: config.intakeFields, prefill: intakePrefill })
     : [];
   if (missingRequiredFields.length) {
-    throw new Error(
-      `Ask the customer for ${missingRequiredFields.map((field) => field.label).join(", ")} before sending the booking link. ` +
-        "Do not ask them to upload photos first. Notes and photos are optional on the RingPort booking page.",
-    );
+    const guidance = connection.provider === "internal"
+      ? "Do not ask them to upload photos first. Notes and photos are optional on the RingPort booking page."
+      : "Ask only the configured intake questions, then send the custom booking link.";
+    throw new Error(`Ask the customer for ${missingRequiredFields.map((field) => field.label).join(", ")} before sending the booking link. ${guidance}`);
   }
   const clickToken = issueToken().token;
   const shortCode = await generateBookingShortCode();
@@ -11944,10 +12009,17 @@ function runtimeBusinessInstructions(config) {
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
   const linkOnlyInternal = config.calendarProvider === "internal" && config.providerConfig?.directBooking === false;
   const linkOnlyCalendly = config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false;
-  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly || linkOnlyInternal;
+  const linkOnlyCustom = config.calendarProvider === "custom";
+  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly || linkOnlyInternal || linkOnlyCustom;
   const simpleVagaro = config.calendarProvider === "vagaro" && config.providerConfig?.vagaroMode === "simple";
   const internalPhotoUploads = linkOnlyInternal && Boolean(config.providerConfig?.allowPhotoUploads);
-  const externalBookingName = linkOnlyInternal ? "RingPort booking page" : linkOnlyCalendly ? "Calendly" : "Vagaro";
+  const externalBookingName = linkOnlyInternal
+    ? "RingPort booking page"
+    : linkOnlyCalendly
+      ? "Calendly"
+      : linkOnlyCustom
+        ? "the business booking website"
+        : "Vagaro";
   const goals = (config.businessProfile?.receptionistGoals || []).map((goal) => ({
     id: goal.id,
     name: goal.name,
@@ -11966,7 +12038,7 @@ Business-managed receptionist configuration:
     simpleVagaro
       ? "External Vagaro Simple mode. The public service catalog is available, but live availability is not. Offer to text the booking link so the customer can view openings and book in Vagaro."
       : externalBooking
-      ? `${externalBookingName} booking link. ${simpleVagaro ? "Live availability is not visible." : linkOnlyInternal ? "Collect the required intake answers, then text the link. The customer chooses a live time and finishes booking on the RingPort page." : "Check live availability first when available."} Do not say the appointment is booked until the customer submits it.`
+      ? `${externalBookingName} booking link. ${linkOnlyInternal ? "Collect the required intake answers, then text the link. The customer chooses a live time and finishes booking on the RingPort page." : linkOnlyCustom ? "Collect the required intake answers, then text the tracked link. The customer chooses a time and finishes on the business website." : "Check live availability first when available."} Do not say the appointment is booked until the customer submits it.`
       : config.calendarProvider === "google_calendar"
         ? "Direct Google Calendar booking. Check live availability and create the event only after the caller confirms the exact time."
       : config.calendarProvider === "calendly"
@@ -11988,6 +12060,9 @@ ${
           ? "Job notes and photos are optional on the RingPort booking page. Never ask the caller to visit the business website or upload photos before sending the link. Never make the booking link conditional on a photo upload."
           : "Do not tell the caller to upload photos or visit the business website as part of booking."
       }`
+    : linkOnlyCustom
+      ? `- Custom booking-link flow: ask for each missing required intake field before calling send_booking_link. Do not ask for a date or time unless the business configured one as an intake field. The customer chooses availability and completes booking on the business website.
+- Never tell the caller to find the booking page themselves. RingPort sends the tracked link after the required intake answers are collected.`
     : ""
 }
 - Knowledge base: ${JSON.stringify(knowledge)}
@@ -12014,6 +12089,10 @@ ${
       ? `- Do not use get_available_slots in RingPort booking-link mode. The booking page shows live availability.
 - When the caller wants to book, ask only the missing required intake questions, one short question at a time, then call send_booking_link.
 - The inbound caller number already satisfies a required phone field unless the caller requests a different number.`
+    : linkOnlyCustom
+      ? `- Do not use get_available_slots for a custom booking website. RingPort cannot see that website's live availability.
+- When the caller wants to book, ask only the missing required intake questions, one short question at a time, then call send_booking_link.
+- The inbound caller number already satisfies a required phone field unless the caller requests a different number.`
     : `- If the caller asks for availability and gives a day or time, call get_available_slots immediately. Do not ask for name, phone, email, or appointment reason before checking availability.
 - If the caller asks broadly for earliest availability, available professionals, a consultation, or any open spot without a precise service, call get_available_slots with the earliest future date and omit serviceName unless the caller named a clear configured service.
 - After get_available_slots returns, offer only the best matching slot or at most two options. Do not read a long list.
@@ -12031,6 +12110,8 @@ ${config.calendarProvider === "vagaro" ? "- For questions about Vagaro services,
     ? "If the caller asks to book or accepts the offer to receive the booking link, call send_booking_link immediately. Do not require a requested time or additional intake details first."
     : linkOnlyInternal
       ? "When the caller asks to book, collect every missing required intake answer and call send_booking_link. The link is for choosing a time and completing the booking, not for uploading photos before the link can be sent."
+    : linkOnlyCustom
+      ? "When the caller asks to book, collect every missing required intake answer and call send_booking_link. The customer chooses availability and completes booking on the business website."
     : `If the caller asks to book and has given a time, collect only missing required intake fields, then ${externalBooking ? `call send_booking_link and tell them the link lets them confirm in ${externalBookingName}.` : "call schedule_appointment."}`
 }
 - Do not repeat the same confirmation question after the caller already answered it.
@@ -12038,7 +12119,7 @@ ${config.calendarProvider === "vagaro" ? "- For questions about Vagaro services,
 - If the caller asks you to tell the business something or gives an operational update such as running late, a changed arrival time, cancellation, reschedule request, access instructions, urgent issue, or callback request, confirm the final corrected detail and call transfer_message immediately. Do not merely promise to pass it along.
 - Only tell the caller the business was notified, updated, or sent their message when transfer_message returns notified=true. If it returns recorded=true and notified=false, say it was recorded for follow-up and do not claim the owner received an alert.
 
-${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : linkOnlyInternal ? "Do not check availability in the conversation. The customer chooses a live slot on the RingPort booking page." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? `For ${externalBookingName}, never claim direct booking. Use send_booking_link after the caller wants to proceed${linkOnlyInternal ? " and all required intake answers are collected" : ""}, and explain they need to choose and submit a time through the link.` : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
+${simpleVagaro ? "Do not claim to see live availability. Offer the booking link for current openings." : linkOnlyInternal ? "Do not check availability in the conversation. The customer chooses a live slot on the RingPort booking page." : linkOnlyCustom ? "Do not claim to see the custom website's availability. The customer chooses a time on that website." : "Use get_available_slots before offering or scheduling a time."} ${externalBooking ? `For ${externalBookingName}, never claim direct booking. Use send_booking_link after the caller wants to proceed${linkOnlyInternal || linkOnlyCustom ? " and all required intake answers are collected" : ""}, and explain they need to choose and submit a time through the link.` : "Collect every required appointment field before calling schedule_appointment. schedule_appointment already verifies the saved appointment; use verify_appointment only if you need to re-check an older confirmation code. Only call it booked when schedule_appointment or verify_appointment returns verified=true and status=\"confirmed\". For status=\"requested\", say it is pending confirmation."} ${smartReviewsAvailable ? "If smart review/recovery is enabled and the service or appointment outcome is complete, ask whether the customer is happy. For happy customers, use send_review_request. For unhappy or neutral customers, use record_customer_feedback and escalate_complaint." : ""} Follow the extra instructions exactly unless they conflict with safety or factual accuracy.`;
 }
 
 function sanitizeMetaAiQualification(value) {
@@ -12279,7 +12360,8 @@ function toolDeclarations(config) {
   const smartReviewsAvailable = Boolean(config.reviewRequestsEnabled && entitlementFeatureEnabled(config, "smartReviewsEnabled"));
   const linkOnlyInternal = config.calendarProvider === "internal" && config.providerConfig?.directBooking === false;
   const linkOnlyCalendly = config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false;
-  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly || linkOnlyInternal;
+  const linkOnlyCustom = config.calendarProvider === "custom";
+  const externalBooking = config.calendarProvider === "vagaro" || linkOnlyCalendly || linkOnlyInternal || linkOnlyCustom;
   const simpleVagaro = config.calendarProvider === "vagaro" && config.providerConfig?.vagaroMode === "simple";
   const goals = config.businessProfile?.receptionistGoals || [];
   const collectsEmail = intakeCollectsEmail(config) || config.calendarProvider === "calendly";
@@ -12294,7 +12376,7 @@ function toolDeclarations(config) {
     professionalId: { type: "STRING" },
     requestedTime: { type: "STRING", description: "Requested appointment date/time the customer asked about." },
   };
-  const bookingLinkRequired = linkOnlyInternal ? bookingLinkRequiredFieldKeys(config.intakeFields) : [];
+  const bookingLinkRequired = linkOnlyInternal || linkOnlyCustom ? bookingLinkRequiredFieldKeys(config.intakeFields) : [];
   for (const field of config.intakeFields) {
     appointmentProperties[field.fieldKey] = {
       type: "STRING",
@@ -12303,7 +12385,7 @@ function toolDeclarations(config) {
         : field.label,
     };
     if (field.required) appointmentRequired.push(field.fieldKey);
-    if (linkOnlyInternal && !bookingLinkProperties[field.fieldKey]) {
+    if ((linkOnlyInternal || linkOnlyCustom) && !bookingLinkProperties[field.fieldKey]) {
       bookingLinkProperties[field.fieldKey] = {
         type: "STRING",
         description: field.options?.length
@@ -12319,7 +12401,7 @@ function toolDeclarations(config) {
     if (!appointmentRequired.includes("email")) appointmentRequired.push("email");
   }
   return [
-    ...(!simpleVagaro && !linkOnlyInternal
+    ...(!simpleVagaro && !linkOnlyInternal && !linkOnlyCustom
       ? [
           {
             name: "get_available_slots",
@@ -12367,6 +12449,8 @@ function toolDeclarations(config) {
                 ? "Send the Vagaro booking link by text after the customer agrees. The customer uses it to see live availability and book."
                 : linkOnlyInternal
                   ? "After collecting every required configured intake answer, send the RingPort booking link by text. The page is prefilled with those answers and lets the customer choose a live time. Optional notes and photos are completed on the page and never block sending the link."
+                  : linkOnlyCustom
+                    ? "After collecting every required configured intake answer, send the tracked custom booking link by text. The customer chooses availability and completes booking on the business website."
                   : `Send the booking link by text after checking availability. Use this for ${linkOnlyCalendly ? "Calendly" : "Vagaro"} instead of directly booking the appointment.`,
             parameters: {
               type: "OBJECT",
@@ -12376,13 +12460,13 @@ function toolDeclarations(config) {
           },
         ]
       : []),
-    ...(!simpleVagaro && !linkOnlyInternal
+    ...(!simpleVagaro && !linkOnlyInternal && !linkOnlyCustom
       ? [
           {
             name: "schedule_appointment",
             description:
               externalBooking
-                ? `For ${linkOnlyInternal ? "the RingPort booking page" : linkOnlyCalendly ? "Calendly" : "Vagaro"}, do not directly book. This records a booking-link request and sends the booking link.`
+                ? `For ${linkOnlyInternal ? "the RingPort booking page" : linkOnlyCalendly ? "Calendly" : linkOnlyCustom ? "the custom booking website" : "Vagaro"}, do not directly book. This records a booking-link request and sends the booking link.`
                 : config.appointmentMode === "instant"
                   ? "Book a confirmed appointment in an available calendar slot."
                   : "Create a pending appointment request in an available calendar slot.",
@@ -12745,7 +12829,8 @@ async function runToolCall(profile, config, functionCall, context = {}) {
     if (
       config.calendarProvider === "vagaro" ||
       (config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false) ||
-      (config.calendarProvider === "internal" && config.providerConfig?.directBooking === false)
+      (config.calendarProvider === "internal" && config.providerConfig?.directBooking === false) ||
+      config.calendarProvider === "custom"
     ) {
       const settings = await getSettings();
       const linkArgs = {
@@ -13548,6 +13633,14 @@ app.get("/api/onboarding/subscription-plans", async (_req, res) => {
       },
       billing: {
         annualPrepayDiscountPercent: annualPrepayDiscountPercent(settings),
+        aiCallMinuteCredits:
+          Math.max(0, Number(settings.voiceMinuteCredits || 0)) +
+            Math.max(0, Number(settings.geminiMinuteCredits ?? settings.voiceMinuteCredits ?? 0)) ||
+          20,
+      },
+      trial: {
+        days: Math.max(0, Number(settings.trialDays || 0)),
+        credits: Math.max(0, Number(settings.trialCredits || 0)),
       },
     });
   } catch (error) {
@@ -13591,6 +13684,13 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
       ? String(req.body.vagaroBusinessUrl || "").trim()
       : currentVagaroBusinessUrl;
     const vagaroUrlChanged = vagaroUrlSubmitted && requestedVagaroBusinessUrl !== currentVagaroBusinessUrl;
+    const currentCustomBookingUrl = String(existingRaw.customBookingUrl || config.providerConfig?.bookingUrl || "").trim();
+    const currentCustomBookingLabel = String(existingRaw.customBookingLabel || config.providerConfig?.label || "Book online").trim();
+    const customUrlSubmitted = Object.prototype.hasOwnProperty.call(req.body, "customBookingUrl");
+    const requestedCustomBookingUrl = customUrlSubmitted
+      ? String(req.body.customBookingUrl || "").trim()
+      : currentCustomBookingUrl;
+    const requestedCustomBookingLabel = String(req.body.customBookingLabel || currentCustomBookingLabel || "Book online").trim();
     const calendarProviderSubmitted = Object.prototype.hasOwnProperty.call(req.body, "calendarProvider");
     const currentCalendarPreference = normalizedBookingProvider(
       existingRaw.calendarProviderPreference || (currentVagaroBusinessUrl ? "vagaro" : config.calendarProvider),
@@ -13604,6 +13704,9 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
         : currentCalendarPreference;
     if (requestedCalendarProvider === "vagaro" && !requestedVagaroBusinessUrl) {
       throw new Error("Enter the Vagaro business link");
+    }
+    if (requestedCalendarProvider === "custom" && !requestedCustomBookingUrl) {
+      throw new Error("Enter the custom booking link");
     }
     let storedVagaroBusinessUrl = requestedCalendarProvider === "vagaro" ? requestedVagaroBusinessUrl : "";
     let vagaroSync = null;
@@ -13630,6 +13733,16 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
           policyEntriesExcluded: simpleSetup.policyEntriesExcluded,
         };
       }
+    } else if (requestedCalendarProvider === "custom") {
+      if (currentVagaroBusinessUrl || config.calendarProvider === "vagaro") {
+        vagaroDisconnected = await disconnectVagaroSimpleMode(session.businessProfile, config);
+      }
+      await configureCustomBookingLink({
+        profile: session.businessProfile,
+        config,
+        bookingUrl: requestedCustomBookingUrl,
+        label: requestedCustomBookingLabel,
+      });
     } else {
       if (currentVagaroBusinessUrl || config.calendarProvider === "vagaro") {
         vagaroDisconnected = await disconnectVagaroSimpleMode(session.businessProfile, config);
@@ -13650,6 +13763,8 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
       phone,
       address,
       vagaroBusinessUrl: storedVagaroBusinessUrl,
+      customBookingUrl: requestedCustomBookingUrl,
+      customBookingLabel: requestedCustomBookingLabel || "Book online",
       calendarProviderPreference: requestedCalendarProvider,
     };
     const values = {
@@ -17180,6 +17295,34 @@ app.put("/api/business-admin/booking/internal", async (req, res) => {
   }
 });
 
+app.put("/api/business-admin/booking/custom", async (req, res) => {
+  try {
+    const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    await configureCustomBookingLink({
+      profile,
+      config,
+      bookingUrl: req.body.bookingUrl,
+      label: req.body.label,
+    });
+    const rawData = profile.rawData && typeof profile.rawData === "object" && !Array.isArray(profile.rawData) ? profile.rawData : {};
+    await prisma.businessProfile.update({
+      where: { id: profile.id },
+      data: {
+        rawData: {
+          ...rawData,
+          customBookingUrl: normalizeGoalDestinationUrl(req.body.bookingUrl),
+          customBookingLabel: String(req.body.label || "Book online").trim().slice(0, 120) || "Book online",
+          calendarProviderPreference: "custom",
+        },
+      },
+    });
+    const settings = await getSettings();
+    res.json(await bookingDataForProfile(profile, settings, req));
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
 app.put("/api/business-admin/booking/vagaro", async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
@@ -18597,6 +18740,7 @@ app.post("/api/business-admin/appointments", async (req, res) => {
   try {
     const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
     if (config.calendarProvider === "vagaro") throw new Error("Vagaro calendars are read-only in RingPort. Send the booking link instead.");
+    if (config.calendarProvider === "custom") throw new Error("This business uses a custom booking website. Send the tracked booking link instead.");
     if (config.calendarProvider === "calendly" && config.providerConfig?.directBooking === false) {
       throw new Error("Calendly is set to booking-link mode. Send the tracked Calendly link instead.");
     }

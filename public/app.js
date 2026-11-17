@@ -292,6 +292,12 @@ const el = {
   connectCalendlyButton: document.querySelector("#connectCalendlyButton"),
   syncCalendlyButton: document.querySelector("#syncCalendlyButton"),
   disconnectCalendlyButton: document.querySelector("#disconnectCalendlyButton"),
+  customBookingSettingsPanel: document.querySelector("#customBookingSettingsPanel"),
+  customBookingLabel: document.querySelector("#customBookingLabel"),
+  customBookingUrl: document.querySelector("#customBookingUrl"),
+  customBookingTrackingUrl: document.querySelector("#customBookingTrackingUrl"),
+  copyCustomBookingLinkButton: document.querySelector("#copyCustomBookingLinkButton"),
+  openCustomBookingLinkButton: document.querySelector("#openCustomBookingLinkButton"),
   bookingLinkLabel: document.querySelector("#bookingLinkLabel"),
   bookingLinkUrl: document.querySelector("#bookingLinkUrl"),
   bookingTrackingBaseUrl: document.querySelector("#bookingTrackingBaseUrl"),
@@ -1592,6 +1598,7 @@ function calendarProviderName(provider) {
   if (provider === "google_calendar") return "Google Calendar";
   if (provider === "calendly") return "Calendly";
   if (provider === "vagaro") return "Vagaro";
+  if (provider === "custom") return "Custom booking link";
   return "RingPort calendar";
 }
 
@@ -1601,8 +1608,9 @@ function updateCalendarProviderUi() {
   const vagaro = provider === "vagaro";
   const google = provider === "google_calendar";
   const calendly = provider === "calendly";
+  const custom = provider === "custom";
   const calendlyDirect = el.calendlyDirectBooking?.checked !== false;
-  const readOnly = vagaro || (calendly && !calendlyDirect);
+  const readOnly = custom || vagaro || (calendly && !calendlyDirect);
   const vagaroMode = el.vagaroMode?.value === "api" ? "api" : "simple";
   const apiMode = vagaro && vagaroMode === "api";
   const appointmentEditor = document.querySelector(".appointment-editor-card");
@@ -1618,6 +1626,7 @@ function updateCalendarProviderUi() {
   if (el.vagaroStatus) el.vagaroStatus.hidden = !vagaro;
   if (el.googleCalendarSettingsPanel) el.googleCalendarSettingsPanel.hidden = !google;
   if (el.calendlySettingsPanel) el.calendlySettingsPanel.hidden = !calendly;
+  if (el.customBookingSettingsPanel) el.customBookingSettingsPanel.hidden = !custom;
   if (el.vagaroApiSettings) el.vagaroApiSettings.hidden = !apiMode;
   if (el.vagaroSimpleModeHelp) el.vagaroSimpleModeHelp.hidden = !vagaro || apiMode;
   if (bookingDirectory) bookingDirectory.hidden = !vagaro;
@@ -1629,6 +1638,8 @@ function updateCalendarProviderUi() {
       ? `Connect ${calendarProviderName(provider)}`
       : provider === "internal"
         ? "Save booking method"
+        : provider === "custom"
+          ? "Save custom booking link"
         : "Save booking system";
   }
   if (appointmentEditor) {
@@ -1641,6 +1652,8 @@ function updateCalendarProviderUi() {
           : "Vagaro appointments are read-only here. Use Vagaro links for booking, cancel, and reschedule."
         : calendly && !calendlyDirect
           ? "RingPort sends a tracked Calendly link. Customers choose and confirm the time in Calendly."
+          : custom
+            ? "RingPort collects the required details and sends a tracked link. Customers choose availability and finish on the business website."
           : `Choose an open time or enter one manually. RingPort will book it in ${calendarProviderName(provider)}.`;
     }
   }
@@ -1659,8 +1672,8 @@ function updateCalendarProviderUi() {
   ]) {
     if (node) node.disabled = readOnly;
   }
-  if (el.availabilityRules) el.availabilityRules.hidden = vagaro || calendly;
-  if (el.saveCalendarButton) el.saveCalendarButton.disabled = vagaro || calendly;
+  if (el.availabilityRules) el.availabilityRules.hidden = custom || vagaro || calendly;
+  if (el.saveCalendarButton) el.saveCalendarButton.disabled = custom || vagaro || calendly;
   if (el.calendarServiceFilter?.closest("label")) el.calendarServiceFilter.closest("label").hidden = !vagaro;
   if (el.calendarProfessionalFilter?.closest("label")) el.calendarProfessionalFilter.closest("label").hidden = !vagaro;
 }
@@ -1672,7 +1685,8 @@ function renderBooking(data = {}) {
   const vagaroConnection = (data.connections || []).find((item) => item.provider === "vagaro") || {};
   const googleConnection = (data.connections || []).find((item) => item.provider === "google_calendar") || null;
   const calendlyConnection = (data.connections || []).find((item) => item.provider === "calendly") || null;
-  if (el.calendarProvider) el.calendarProvider.value = ["vagaro", "google_calendar", "calendly"].includes(provider) ? provider : "internal";
+  const customConnection = (data.connections || []).find((item) => item.provider === "custom") || null;
+  if (el.calendarProvider) el.calendarProvider.value = ["vagaro", "google_calendar", "calendly", "custom"].includes(provider) ? provider : "internal";
   if (el.internalBookingMethod) el.internalBookingMethod.value = data.internalBooking?.directBooking === false ? "link" : "direct";
   if (el.internalPhotoUploads) el.internalPhotoUploads.checked = data.internalBooking?.allowPhotoUploads === true;
   if (el.internalBookingUrl) el.internalBookingUrl.value = data.internalBooking?.publicUrl || "";
@@ -1680,6 +1694,18 @@ function renderBooking(data = {}) {
   if (el.openInternalBookingLinkButton) {
     el.openInternalBookingLinkButton.href = data.internalBooking?.publicUrl || "#";
     el.openInternalBookingLinkButton.setAttribute("aria-disabled", String(!data.internalBooking?.publicUrl));
+  }
+  if (el.customBookingLabel && document.activeElement !== el.customBookingLabel) {
+    el.customBookingLabel.value = data.customBooking?.label || customConnection?.displayName || "Book online";
+  }
+  if (el.customBookingUrl && document.activeElement !== el.customBookingUrl) {
+    el.customBookingUrl.value = data.customBooking?.url || customConnection?.bookingUrl || "";
+  }
+  if (el.customBookingTrackingUrl) el.customBookingTrackingUrl.value = data.customBooking?.trackingUrl || "";
+  if (el.copyCustomBookingLinkButton) el.copyCustomBookingLinkButton.disabled = !data.customBooking?.trackingUrl;
+  if (el.openCustomBookingLinkButton) {
+    el.openCustomBookingLinkButton.href = data.customBooking?.url || customConnection?.bookingUrl || "#";
+    el.openCustomBookingLinkButton.setAttribute("aria-disabled", String(!(data.customBooking?.url || customConnection?.bookingUrl)));
   }
   if (el.vagaroMode) el.vagaroMode.value = vagaroConnection.settings?.vagaroMode === "simple" ? "simple" : vagaroConnection.id ? "api" : "simple";
   if (el.vagaroBusinessUrl) el.vagaroBusinessUrl.value = vagaroConnection.settings?.vagaroBusinessUrl || vagaroConnection.bookingUrl || "";
@@ -2366,6 +2392,20 @@ const GOAL_TEMPLATES = Object.freeze({
     qualificationInstructions: "Confirm the product or service they want so the link is relevant.",
     confirmationMessage: "I sent the purchase link. You can review the details and complete the order there.",
   },
+  social: {
+    name: "Open our social profile",
+    actionType: "send_link",
+    triggerInstructions: "Offer only when the caller asks for the business's social profile, photos, updates, or social contact page.",
+    qualificationInstructions: "No qualification is needed. Confirm which social profile they want if the business has more than one.",
+    confirmationMessage: "I sent the social profile link.",
+  },
+  custom: {
+    name: "Share another link",
+    actionType: "send_link",
+    triggerInstructions: "Describe the exact caller intent that should cause the receptionist to offer this link.",
+    qualificationInstructions: "Ask only for the details the business needs before sending this link.",
+    confirmationMessage: "I sent the link. You can continue there when you are ready.",
+  },
 });
 
 function goalCalendarSummaryText() {
@@ -2389,6 +2429,9 @@ function goalCalendarSummaryText() {
     return connection.settings?.directBooking === false
       ? "Calendly is using booking-link mode. The receptionist sends the Calendly link and the customer chooses a time there."
       : "Calendly is connected for direct booking. The receptionist can choose an event type and book during the conversation.";
+  }
+  if (provider === "custom") {
+    return "Custom booking-link mode is active. The receptionist collects the required details, then sends a tracked link so the customer can finish on the business website.";
   }
   return "Vagaro is using booking-link mode. The receptionist sends the Vagaro link and the customer completes the appointment there.";
 }
@@ -2641,6 +2684,7 @@ async function saveCalendarSettings() {
 
 async function saveVagaroSettings() {
   const provider = el.calendarProvider.value;
+  if (provider === "custom") return saveCustomBookingSettings();
   if (["google_calendar", "calendly"].includes(provider)) {
     const connection = calendarConnection(provider);
     if (!connection || connection.status !== "active") return connectCalendarProvider(provider);
@@ -2677,6 +2721,28 @@ async function saveVagaroSettings() {
   } else {
     setAdminStatus(enabled ? "Vagaro settings saved" : "RingPort calendar enabled");
   }
+}
+
+async function saveCustomBookingSettings() {
+  const bookingUrl = String(el.customBookingUrl?.value || "").trim();
+  if (!bookingUrl) {
+    el.customBookingUrl?.focus();
+    throw new Error("Enter the customer booking page URL");
+  }
+  setAdminStatus("Saving custom booking link");
+  const data = await apiJson("/api/business-admin/booking/custom", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...adminIdentity(),
+      label: String(el.customBookingLabel?.value || "Book online").trim() || "Book online",
+      bookingUrl,
+    }),
+  });
+  state.admin = { ...state.admin, calendarProvider: "custom" };
+  renderBooking(data);
+  await loadCalendar();
+  setAdminStatus("Custom booking link saved");
 }
 
 async function connectCalendarProvider(provider) {
@@ -2924,12 +2990,14 @@ async function loadCalendar() {
     cancelButton.className = "danger-button";
     cancelButton.disabled = appointment.status === "cancelled";
     cancelButton.textContent = "Cancel";
-    if (provider === "vagaro" || (provider === "calendly" && appointment.externalRecordId)) {
+    if (provider === "vagaro" || provider === "custom" || (provider === "calendly" && appointment.externalRecordId)) {
       const note = document.createElement("small");
       note.className = "external-calendar-note";
       note.textContent = provider === "vagaro"
         ? "Synced from Vagaro. Changes happen in Vagaro."
-        : "Synced from Calendly. Changes happen in Calendly.";
+        : provider === "custom"
+          ? "Booking link sent. The customer completes booking on the business website."
+          : "Synced from Calendly. Changes happen in Calendly.";
       actions.appendChild(note);
       if (manageUrl) {
         const open = document.createElement("a");
@@ -2937,7 +3005,7 @@ async function loadCalendar() {
         open.href = manageUrl;
         open.target = "_blank";
         open.rel = "noreferrer";
-        open.textContent = provider === "vagaro" ? "Open Vagaro" : "Manage in Calendly";
+        open.textContent = provider === "vagaro" ? "Open Vagaro" : provider === "custom" ? "Open booking page" : "Manage in Calendly";
         actions.appendChild(open);
       }
     } else {
@@ -5492,6 +5560,9 @@ el.saveVagaroSettingsButton.addEventListener("click", () => runAdmin(saveVagaroS
 el.copyInternalBookingLinkButton?.addEventListener("click", () =>
   runAdmin(() => copyText(el.internalBookingUrl?.value || "", "Customer booking link copied")),
 );
+el.copyCustomBookingLinkButton?.addEventListener("click", () =>
+  runAdmin(() => copyText(el.customBookingTrackingUrl?.value || "", "Tracked booking link copied")),
+);
 el.syncVagaroButton.addEventListener("click", () => runAdmin(syncVagaro));
 el.connectGoogleCalendarButton?.addEventListener("click", () => runAdmin(() => connectCalendarProvider("google_calendar")));
 el.disconnectGoogleCalendarButton?.addEventListener("click", () => runAdmin(() => disconnectCalendarProvider("google_calendar")));
@@ -5526,6 +5597,7 @@ el.availableSlots.addEventListener("click", (event) => {
   if (!button) return;
   if (
     state.admin?.calendarProvider === "vagaro" ||
+    state.admin?.calendarProvider === "custom" ||
     (state.admin?.calendarProvider === "calendly" && calendarConnection("calendly")?.settings?.directBooking === false)
   ) {
     setAdminStatus(`${calendarProviderName(state.admin.calendarProvider)} bookings must be confirmed through the booking link.`);

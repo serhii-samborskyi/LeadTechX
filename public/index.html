@@ -364,6 +364,8 @@
                 <button type="button" data-goal-template="quote"><strong>Request a quote</strong><small>Collect job details through an estimate form.</small></button>
                 <button type="button" data-goal-template="application"><strong>Start an application</strong><small>Guide a qualified caller to an application form.</small></button>
                 <button type="button" data-goal-template="purchase"><strong>Buy online</strong><small>Send a product, order, or checkout link.</small></button>
+                <button type="button" data-goal-template="social"><strong>Share a social profile</strong><small>Send an Instagram, Facebook, TikTok, or other social link.</small></button>
+                <button type="button" data-goal-template="custom"><strong>Share another link</strong><small>Use any form, document, product, or next-step page.</small></button>
               </div>
             </section>
             <details class="section-disclosure goal-editor-disclosure" id="goalEditorDisclosure">
@@ -436,7 +438,7 @@
                 <p>Use RingPort's internal calendar or connect an external booking system.</p>
               </div>
               <div class="booking-provider-header">
-                <label>Provider<select id="calendarProvider"><option value="internal">RingPort calendar</option><option value="vagaro">Vagaro</option><option value="google_calendar">Google Calendar</option><option value="calendly">Calendly</option></select></label>
+                <label>Provider<select id="calendarProvider"><option value="internal">RingPort calendar</option><option value="vagaro">Vagaro</option><option value="google_calendar">Google Calendar</option><option value="calendly">Calendly</option><option value="custom">Custom booking link</option></select></label>
                 <button id="saveVagaroSettingsButton" class="primary" type="button">Save booking method</button>
               </div>
               <div id="internalCalendarSettingsPanel" class="calendar-oauth-panel">
@@ -522,6 +524,21 @@
                   <label class="check-label"><input id="calendlyDirectBooking" type="checkbox" checked /> Book directly in Calendly</label>
                 </div>
                 <small id="calendlyConnectionNote">Direct API booking creates appointments in Calendly. Turn it off to send a tracked Calendly link instead.</small>
+              </div>
+              <div id="customBookingSettingsPanel" class="calendar-oauth-panel" hidden>
+                <div class="calendar-connection-heading">
+                  <div><strong>Custom booking link</strong><small>Use the booking page already on your website</small></div>
+                </div>
+                <div class="form-grid booking-provider-grid">
+                  <label>Button label<input id="customBookingLabel" maxlength="120" placeholder="Book online" /></label>
+                  <label>Customer booking page<input id="customBookingUrl" type="url" autocomplete="url" placeholder="https://yourbusiness.com/book" /></label>
+                </div>
+                <div class="crm-webhook-controls booking-provider-actions">
+                  <input id="customBookingTrackingUrl" type="url" readonly placeholder="Save to create a tracked customer link" />
+                  <button id="copyCustomBookingLinkButton" type="button">Copy tracked link</button>
+                  <a id="openCustomBookingLinkButton" class="button-link" href="#" target="_blank" rel="noopener">Open page</a>
+                </div>
+                <small>RingPort collects the required appointment details and sends the tracked link. Availability and confirmation stay on your website.</small>
               </div>
               <small id="vagaroStatus">Vagaro is not connected.</small>
             </div>
