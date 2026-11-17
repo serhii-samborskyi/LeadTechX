@@ -570,6 +570,7 @@ function publicBusinessProfile(profile, config = null) {
     calendarProviderPreference,
     activeCalendarProvider,
     language: profileConfig.language || "English",
+    voiceName: profileConfig.voiceName || "Puck",
     accountStatus: profile.accountStatus,
     trialEndsAt: profile.trialEndsAt,
     creditBalance: profile.creditBalance,
@@ -13678,6 +13679,7 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
     const address = textOrUnknown(req.body.address);
     const config = await ensureBusinessConfig(session.businessProfile);
     const language = String(req.body.language || config.language || "English").trim().slice(0, 80) || "English";
+    const voiceName = String(req.body.voiceName || config.voiceName || "Puck").trim().slice(0, 80) || "Puck";
     const currentVagaroBusinessUrl = String(existingRaw.vagaroBusinessUrl || "").trim();
     const vagaroUrlSubmitted = Object.prototype.hasOwnProperty.call(req.body, "vagaroBusinessUrl");
     const requestedVagaroBusinessUrl = vagaroUrlSubmitted
@@ -13788,7 +13790,7 @@ app.put("/api/onboarding/fast-agent/profile", async (req, res) => {
     });
     const updatedConfig = await prisma.businessConfig.update({
       where: { businessProfileId: session.businessProfileId },
-      data: { language },
+      data: { language, voiceName },
     });
     res.json({
       profile: publicBusinessProfile(updated, updatedConfig),

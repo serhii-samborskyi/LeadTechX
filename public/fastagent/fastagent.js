@@ -114,6 +114,7 @@ const el = Object.fromEntries(
     "profileArea",
     "profileServices",
     "profileLanguage",
+    "profileVoiceName",
     "profileCalendarProvider",
     "profileCalendarHelp",
     "profileVagaroField",
@@ -578,6 +579,14 @@ function setProfileLanguage(value) {
   el.profileLanguage.value = language;
 }
 
+function setProfileVoice(value) {
+  const voiceName = String(value || "Puck").trim() || "Puck";
+  if (![...el.profileVoiceName.options].some((option) => option.value === voiceName)) {
+    el.profileVoiceName.appendChild(new Option(voiceName, voiceName));
+  }
+  el.profileVoiceName.value = voiceName;
+}
+
 const fastCalendarProviderHelp = {
   internal: "Book directly in RingPort's built-in calendar.",
   vagaro: "Add the public Vagaro business link below to import services and send customers to book.",
@@ -615,6 +624,7 @@ function profilePayload() {
     serviceArea: el.profileArea.value,
     services: el.profileServices.value,
     language: el.profileLanguage.value,
+    voiceName: el.profileVoiceName.value,
     calendarProvider,
     vagaroBusinessUrl: calendarProvider === "vagaro" ? el.profileVagaroUrl.value : "",
     customBookingUrl: calendarProvider === "custom" ? el.profileCustomBookingUrl.value : "",
@@ -788,6 +798,7 @@ function renderProfileFields(profile) {
   el.profileArea.value = editableProfileValue(profile.serviceArea);
   el.profileServices.value = editableProfileValue(profile.services);
   setProfileLanguage(profile.language);
+  setProfileVoice(profile.voiceName);
   el.profileVagaroUrl.value = profile.vagaroBusinessUrl || "";
   el.profileCustomBookingUrl.value = profile.customBookingUrl || "";
   setProfileCalendarProvider(
