@@ -43,6 +43,7 @@ run(process.execPath, ["scripts/test-call-silence-guard.js"]);
 run(process.execPath, ["scripts/test-meta-platform.js"]);
 run(process.execPath, ["scripts/test-booking-prefill.js"]);
 run(process.execPath, ["scripts/test-crm-grouping.js"]);
+run(process.execPath, ["scripts/test-onboarding-conversation.js"]);
 
 if (process.env.RUN_INTEGRATION === "1" || process.env.RUN_BOOKING_TEST === "1") {
   run("npm", ["run", "test:booking"]);

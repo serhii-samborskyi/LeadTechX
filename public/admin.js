@@ -192,6 +192,9 @@ const el = {
   sentDmProfileId: document.querySelector("#sentDmProfileId"),
   checkSentDm: document.querySelector("#checkSentDm"),
   sentDmDiagnostics: document.querySelector("#sentDmDiagnostics"),
+  onboardingFrom: document.querySelector("#onboardingFrom"),
+  onboardingTo: document.querySelector("#onboardingTo"),
+  applyOnboardingRange: document.querySelector("#applyOnboardingRange"),
   refreshOnboarding: document.querySelector("#refreshOnboarding"),
   onboardingList: document.querySelector("#onboardingList"),
   onboardingFunnel: document.querySelector("#onboardingFunnel"),
@@ -207,6 +210,7 @@ let adEventConfig = {};
 let businessProfileRange = "all";
 let businessProfileSearchTimer = null;
 let trafficRange = "today";
+let onboardingRange = "all";
 const DEFAULT_POSTBACK_EVENTS = ["trial_started", "paid_plan", "credit_topup"];
 const DEFAULT_POSTBACK_PARAM_KEYS =
   "utm_source,utm_medium,utm_campaign,utm_content,utm_term,utm_id,fbclid,ttclid,rdt_cid,gclid,gbraid,wbraid,msclkid,click_id,subid,sub_id,external_id,lead_id";
@@ -1320,7 +1324,19 @@ function setSystemTab(tabName) {
 }
 
 async function loadOnboarding() {
-  const [settingsData, sessionData] = await Promise.all([api("/api/admin/settings"), api("/api/admin/onboarding")]);
+  const query = new URLSearchParams();
+  if (onboardingRange !== "all") {
+    query.set("range", onboardingRange);
+    if (onboardingRange === "custom") {
+      if (el.onboardingFrom.value) query.set("from", el.onboardingFrom.value);
+      if (el.onboardingTo.value) query.set("to", el.onboardingTo.value);
+    }
+  }
+  const queryString = query.toString();
+  const [settingsData, sessionData] = await Promise.all([
+    api("/api/admin/settings"),
+    api(`/api/admin/onboarding${queryString ? `?${queryString}` : ""}`),
+  ]);
   const settings = settingsData.settings;
   for (const key of [
     "onboardingLookupUrl",
@@ -2519,6 +2535,20 @@ el.refreshCalls.addEventListener("click", () => loadCalls());
 el.refreshAdminHealth.addEventListener("click", () => loadAdminHealth().catch((error) => (el.adminHealthList.textContent = error.message)));
 el.refreshOnboarding.addEventListener("click", () => loadOnboarding().catch((error) => (el.onboardingStatus.textContent = error.message)));
 el.checkSentDm.addEventListener("click", () => loadSentDmDiagnostics().catch((error) => (el.sentDmDiagnostics.textContent = error.message)));
+
+for (const button of document.querySelectorAll("[data-onboarding-range]")) {
+  button.addEventListener("click", () => {
+    onboardingRange = button.dataset.onboardingRange;
+    for (const item of document.querySelectorAll("[data-onboarding-range]")) item.classList.toggle("active", item === button);
+    loadOnboarding().catch((error) => (el.onboardingStatus.textContent = error.message));
+  });
+}
+
+el.applyOnboardingRange.addEventListener("click", () => {
+  onboardingRange = "custom";
+  for (const item of document.querySelectorAll("[data-onboarding-range]")) item.classList.remove("active");
+  loadOnboarding().catch((error) => (el.onboardingStatus.textContent = error.message));
+});
 
 for (const tab of el.systemTabs) {
   tab.addEventListener("click", () => setSystemTab(tab.dataset.systemTab));

@@ -794,7 +794,7 @@ model AppSettings {
   smtpFromName                String   @default("RingPort")
   onboardingLookupUrl         String   @default("")
   onboardingVoiceName         String   @default("Puck")
-  onboardingInstructions      String   @default("You are the RingPort phone onboarding specialist. Collect the minimum business details needed for a useful receptionist draft. A website is optional. Ask permission before texting; use email when the caller cannot receive texts. Confirm the captured details, queue the background build, explain that the secure setup link will arrive when ready, and end the call promptly.")
+  onboardingInstructions      String   @default("You are RingPort's phone onboarding specialist. Lead a natural, concise conversation. Ask one question at a time and wait for the caller's answer. Collect only missing essentials for a useful receptionist draft, use caller-provided details without repeating questions, confirm delivery permission, queue the background build after confirmation, and end the call promptly.")
   onboardingRecordCalls       Boolean  @default(false)
   onboardingTranscription     Boolean  @default(true)
   messagePrimaryProvider      String   @default("bluebubbles")

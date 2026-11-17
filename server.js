@@ -42,6 +42,11 @@ import {
 } from "./booking-prefill.js";
 import { crmGroupMatchesSearch, groupCrmContactRows, standaloneCrmContact } from "./crm-grouping.js";
 import { registerMetaPlatform } from "./meta-platform.js";
+import {
+  DEFAULT_ONBOARDING_INSTRUCTIONS,
+  ONBOARDING_CONVERSATION_RULES,
+  ONBOARDING_OPENING_INSTRUCTION,
+} from "./onboarding-conversation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2530,8 +2535,6 @@ const BLUEBUBBLES_SEND_TIMEOUT_MS = Math.max(800, Number(process.env.BLUEBUBBLES
 const BLUEBUBBLES_DELIVERY_CHECK_DELAYS_MS = [8000, 30000];
 const DEFAULT_PLATFORM_BUSINESS_RULES =
   "Use only the language configured for the business agent. Do not switch languages automatically when the caller speaks another language. If the caller asks for another language, explain briefly in the configured language that the receptionist is set to use only that language unless the business changes settings.";
-const DEFAULT_ONBOARDING_INSTRUCTIONS =
-  "You are the RingPort platform onboarding specialist. Collect the company name and website, text those details to the caller for confirmation, build the agent only after confirmation, and send the secure setup link when it is ready. Keep the call brief.";
 const DEFAULT_TRIAL_REMINDER_STEPS = [
   {
     key: "before_7_days",
@@ -12552,6 +12555,15 @@ function toolDeclarations(config) {
 function onboardingToolDeclarations() {
   return [
     {
+      name: "get_onboarding_lookup",
+      description:
+        "Return possible business details found from the caller's phone number. Use only after the caller has answered the opening invitation, and only to avoid repeating questions or confirm a likely match.",
+      parameters: {
+        type: "OBJECT",
+        properties: {},
+      },
+    },
+    {
       name: "build_business_agent",
       description:
         "Queue the real trial receptionist after the caller has confirmed the captured details. The build continues after the call ends and sends a tracked setup link automatically.",
@@ -16515,38 +16527,55 @@ app.get("/api/admin/calls", requireAuth, requireAdmin, async (_req, res) => {
   res.json({ calls });
 });
 
-app.get("/api/admin/onboarding", requireAuth, requireAdmin, async (_req, res) => {
-  const sessions = await prisma.onboardingSession.findMany({
-    include: {
-      voiceCall: {
-        select: {
-          callControlId: true,
-          status: true,
-          startedAt: true,
-          endedAt: true,
-          recordingUrl: true,
-          events: {
-            where: { eventType: { startsWith: "onboarding." } },
-            select: { eventType: true, detail: true, createdAt: true },
-            orderBy: { createdAt: "asc" },
+app.get("/api/admin/onboarding", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const selectedRange = adminBusinessProfileRange(req.query);
+    const dateWhere = selectedRange.from
+      ? { createdAt: { gte: selectedRange.from, lt: selectedRange.to } }
+      : {};
+    const [sessions, calls, confirmed, built, delivered, clicked, claimed] = await Promise.all([
+      prisma.onboardingSession.findMany({
+        where: dateWhere,
+        include: {
+          voiceCall: {
+            select: {
+              callControlId: true,
+              status: true,
+              startedAt: true,
+              endedAt: true,
+              recordingUrl: true,
+              events: {
+                where: { eventType: { startsWith: "onboarding." } },
+                select: { eventType: true, detail: true, createdAt: true },
+                orderBy: { createdAt: "asc" },
+              },
+            },
           },
+          businessProfile: { select: { id: true, businessName: true, website: true, accountStatus: true } },
+          linkClicks: { select: { channel: true, createdAt: true }, orderBy: { createdAt: "asc" } },
         },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+      }),
+      prisma.onboardingSession.count({ where: dateWhere }),
+      prisma.onboardingSession.count({ where: { ...dateWhere, buildQueuedAt: { not: null } } }),
+      prisma.onboardingSession.count({ where: { ...dateWhere, buildCompletedAt: { not: null }, businessProfileId: { not: null } } }),
+      prisma.onboardingSession.count({ where: { ...dateWhere, claimLinkSentAt: { not: null } } }),
+      prisma.onboardingSession.count({ where: { ...dateWhere, claimLinkClickCount: { gt: 0 } } }),
+      prisma.onboardingSession.count({ where: { ...dateWhere, claimedAt: { not: null } } }),
+    ]);
+    res.json({
+      sessions,
+      funnel: { calls, confirmed, built, delivered, clicked, claimed },
+      range: {
+        name: selectedRange.range,
+        from: selectedRange.from?.toISOString() || null,
+        to: selectedRange.to?.toISOString() || null,
       },
-      businessProfile: { select: { id: true, businessName: true, website: true, accountStatus: true } },
-      linkClicks: { select: { channel: true, createdAt: true }, orderBy: { createdAt: "asc" } },
-    },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-  });
-  const funnel = {
-    calls: sessions.length,
-    confirmed: sessions.filter((session) => Boolean(session.buildQueuedAt)).length,
-    built: sessions.filter((session) => Boolean(session.buildCompletedAt && session.businessProfileId)).length,
-    delivered: sessions.filter((session) => Boolean(session.claimLinkSentAt)).length,
-    clicked: sessions.filter((session) => session.claimLinkClickCount > 0).length,
-    claimed: sessions.filter((session) => Boolean(session.claimedAt)).length,
-  };
-  res.json({ sessions, funnel });
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.get("/api/admin/telnyx/search", requireAuth, requireAdmin, async (req, res) => {
@@ -21617,9 +21646,6 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   let agentAudioChunks = 0;
   let agentAudioBytes = 0;
   let greeted = false;
-  let onboardingGreetingComplete = false;
-  let onboardingContextSent = false;
-  let pendingOnboardingPreparation = null;
   const outboundAudioQueue = [];
   let outboundAudioTimer = null;
   let onboardingAgentTurnText = "";
@@ -22229,6 +22255,18 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
 
   const runOnboardingTool = async (functionCall) => {
     const args = functionCall.args || {};
+    if (functionCall.name === "get_onboarding_lookup") {
+      const prepared = await onboardingPreparation;
+      const result = prepared?.found
+        ? {
+            found: true,
+            businessName: prepared.lookup.businessName,
+            website: prepared.lookup.website || null,
+          }
+        : { found: false };
+      await logVoiceCallEvent(callControlId, "onboarding.lookup_checked", result);
+      return result;
+    }
     if (functionCall.name === "build_business_agent") {
       if (!onboardingConfirmationTextSent) {
         throw new Error("Send the captured details for confirmation before building the agent");
@@ -22509,38 +22547,6 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
           : "appSettings.liveModel",
     });
     geminiWs = new WebSocket(`${GEMINI_WS_URL}?key=${encodeURIComponent(geminiApiKey)}`);
-    const onboardingContextFromPreparation = (prepared) => {
-      if (prepared?.found) {
-        return `Caller lookup found possible details: ${prepared.lookup.businessName} (${prepared.lookup.website || "no website found"}). Verify what the business does, its main services, and service area. Ask whether you may text this number a confirmation and secure setup link. If they cannot receive texts or decline, collect an email. Send the details through the chosen channel, confirm them on the call, then queue the build.`;
-      }
-      return `No usable company was returned by caller lookup. Ask for the company name, what the business does, main services, and city or service area. A website is optional. Ask whether you may text this number a confirmation and secure setup link; if not, collect an email. Send the details through the chosen channel, confirm them on the call, then queue the build.`;
-    };
-    const maybeSendOnboardingContext = async () => {
-      if (!isOnboarding || onboardingContextSent || !onboardingGreetingComplete || !pendingOnboardingPreparation) return;
-      if (geminiWs?.readyState !== WebSocket.OPEN) return;
-      onboardingContextSent = true;
-      const prepared = pendingOnboardingPreparation;
-      pendingOnboardingPreparation = null;
-      const context = onboardingContextFromPreparation(prepared);
-      await logVoiceCallEvent(callControlId, "onboarding.context_sent", {
-        found: Boolean(prepared?.found),
-        awaitingConfirmation: true,
-      });
-      geminiWs.send(
-        JSON.stringify({
-          clientContent: { turns: [{ role: "user", parts: [{ text: context }] }], turnComplete: true },
-        }),
-      );
-    };
-    const maybeSendOnboardingWaitNotice = () => {
-      if (!TOOL_WAIT_NOTICE_ENABLED || !isOnboarding || onboardingContextSent || pendingOnboardingPreparation || closing) return;
-      runBackground("log onboarding.wait_notice_skipped", () =>
-        logVoiceCallEvent(callControlId, "tool.wait_notice_skipped", {
-          tool: "onboarding_preparation",
-          channel: "carrier_native_speech_disabled",
-        }),
-      );
-    };
     const maybeEndPhoneCallFromCallerText = (text) => {
       if (!callerRequestedHangup(text)) return false;
       runBackground("caller requested hangup", async () => {
@@ -22561,12 +22567,13 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
 Phone onboarding context:
 - Caller phone: ${call.fromNumber || "unknown"}
 - Campaign source: ${onboardingSession?.campaignLabel || "unlabeled"}
-- In about three minutes, collect only what is needed to prepare a useful first draft: company name, business type, main services, and city or service area. Ask for hours and a website when readily available, but a website is optional.
+- In about three minutes, collect only what is needed to prepare a useful first draft. Usually this is the business name, core service or purpose, and city or service area.
 - Treat caller-provided details as authoritative. The caller will see them prefilled in Fast Agent and can edit them before claiming the trial.
+- After the caller answers the opening invitation, you may call get_onboarding_lookup once. Do not narrate the lookup. Use a likely match to avoid questions or ask one brief confirmation question.
 - Before any text message, explicitly ask: "May I text this number a confirmation and your secure setup link?" Set smsConsent=true only after a clear yes.
 - If the caller declines text messages or cannot receive them, collect and confirm an email address, then use deliveryChannel=email.
 - Use send_onboarding_confirmation_text through the chosen channel before queuing the build. Never claim it was delivered unless the tool returns sent=true.
-- Read back the important details and wait for a clear confirmation on the phone. A text reply of YES also confirms them. If anything is corrected, send the updated confirmation again.
+- After sending the confirmation, ask whether it looks right and wait for a clear answer. A text reply of YES also confirms it. If anything is corrected, send the updated confirmation again.
 - Do not use build_business_agent until the confirmation was delivered and the caller confirmed the details.
 - build_business_agent queues a background build; it does not keep the caller waiting. After it returns queued=true, say the setup will continue after the call and a tracked link will arrive when ready.
 - Never say the receptionist is already built or the setup link was already sent. The background worker sends it after the agent is ready.
@@ -22574,7 +22581,9 @@ Phone onboarding context:
 - Do not suggest switching into the live agent, live-testing the receptionist, connecting to the receptionist, or starting testing mode during phone onboarding.
 - Use send_setup_link only for a caller who is still connected after a previously completed build.
 - Immediately use end_call when the caller says goodbye, asks to hang up, asks to end the call, or asks to disconnect.
-- Keep responses brief and conversational.`;
+- Keep responses brief and conversational.
+
+${ONBOARDING_CONVERSATION_RULES}`;
       const qualificationPrompt = `${profile?.systemPrompt}
 ${platformBusinessRulesPrompt(settings)}
 ${config ? runtimeBusinessInstructions(config) : ""}
@@ -22648,7 +22657,7 @@ Live session identity and language:
         geminiReady = true;
         runBackground("log gemini.ready", () => logVoiceCallEvent(callControlId, "gemini.ready"));
         const greeting = isOnboarding
-          ? "Start the onboarding call now. Explain in one short sentence that you can prepare their AI receptionist, then ask for the company name and what the business does."
+          ? ONBOARDING_OPENING_INSTRUCTION
           : isQualification
             ? `Start the outbound qualification call. Ask for ${qualificationLead?.name || "the lead"} if appropriate, identify yourself as ${config.agentName || settings.agentName} calling for ${profile.businessName}, and ask if now is a good time for a quick follow-up.`
           : `Greet the caller briefly as ${config.agentName || settings.agentName}, the receptionist for ${profile.businessName}.`;
@@ -22669,14 +22678,6 @@ Live session identity and language:
             },
           }),
         );
-        if (isOnboarding) {
-          onboardingPreparation.then((prepared) => {
-            pendingOnboardingPreparation = prepared;
-            maybeSendOnboardingContext().catch((error) =>
-              console.warn(`[telnyx] onboarding context send failed: ${error.message}`),
-            );
-          });
-        }
       }
       const serverContent = message.serverContent;
       let callerHangupRequested = false;
@@ -22799,15 +22800,6 @@ Live session identity and language:
           initialGreetingComplete = true;
           enableCallerInputWhenPlaybackDrains = true;
           maybeEnableCallerInputAfterPlayback();
-        }
-        if (isOnboarding && !onboardingGreetingComplete) {
-          onboardingGreetingComplete = true;
-          setTimeout(() => {
-            maybeSendOnboardingWaitNotice();
-            maybeSendOnboardingContext().catch((error) =>
-              console.warn(`[telnyx] onboarding context send failed: ${error.message}`),
-            );
-          }, 400);
         }
       }
       if (isOnboarding && serverContent?.turnComplete && onboardingAgentTurnText.trim() && !message.toolCall) {

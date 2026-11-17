@@ -79,6 +79,9 @@ try {
   for (const required of ["media.started", "gemini.ready", "gemini.audio.started"]) {
     if (!events.includes(required)) throw new Error(`Missing event: ${required}`);
   }
+  if (events.includes("onboarding.context_sent")) {
+    throw new Error("Onboarding injected a second agent turn before the caller answered");
+  }
   console.log(JSON.stringify({ ok: true, mediaChunks, status: record.onboardingSession.status, events }));
 } finally {
   if (interval) clearInterval(interval);

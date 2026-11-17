@@ -507,7 +507,20 @@
         </form>
         <div class="section-heading onboarding-history-heading">
           <div><h3>Onboarding calls</h3><p>Campaign, lookup, agent creation, persona test, and link delivery status.</p></div>
-          <button id="refreshOnboarding" type="button"><i data-lucide="refresh-cw"></i> Refresh</button>
+        </div>
+        <div class="traffic-toolbar">
+          <div class="traffic-range-buttons">
+            <button class="active" data-onboarding-range="all" type="button">All</button>
+            <button data-onboarding-range="today" type="button">Today</button>
+            <button data-onboarding-range="yesterday" type="button">Yesterday</button>
+            <button data-onboarding-range="last7" type="button">Last week</button>
+          </div>
+          <div class="traffic-custom-range">
+            <input id="onboardingFrom" type="date" aria-label="Onboarding calls from date" />
+            <input id="onboardingTo" type="date" aria-label="Onboarding calls to date" />
+            <button id="applyOnboardingRange" type="button">Apply dates</button>
+            <button id="refreshOnboarding" type="button"><i data-lucide="refresh-cw"></i> Refresh</button>
+          </div>
         </div>
         <div class="traffic-summary" id="onboardingFunnel"></div>
         <div class="call-log-list" id="onboardingList"></div>
