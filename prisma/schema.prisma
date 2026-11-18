@@ -825,6 +825,7 @@ model AppSettings {
   postbackIncludeAllParams    Boolean  @default(false)
   postbackIncludeEmail        Boolean  @default(true)
   postbackIncludePhone        Boolean  @default(false)
+  postbackWebhooks            Json?
   trialReminderSteps          Json?
   updatedAt                   DateTime @updatedAt
 }

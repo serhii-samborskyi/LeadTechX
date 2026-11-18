@@ -280,25 +280,14 @@
                 </div>
               </div>
               <div class="messaging-card ad-platform-card">
-                <div class="messaging-card-heading">
-                  <h4>Postback webhook</h4>
-                  <p>Send trial and purchase conversions to an external tracker with the URL variables captured during registration.</p>
-                </div>
-                <div class="form-grid secret-grid messaging-card-grid">
-                  <label class="check-label"><input id="postbackEnabled" type="checkbox" /> Enable postbacks</label>
-                  <label>Method<select id="postbackMethod"><option value="POST">POST JSON</option><option value="GET">GET query string</option></select></label>
-                  <label class="wide-field">Postback URL<input id="postbackUrl" placeholder="https://tracker.example.com/postback" /></label>
-                  <div class="postback-event-options wide-field">
-                    <strong>Send postback for</strong>
-                    <label class="check-label"><input id="postbackEventTrial" type="checkbox" /> Trial started</label>
-                    <label class="check-label"><input id="postbackEventPaidPlan" type="checkbox" /> Paid plan</label>
-                    <label class="check-label"><input id="postbackEventCreditTopup" type="checkbox" /> Credit top-up</label>
+                <div class="messaging-card-heading postback-card-heading">
+                  <div>
+                    <h4>Postback webhooks</h4>
+                    <p>Send each conversion to one or more external trackers. Every destination can use its own URL, method, events, and fields.</p>
                   </div>
-                  <label class="wide-field postback-param-field">URL variables to forward<textarea id="postbackParamKeys" rows="3" placeholder="utm_source, fbclid, ttclid, rdt_cid, click_id"></textarea><small>Comma or line separated. Turn on all variables when your tracker needs the full registration query string.</small></label>
-                  <label class="check-label"><input id="postbackIncludeAllParams" type="checkbox" /> Forward all URL variables</label>
-                  <label class="check-label"><input id="postbackIncludeEmail" type="checkbox" /> Include customer email when available</label>
-                  <label class="check-label"><input id="postbackIncludePhone" type="checkbox" /> Include phone when available</label>
+                  <button id="addPostbackWebhook" type="button">Add postback</button>
                 </div>
+                <div id="postbackWebhooks" class="postback-webhook-list"></div>
               </div>
               <div class="messaging-card ad-event-card">
                 <div class="messaging-card-heading">

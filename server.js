@@ -1015,8 +1015,8 @@ function normalizePostbackParamKeys(value, fallback = DEFAULT_POSTBACK_PARAM_KEY
   return [...new Set(keys)].join(",");
 }
 
-function postbackParamKeyList(settings) {
-  const clean = normalizePostbackParamKeys(settings?.postbackParamKeys);
+function postbackParamKeyList(postback) {
+  const clean = normalizePostbackParamKeys(postback?.paramKeys);
   return clean
     .split(",")
     .map((key) => key.trim())
@@ -1050,6 +1050,57 @@ function normalizePostbackEvents(value, fallback = DEFAULT_POSTBACK_EVENTS) {
   return [...new Set(cleanEvents)];
 }
 
+function legacyPostbackWebhook(settings) {
+  const hasLegacyPostback = Boolean(
+    settings?.postbackEnabled ||
+      String(settings?.postbackUrl || "").trim() ||
+      settings?.postbackEvents ||
+      String(settings?.postbackParamKeys || "").trim(),
+  );
+  if (!hasLegacyPostback) return null;
+  return {
+    id: "primary",
+    name: "Primary postback",
+    enabled: Boolean(settings.postbackEnabled),
+    url: String(settings.postbackUrl || "").trim(),
+    method: normalizePostbackMethod(settings.postbackMethod),
+    events: normalizePostbackEvents(settings.postbackEvents),
+    paramKeys: normalizePostbackParamKeys(settings.postbackParamKeys),
+    includeAllParams: Boolean(settings.postbackIncludeAllParams),
+    includeEmail: settings.postbackIncludeEmail !== false,
+    includePhone: Boolean(settings.postbackIncludePhone),
+  };
+}
+
+function normalizePostbackWebhooks(value, { legacySettings = null } = {}) {
+  let incoming = value;
+  if (!Array.isArray(incoming)) {
+    const legacy = legacyPostbackWebhook(legacySettings);
+    incoming = legacy ? [legacy] : [];
+  }
+  return incoming.slice(0, 20).map((item, index) => {
+    const entry = item && typeof item === "object" && !Array.isArray(item) ? item : {};
+    const suppliedId = String(entry.id || "").trim();
+    const id = /^[a-zA-Z0-9_-]{1,80}$/.test(suppliedId) ? suppliedId : crypto.randomUUID();
+    return {
+      id,
+      name: String(entry.name || `Postback ${index + 1}`).trim().slice(0, 80) || `Postback ${index + 1}`,
+      enabled: Boolean(entry.enabled),
+      url: normalizePostbackUrl(entry.url),
+      method: normalizePostbackMethod(entry.method),
+      events: normalizePostbackEvents(entry.events, []),
+      paramKeys: normalizePostbackParamKeys(entry.paramKeys),
+      includeAllParams: Boolean(entry.includeAllParams),
+      includeEmail: entry.includeEmail !== false,
+      includePhone: Boolean(entry.includePhone),
+    };
+  });
+}
+
+function configuredPostbackWebhooks(settings) {
+  return normalizePostbackWebhooks(settings?.postbackWebhooks, { legacySettings: settings });
+}
+
 function jsonObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -1062,10 +1113,10 @@ function postbackPayloadValue(value) {
   return String(value);
 }
 
-function postbackSelectedParams(settings, trafficEvent) {
+function postbackSelectedParams(postback, trafficEvent) {
   const queryParams = jsonObject(trafficEvent?.queryParams);
-  if (settings?.postbackIncludeAllParams) return queryParams;
-  const keys = postbackParamKeyList(settings);
+  if (postback?.includeAllParams) return queryParams;
+  const keys = postbackParamKeyList(postback);
   return Object.fromEntries(keys.filter((key) => queryParams[key] !== undefined).map((key) => [key, queryParams[key]]));
 }
 
@@ -1091,8 +1142,8 @@ async function findPostbackTrafficEvent({ eventId, businessProfileId }) {
   });
 }
 
-function buildPostbackPayload({ settings, eventKey, eventId, sourceUrl, customData = {}, userData = {}, trafficEvent = null }) {
-  const selectedParams = postbackSelectedParams(settings, trafficEvent);
+function buildPostbackPayload({ postback, eventKey, eventId, sourceUrl, customData = {}, userData = {}, trafficEvent = null }) {
+  const selectedParams = postbackSelectedParams(postback, trafficEvent);
   const businessProfileId = trafficBusinessProfileId(customData, userData) || trafficEvent?.businessProfileId || null;
   const uniqueId = String(userData.externalId || (businessProfileId ? `business:${businessProfileId}` : "") || eventId || "").trim();
   return {
@@ -1100,8 +1151,8 @@ function buildPostbackPayload({ settings, eventKey, eventId, sourceUrl, customDa
     event_id: eventId,
     unique_id: uniqueId,
     business_profile_id: businessProfileId,
-    email: settings?.postbackIncludeEmail === false ? undefined : userData.email || undefined,
-    phone: settings?.postbackIncludePhone ? userData.phone || undefined : undefined,
+    email: postback?.includeEmail === false ? undefined : userData.email || undefined,
+    phone: postback?.includePhone ? userData.phone || undefined : undefined,
     value: customData.value,
     currency: customData.currency,
     content_name: customData.content_name,
@@ -1138,16 +1189,17 @@ function postbackGetUrl(baseUrl, payload) {
   return url.toString();
 }
 
-async function sendPostbackWebhook({ settings, eventKey, eventId, req, sourceUrl = "", customData = {}, userData = {}, source = "server" }) {
-  if (!settings?.postbackEnabled) return { skipped: true, reason: "Postback disabled" };
-  const enabledEvents = new Set(normalizePostbackEvents(settings.postbackEvents));
+async function sendPostbackWebhook({ postback, eventKey, eventId, req, sourceUrl = "", customData = {}, userData = {}, source = "server" }) {
+  if (!postback?.enabled) return { skipped: true, reason: "Postback disabled" };
+  const enabledEvents = new Set(normalizePostbackEvents(postback.events, []));
   if (!enabledEvents.has(eventKey)) return { skipped: true, reason: "Postback not enabled for event" };
+  const logPlatform = `postback:${postback.id}`;
   let postbackUrl = "";
   try {
-    postbackUrl = normalizePostbackUrl(settings.postbackUrl);
+    postbackUrl = normalizePostbackUrl(postback.url);
   } catch (error) {
     await logAdPlatformEvent({
-      platform: "postback",
+      platform: logPlatform,
       eventKey,
       eventName: "postback",
       eventId,
@@ -1158,15 +1210,12 @@ async function sendPostbackWebhook({ settings, eventKey, eventId, req, sourceUrl
     throw error;
   }
   if (!postbackUrl) return { skipped: true, reason: "Postback URL is missing" };
-  const method = normalizePostbackMethod(settings.postbackMethod);
+  const method = normalizePostbackMethod(postback.method);
   const businessProfileId = trafficBusinessProfileId(customData, userData);
   const trafficEvent = await findPostbackTrafficEvent({ eventId, businessProfileId });
-  const payload = adCustomData(buildPostbackPayload({ settings, eventKey, eventId, sourceUrl, customData, userData, trafficEvent }));
+  const payload = adCustomData(buildPostbackPayload({ postback, eventKey, eventId, sourceUrl, customData, userData, trafficEvent }));
   const targetUrl = method === "GET" ? postbackGetUrl(postbackUrl, payload) : postbackUrl;
-  const requestPayload =
-    method === "GET"
-      ? { method, url: targetUrl, payload }
-      : { method, url: targetUrl, payload };
+  const requestPayload = { destination: { id: postback.id, name: postback.name }, method, url: targetUrl, payload };
   let response;
   let responsePayload = null;
   try {
@@ -1185,7 +1234,7 @@ async function sendPostbackWebhook({ settings, eventKey, eventId, req, sourceUrl
   } catch (error) {
     const message = error.name === "TimeoutError" || error.name === "AbortError" ? "Postback webhook timed out" : error.message;
     await logAdPlatformEvent({
-      platform: "postback",
+      platform: logPlatform,
       eventKey,
       eventName: "postback",
       eventId,
@@ -1197,7 +1246,7 @@ async function sendPostbackWebhook({ settings, eventKey, eventId, req, sourceUrl
     throw new Error(message);
   }
   await logAdPlatformEvent({
-    platform: "postback",
+    platform: logPlatform,
     eventKey,
     eventName: "postback",
     eventId,
@@ -1209,7 +1258,7 @@ async function sendPostbackWebhook({ settings, eventKey, eventId, req, sourceUrl
     error: response.ok ? "" : `Postback webhook failed with HTTP ${response.status}`,
   });
   if (!response.ok) throw new Error(`Postback webhook failed with HTTP ${response.status}`);
-  return { ok: true, status: response.status, response: responsePayload };
+  return { ok: true, id: postback.id, name: postback.name, status: response.status, response: responsePayload };
 }
 
 async function recordTrafficEvent({ req, eventKey, eventId, sourceUrl = "", referrer = "", customData = {}, userData = {}, source = "browser" }) {
@@ -1704,21 +1753,27 @@ async function trackAdEvent({ req, settings, eventKey, eventId, sourceUrl = "", 
       results.openai = { ok: false, error: error.message };
     }
   }
-  if (settings.postbackEnabled) {
-    try {
-      results.postback = await sendPostbackWebhook({
-        settings,
-        eventKey: definition.key,
-        eventId: cleanEventId,
-        req,
-        sourceUrl,
-        customData: eventCustomData,
-        userData,
-        source,
-      });
-    } catch (error) {
-      results.postback = { ok: false, error: error.message };
-    }
+  const postbacks = configuredPostbackWebhooks(settings).filter((postback) => postback.enabled);
+  if (postbacks.length) {
+    results.postbacks = await Promise.all(
+      postbacks.map(async (postback) => {
+        try {
+          return await sendPostbackWebhook({
+            postback,
+            eventKey: definition.key,
+            eventId: cleanEventId,
+            req,
+            sourceUrl,
+            customData: eventCustomData,
+            userData,
+            source,
+          });
+        } catch (error) {
+          return { ok: false, id: postback.id, name: postback.name, error: error.message };
+        }
+      }),
+    );
+    results.postback = results.postbacks[0];
   }
   return { ok: true, eventId: cleanEventId, results };
 }
@@ -15756,7 +15811,11 @@ app.get("/api/admin/settings", requireAuth, requireAdmin, async (_req, res) => {
     hint: stored.get(key)?.hint || null,
   });
   res.json({
-    settings: { ...settings, trialReminderSteps: normalizeTrialReminderSteps(settings.trialReminderSteps) },
+    settings: {
+      ...settings,
+      trialReminderSteps: normalizeTrialReminderSteps(settings.trialReminderSteps),
+      postbackWebhooks: configuredPostbackWebhooks(settings),
+    },
     trialReminderDefaults: DEFAULT_TRIAL_REMINDER_STEPS,
     secrets: {
       geminiApiKey: secretState("gemini_api_key", "GEMINI_API_KEY"),
@@ -15915,6 +15974,9 @@ app.get("/api/admin/bluebubbles/replies", requireAuth, requireAdmin, async (req,
 
 app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
   try {
+    const postbackWebhooks =
+      req.body.postbackWebhooks === undefined ? undefined : normalizePostbackWebhooks(req.body.postbackWebhooks);
+    const primaryPostback = postbackWebhooks?.[0] || null;
     const settings = await prisma.appSettings.upsert({
       where: { id: 1 },
       create: {
@@ -15975,14 +16037,25 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         redditTestId: String(req.body.redditTestId || "").trim(),
         openAiAdsPixelId: String(req.body.openAiAdsPixelId || "").trim(),
         adEventConfig: normalizeAdEventConfig(req.body.adEventConfig),
-        postbackEnabled: Boolean(req.body.postbackEnabled),
-        postbackUrl: normalizePostbackUrl(req.body.postbackUrl),
-        postbackMethod: normalizePostbackMethod(req.body.postbackMethod),
-        postbackEvents: normalizePostbackEvents(req.body.postbackEvents),
-        postbackParamKeys: normalizePostbackParamKeys(req.body.postbackParamKeys),
-        postbackIncludeAllParams: Boolean(req.body.postbackIncludeAllParams),
-        postbackIncludeEmail: req.body.postbackIncludeEmail !== false,
-        postbackIncludePhone: Boolean(req.body.postbackIncludePhone),
+        postbackWebhooks,
+        postbackEnabled: postbackWebhooks ? Boolean(primaryPostback?.enabled) : Boolean(req.body.postbackEnabled),
+        postbackUrl: postbackWebhooks ? primaryPostback?.url || "" : normalizePostbackUrl(req.body.postbackUrl),
+        postbackMethod: postbackWebhooks
+          ? normalizePostbackMethod(primaryPostback?.method)
+          : normalizePostbackMethod(req.body.postbackMethod),
+        postbackEvents: postbackWebhooks
+          ? normalizePostbackEvents(primaryPostback?.events, [])
+          : normalizePostbackEvents(req.body.postbackEvents),
+        postbackParamKeys: postbackWebhooks
+          ? normalizePostbackParamKeys(primaryPostback?.paramKeys)
+          : normalizePostbackParamKeys(req.body.postbackParamKeys),
+        postbackIncludeAllParams: postbackWebhooks
+          ? Boolean(primaryPostback?.includeAllParams)
+          : Boolean(req.body.postbackIncludeAllParams),
+        postbackIncludeEmail: postbackWebhooks ? primaryPostback?.includeEmail !== false : req.body.postbackIncludeEmail !== false,
+        postbackIncludePhone: postbackWebhooks
+          ? Boolean(primaryPostback?.includePhone)
+          : Boolean(req.body.postbackIncludePhone),
         trialReminderSteps: normalizeTrialReminderSteps(req.body.trialReminderSteps),
       },
       update: {
@@ -16079,18 +16152,47 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         redditTestId: typeof req.body.redditTestId === "string" ? req.body.redditTestId.trim() : undefined,
         openAiAdsPixelId: typeof req.body.openAiAdsPixelId === "string" ? req.body.openAiAdsPixelId.trim() : undefined,
         adEventConfig: req.body.adEventConfig ? normalizeAdEventConfig(req.body.adEventConfig) : undefined,
-        postbackEnabled: typeof req.body.postbackEnabled === "boolean" ? req.body.postbackEnabled : undefined,
-        postbackUrl: typeof req.body.postbackUrl === "string" ? normalizePostbackUrl(req.body.postbackUrl) : undefined,
-        postbackMethod: typeof req.body.postbackMethod === "string" ? normalizePostbackMethod(req.body.postbackMethod) : undefined,
-        postbackEvents: req.body.postbackEvents === undefined ? undefined : normalizePostbackEvents(req.body.postbackEvents, []),
-        postbackParamKeys:
-          typeof req.body.postbackParamKeys === "string" ? normalizePostbackParamKeys(req.body.postbackParamKeys) : undefined,
-        postbackIncludeAllParams:
-          typeof req.body.postbackIncludeAllParams === "boolean" ? req.body.postbackIncludeAllParams : undefined,
-        postbackIncludeEmail:
-          typeof req.body.postbackIncludeEmail === "boolean" ? req.body.postbackIncludeEmail : undefined,
-        postbackIncludePhone:
-          typeof req.body.postbackIncludePhone === "boolean" ? req.body.postbackIncludePhone : undefined,
+        postbackWebhooks,
+        postbackEnabled: postbackWebhooks
+          ? Boolean(primaryPostback?.enabled)
+          : typeof req.body.postbackEnabled === "boolean"
+            ? req.body.postbackEnabled
+            : undefined,
+        postbackUrl: postbackWebhooks
+          ? primaryPostback?.url || ""
+          : typeof req.body.postbackUrl === "string"
+            ? normalizePostbackUrl(req.body.postbackUrl)
+            : undefined,
+        postbackMethod: postbackWebhooks
+          ? normalizePostbackMethod(primaryPostback?.method)
+          : typeof req.body.postbackMethod === "string"
+            ? normalizePostbackMethod(req.body.postbackMethod)
+            : undefined,
+        postbackEvents: postbackWebhooks
+          ? normalizePostbackEvents(primaryPostback?.events, [])
+          : req.body.postbackEvents === undefined
+            ? undefined
+            : normalizePostbackEvents(req.body.postbackEvents, []),
+        postbackParamKeys: postbackWebhooks
+          ? normalizePostbackParamKeys(primaryPostback?.paramKeys)
+          : typeof req.body.postbackParamKeys === "string"
+            ? normalizePostbackParamKeys(req.body.postbackParamKeys)
+            : undefined,
+        postbackIncludeAllParams: postbackWebhooks
+          ? Boolean(primaryPostback?.includeAllParams)
+          : typeof req.body.postbackIncludeAllParams === "boolean"
+            ? req.body.postbackIncludeAllParams
+            : undefined,
+        postbackIncludeEmail: postbackWebhooks
+          ? primaryPostback?.includeEmail !== false
+          : typeof req.body.postbackIncludeEmail === "boolean"
+            ? req.body.postbackIncludeEmail
+            : undefined,
+        postbackIncludePhone: postbackWebhooks
+          ? Boolean(primaryPostback?.includePhone)
+          : typeof req.body.postbackIncludePhone === "boolean"
+            ? req.body.postbackIncludePhone
+            : undefined,
         trialReminderSteps:
           req.body.trialReminderSteps === undefined ? undefined : normalizeTrialReminderSteps(req.body.trialReminderSteps, []),
       },

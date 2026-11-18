@@ -70,16 +70,8 @@ const el = {
   redditTestId: document.querySelector("#redditTestId"),
   openAiAdsPixelId: document.querySelector("#openAiAdsPixelId"),
   openAiAdsCapiKey: document.querySelector("#openAiAdsCapiKey"),
-  postbackEnabled: document.querySelector("#postbackEnabled"),
-  postbackUrl: document.querySelector("#postbackUrl"),
-  postbackMethod: document.querySelector("#postbackMethod"),
-  postbackEventTrial: document.querySelector("#postbackEventTrial"),
-  postbackEventPaidPlan: document.querySelector("#postbackEventPaidPlan"),
-  postbackEventCreditTopup: document.querySelector("#postbackEventCreditTopup"),
-  postbackParamKeys: document.querySelector("#postbackParamKeys"),
-  postbackIncludeAllParams: document.querySelector("#postbackIncludeAllParams"),
-  postbackIncludeEmail: document.querySelector("#postbackIncludeEmail"),
-  postbackIncludePhone: document.querySelector("#postbackIncludePhone"),
+  postbackWebhooks: document.querySelector("#postbackWebhooks"),
+  addPostbackWebhook: document.querySelector("#addPostbackWebhook"),
   adEventRows: document.querySelector("#adEventRows"),
   blueBubblesWebhookUrl: document.querySelector("#blueBubblesWebhookUrl"),
   copyBlueBubblesWebhookUrl: document.querySelector("#copyBlueBubblesWebhookUrl"),
@@ -451,19 +443,114 @@ function normalizePostbackEvents(value) {
   return DEFAULT_POSTBACK_EVENTS;
 }
 
-function setPostbackEvents(value) {
-  const events = new Set(normalizePostbackEvents(value));
-  el.postbackEventTrial.checked = events.has("trial_started");
-  el.postbackEventPaidPlan.checked = events.has("paid_plan");
-  el.postbackEventCreditTopup.checked = events.has("credit_topup");
+function newPostbackId() {
+  return globalThis.crypto?.randomUUID?.() || `postback-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-function collectPostbackEvents() {
-  const events = [];
-  if (el.postbackEventTrial.checked) events.push("trial_started");
-  if (el.postbackEventPaidPlan.checked) events.push("paid_plan");
-  if (el.postbackEventCreditTopup.checked) events.push("credit_topup");
-  return events;
+function defaultPostbackWebhook(index = 0) {
+  return {
+    id: newPostbackId(),
+    name: `Postback ${index + 1}`,
+    enabled: true,
+    url: "",
+    method: "GET",
+    events: [...DEFAULT_POSTBACK_EVENTS],
+    paramKeys: DEFAULT_POSTBACK_PARAM_KEYS,
+    includeAllParams: true,
+    includeEmail: true,
+    includePhone: false,
+  };
+}
+
+function postbackWebhookCard(webhook, index) {
+  const config = { ...defaultPostbackWebhook(index), ...(webhook || {}) };
+  config.events = normalizePostbackEvents(config.events);
+  const card = document.createElement("section");
+  card.className = "postback-webhook-card";
+  card.dataset.postbackId = String(config.id || newPostbackId());
+  card.innerHTML = `
+    <div class="postback-webhook-heading">
+      <label>Destination name<input data-postback-field="name" maxlength="80" placeholder="Primary tracker" /></label>
+      <button class="danger-button" data-remove-postback type="button">Remove</button>
+    </div>
+    <div class="form-grid secret-grid messaging-card-grid">
+      <label class="check-label"><input data-postback-field="enabled" type="checkbox" /> Enable this postback</label>
+      <label>Method<select data-postback-field="method"><option value="POST">POST JSON</option><option value="GET">GET query string</option></select></label>
+      <label class="wide-field">Postback URL<input data-postback-field="url" type="url" placeholder="https://tracker.example.com/postback" /></label>
+      <div class="postback-event-options wide-field">
+        <strong>Send postback for</strong>
+        <label class="check-label"><input data-postback-event="trial_started" type="checkbox" /> Trial started</label>
+        <label class="check-label"><input data-postback-event="paid_plan" type="checkbox" /> Paid plan</label>
+        <label class="check-label"><input data-postback-event="credit_topup" type="checkbox" /> Credit top-up</label>
+      </div>
+      <label class="wide-field postback-param-field">URL variables to forward<textarea data-postback-field="paramKeys" rows="3" placeholder="utm_source, fbclid, ttclid, rdt_cid, click_id"></textarea><small>Comma or line separated. Turn on all variables when this tracker needs the full registration query string.</small></label>
+      <label class="check-label"><input data-postback-field="includeAllParams" type="checkbox" /> Forward all URL variables</label>
+      <label class="check-label"><input data-postback-field="includeEmail" type="checkbox" /> Include customer email when available</label>
+      <label class="check-label"><input data-postback-field="includePhone" type="checkbox" /> Include phone when available</label>
+    </div>
+  `;
+  card.querySelector('[data-postback-field="name"]').value = config.name || `Postback ${index + 1}`;
+  card.querySelector('[data-postback-field="enabled"]').checked = Boolean(config.enabled);
+  card.querySelector('[data-postback-field="url"]').value = config.url || "";
+  card.querySelector('[data-postback-field="method"]').value = config.method === "GET" ? "GET" : "POST";
+  card.querySelector('[data-postback-field="paramKeys"]').value = config.paramKeys || DEFAULT_POSTBACK_PARAM_KEYS;
+  card.querySelector('[data-postback-field="includeAllParams"]').checked = Boolean(config.includeAllParams);
+  card.querySelector('[data-postback-field="includeEmail"]').checked = config.includeEmail !== false;
+  card.querySelector('[data-postback-field="includePhone"]').checked = Boolean(config.includePhone);
+  for (const input of card.querySelectorAll("[data-postback-event]")) {
+    input.checked = config.events.includes(input.dataset.postbackEvent);
+  }
+  card.querySelector("[data-remove-postback]").addEventListener("click", () => {
+    card.remove();
+    renderPostbackEmptyState();
+  });
+  return card;
+}
+
+function renderPostbackEmptyState() {
+  el.postbackWebhooks.querySelector(".postback-empty-state")?.remove();
+  if (el.postbackWebhooks.querySelector(".postback-webhook-card")) return;
+  const empty = document.createElement("p");
+  empty.className = "postback-empty-state";
+  empty.textContent = "No postback destinations yet. Add one to send conversions to an external tracker.";
+  el.postbackWebhooks.appendChild(empty);
+}
+
+function addPostbackWebhook(webhook = null) {
+  const cards = el.postbackWebhooks.querySelectorAll(".postback-webhook-card");
+  if (cards.length >= 20) {
+    el.systemStatus.textContent = "You can configure up to 20 postback destinations.";
+    return;
+  }
+  el.postbackWebhooks.querySelector(".postback-empty-state")?.remove();
+  const card = postbackWebhookCard(webhook || defaultPostbackWebhook(cards.length), cards.length);
+  el.postbackWebhooks.appendChild(card);
+  if (!webhook) card.querySelector('[data-postback-field="name"]').focus();
+}
+
+function renderPostbackWebhooks(webhooks) {
+  el.postbackWebhooks.replaceChildren();
+  const entries = Array.isArray(webhooks) ? webhooks : [];
+  entries.forEach((webhook) => addPostbackWebhook(webhook));
+  renderPostbackEmptyState();
+}
+
+function collectPostbackWebhooks() {
+  return [...el.postbackWebhooks.querySelectorAll(".postback-webhook-card")].map((card, index) => {
+    const field = (name) => card.querySelector(`[data-postback-field="${name}"]`);
+    return {
+      id: card.dataset.postbackId || newPostbackId(),
+      name: field("name").value.trim() || `Postback ${index + 1}`,
+      enabled: field("enabled").checked,
+      url: field("url").value.trim(),
+      method: field("method").value,
+      events: [...card.querySelectorAll("[data-postback-event]:checked")].map((input) => input.dataset.postbackEvent),
+      paramKeys: field("paramKeys").value,
+      includeAllParams: field("includeAllParams").checked,
+      includeEmail: field("includeEmail").checked,
+      includePhone: field("includePhone").checked,
+    };
+  });
 }
 
 async function loadModelOptions() {
@@ -696,25 +783,16 @@ async function loadSystem() {
     "redditPixelId",
     "redditTestId",
     "openAiAdsPixelId",
-    "postbackUrl",
-    "postbackMethod",
-    "postbackParamKeys",
   ]) {
     el[key].value = data.settings[key] ?? "";
   }
-  if (!el.postbackMethod.value) el.postbackMethod.value = "POST";
-  if (!el.postbackParamKeys.value) el.postbackParamKeys.value = DEFAULT_POSTBACK_PARAM_KEYS;
-  setPostbackEvents(data.settings.postbackEvents);
+  renderPostbackWebhooks(data.settings.postbackWebhooks);
   renderAdEventRows(data.adEvents?.definitions || [], data.adEvents?.config || {});
   el.smtpSecure.checked = Boolean(data.settings.smtpSecure);
   el.autoBuyTrialPhoneNumber.checked = Boolean(data.settings.autoBuyTrialPhoneNumber);
   trialReminderDefaults = Array.isArray(data.trialReminderDefaults) ? data.trialReminderDefaults : [];
   renderTrialReminderSteps(data.settings.trialReminderSteps || trialReminderDefaults);
-  el.postbackEnabled.checked = Boolean(data.settings.postbackEnabled);
   el.metaMessagingEnabled.checked = Boolean(data.settings.metaMessagingEnabled);
-  el.postbackIncludeAllParams.checked = Boolean(data.settings.postbackIncludeAllParams);
-  el.postbackIncludeEmail.checked = data.settings.postbackIncludeEmail !== false;
-  el.postbackIncludePhone.checked = Boolean(data.settings.postbackIncludePhone);
   secretState("geminiApiKey", data.secrets.geminiApiKey);
   secretState("placesApiKey", data.secrets.placesApiKey);
   secretState("telnyxApiKey", data.secrets.telnyxApiKey);
@@ -2262,6 +2340,8 @@ el.refreshModelOptions.addEventListener("click", () => {
   });
 });
 
+el.addPostbackWebhook.addEventListener("click", () => addPostbackWebhook());
+
 el.systemForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   el.systemStatus.textContent = "Saving";
@@ -2314,14 +2394,7 @@ el.systemForm.addEventListener("submit", async (event) => {
         openAiAdsPixelId: el.openAiAdsPixelId.value,
         openAiAdsCapiKey: el.openAiAdsCapiKey.value,
         adEventConfig: collectAdEventConfig(),
-        postbackEnabled: el.postbackEnabled.checked,
-        postbackUrl: el.postbackUrl.value,
-        postbackMethod: el.postbackMethod.value,
-        postbackEvents: collectPostbackEvents(),
-        postbackParamKeys: el.postbackParamKeys.value,
-        postbackIncludeAllParams: el.postbackIncludeAllParams.checked,
-        postbackIncludeEmail: el.postbackIncludeEmail.checked,
-        postbackIncludePhone: el.postbackIncludePhone.checked,
+        postbackWebhooks: collectPostbackWebhooks(),
         recordingRetentionDays: Number(el.recordingRetentionDays.value),
         demoNumberCapacity: Number(el.demoNumberCapacity.value),
         demoCallerLimit: Number(el.demoCallerLimit.value),
