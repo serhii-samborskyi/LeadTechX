@@ -251,6 +251,25 @@
             <button id="saveFollowupHoursButton" class="primary action-button" type="button">Save follow-up hours</button>
           </details>
 
+          <details class="admin-view setup-disclosure forwarding-disclosure" data-view="setup">
+            <summary><span><strong>Forward missed calls to RingPort</strong><small>Keep your current number and let the receptionist answer only when you cannot</small></span></summary>
+            <div class="forwarding-shell">
+              <div class="forwarding-intro">
+                <div>
+                  <p class="eyebrow">Your RingPort destination</p>
+                  <strong id="forwardingDestinationSummary">Checking your assigned number</strong>
+                  <p>Choose the exact phone service for each existing business line. RingPort will show only verified setup and undo instructions.</p>
+                </div>
+                <button id="addForwardingLineButton" class="primary" type="button"><i data-lucide="plus"></i>Add a phone line</button>
+              </div>
+              <div class="forwarding-safety-note">
+                <i data-lucide="shield-check"></i>
+                <span><strong>Your phone still rings first.</strong> Start with no-answer forwarding. Some carriers send these calls to RingPort instead of carrier voicemail.</span>
+              </div>
+              <div id="forwardingLineList" class="forwarding-line-list"></div>
+            </div>
+          </details>
+
           <section class="admin-view" data-view="advanced">
             <div class="admin-view-heading">
               <h3>Spam protection</h3>

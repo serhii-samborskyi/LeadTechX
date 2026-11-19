@@ -191,6 +191,7 @@ model BusinessConfig {
   bookingTrackingBaseUrl                String                   @default("")
   calendarProvider                      String                   @default("internal")
   providerConfig                        Json?
+  missedCallForwardingLines             Json?
   voiceName                             String                   @default("Puck")
   language                              String                   @default("English")
   agentName                             String                   @default("Alex")

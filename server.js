@@ -42,6 +42,7 @@ import {
 } from "./booking-prefill.js";
 import { crmGroupMatchesSearch, groupCrmContactRows, standaloneCrmContact } from "./crm-grouping.js";
 import { registerMetaPlatform } from "./meta-platform.js";
+import { CALL_FORWARDING_PROVIDERS } from "./public/call-forwarding-catalog.js";
 import {
   DEFAULT_ONBOARDING_INSTRUCTIONS,
   ONBOARDING_CONVERSATION_RULES,
@@ -18521,6 +18522,77 @@ app.put("/api/business-admin/config", async (req, res) => {
     res.json(await refreshedAdmin(profile));
   } catch (error) {
     res.status(errorStatus(error)).json({ error: error.message, code: error.code || undefined });
+  }
+});
+
+const forwardingLineTypes = new Set(["mobile", "home", "business"]);
+const forwardingProvidersById = new Map(CALL_FORWARDING_PROVIDERS.map((provider) => [provider.id, provider]));
+
+function normalizeMissedCallForwardingLines(value) {
+  if (!Array.isArray(value)) throw new Error("Forwarding lines must be a list");
+  if (value.length > 20) throw new Error("Add no more than 20 forwarding lines");
+  return value.map((raw, index) => {
+    const suppliedId = String(raw?.id || "").trim();
+    const id = /^[a-zA-Z0-9_-]{1,80}$/.test(suppliedId) ? suppliedId : crypto.randomUUID();
+    const label = String(raw?.label || `Phone line ${index + 1}`).trim().replace(/\s+/g, " ").slice(0, 100) || `Phone line ${index + 1}`;
+    const lineType = forwardingLineTypes.has(String(raw?.lineType)) ? String(raw.lineType) : "mobile";
+    const providerId = String(raw?.providerId || "other").trim().toLowerCase();
+    const provider = forwardingProvidersById.get(providerId);
+    if (!provider || !provider.lineTypes.includes(lineType)) throw new Error(`Choose a valid provider and service for ${label}`);
+    const sourcePhoneInput = String(raw?.sourcePhone || "").trim();
+    const sourcePhone = sourcePhoneInput ? normalizeE164Phone(sourcePhoneInput) : "";
+    if (sourcePhoneInput && !/^\+1\d{10}$/.test(sourcePhone)) {
+      throw new Error(`Enter a valid US phone number for ${label}`);
+    }
+    const destinationNumber = normalizeE164Phone(raw?.destinationNumber);
+    if (!/^\+1\d{10}$/.test(destinationNumber)) throw new Error(`Choose a RingPort destination for ${label}`);
+    const delaySeconds = [5, 10, 15, 20, 25, 30].includes(Number(raw?.delaySeconds)) ? Number(raw.delaySeconds) : 20;
+    const ringCount = Math.min(9, Math.max(2, Math.round(Number(raw?.ringCount) || 4)));
+    const tested = Boolean(raw?.tested);
+    const parsedTestedAt = raw?.testedAt ? new Date(raw.testedAt) : null;
+    const testedAt = tested
+      ? parsedTestedAt && !Number.isNaN(parsedTestedAt.getTime())
+        ? parsedTestedAt.toISOString()
+        : new Date().toISOString()
+      : null;
+    return {
+      id,
+      label,
+      sourcePhone,
+      lineType,
+      providerId,
+      destinationNumber,
+      delaySeconds,
+      ringCount,
+      busy: Boolean(raw?.busy),
+      unreachable: Boolean(raw?.unreachable),
+      tested,
+      testedAt,
+      updatedAt: new Date().toISOString(),
+    };
+  });
+}
+
+app.put("/api/business-admin/forwarding-lines", async (req, res) => {
+  try {
+    const { profile, config } = await adminContext(req.body.businessName, req.body.website, req.user);
+    const lines = normalizeMissedCallForwardingLines(req.body.lines || []);
+    const assignedNumbers = await businessPhoneNumbers(profile.id);
+    const activeNumbers = new Set(
+      assignedNumbers.filter((number) => number.status === "active").map((number) => normalizeE164Phone(number.phoneNumber)),
+    );
+    for (const line of lines) {
+      if (!activeNumbers.has(line.destinationNumber)) {
+        throw new Error(`${line.destinationNumber} is not an active RingPort number for this business`);
+      }
+    }
+    await prisma.businessConfig.update({
+      where: { id: config.id },
+      data: { missedCallForwardingLines: lines },
+    });
+    res.json(await refreshedAdmin(profile));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
   }
 });
 

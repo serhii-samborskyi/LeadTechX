@@ -1,3 +1,10 @@
+import {
+  CALL_FORWARDING_LINE_TYPES,
+  callForwardingProvider,
+  callForwardingProvidersForType,
+  renderForwardingTemplate,
+} from "./call-forwarding-catalog.js";
+
 const params = new URLSearchParams(window.location.search);
 const languageParam = params.get("language");
 const agentNameParam = params.get("agent_name");
@@ -59,6 +66,7 @@ const state = {
     appointments: [],
     messageThreads: 0,
   },
+  forwardingLines: [],
   adTracking: null,
   businessName: params.get("business_name") || "Business Name",
   website: params.get("website") || "",
@@ -317,6 +325,9 @@ const el = {
   followupTextStartTime: document.querySelector("#followupTextStartTime"),
   followupTextEndTime: document.querySelector("#followupTextEndTime"),
   saveFollowupHoursButton: document.querySelector("#saveFollowupHoursButton"),
+  forwardingDestinationSummary: document.querySelector("#forwardingDestinationSummary"),
+  forwardingLineList: document.querySelector("#forwardingLineList"),
+  addForwardingLineButton: document.querySelector("#addForwardingLineButton"),
   spamProtectionEnabled: document.querySelector("#spamProtectionEnabled"),
   spamBlockUnknownCallers: document.querySelector("#spamBlockUnknownCallers"),
   spamBlockTollFreeCallers: document.querySelector("#spamBlockTollFreeCallers"),
@@ -1994,6 +2005,349 @@ function renderAvailability(rules) {
   }
 }
 
+function forwardingElement(tag, className = "", textContent = "") {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (textContent) node.textContent = textContent;
+  return node;
+}
+
+function activeRingPortNumbers() {
+  return (state.home.phoneNumbers || []).filter((number) => number.status === "active" && number.phoneNumber);
+}
+
+function defaultForwardingProvider(lineType = "mobile") {
+  return callForwardingProvidersForType(lineType)[0]?.id || "other";
+}
+
+function createForwardingLine() {
+  const numbers = activeRingPortNumbers();
+  return {
+    id: window.crypto?.randomUUID?.() || `line_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    label: `Phone line ${state.forwardingLines.length + 1}`,
+    sourcePhone: "",
+    lineType: "mobile",
+    providerId: defaultForwardingProvider("mobile"),
+    destinationNumber: numbers[0]?.phoneNumber || "",
+    delaySeconds: 20,
+    ringCount: 4,
+    busy: false,
+    unreachable: false,
+    tested: false,
+    testedAt: null,
+  };
+}
+
+function forwardingLineById(id) {
+  return state.forwardingLines.find((line) => line.id === id) || null;
+}
+
+function updateForwardingLineFromCard(card) {
+  const line = forwardingLineById(card?.dataset.forwardingLineId);
+  if (!line || !card) return line;
+  line.label = card.querySelector("[data-forwarding-field='label']")?.value.trim() || "Phone line";
+  line.sourcePhone = card.querySelector("[data-forwarding-field='sourcePhone']")?.value.trim() || "";
+  line.lineType = card.querySelector("[data-forwarding-field='lineType']")?.value || "mobile";
+  line.providerId = card.querySelector("[data-forwarding-field='providerId']")?.value || defaultForwardingProvider(line.lineType);
+  line.destinationNumber = card.querySelector("[data-forwarding-field='destinationNumber']")?.value || "";
+  line.delaySeconds = Number(card.querySelector("[data-forwarding-field='delaySeconds']")?.value || line.delaySeconds || 20);
+  line.ringCount = Number(card.querySelector("[data-forwarding-field='ringCount']")?.value || line.ringCount || 4);
+  line.busy = Boolean(card.querySelector("[data-forwarding-field='busy']")?.checked);
+  line.unreachable = Boolean(card.querySelector("[data-forwarding-field='unreachable']")?.checked);
+  const tested = Boolean(card.querySelector("[data-forwarding-field='tested']")?.checked);
+  if (tested !== line.tested) line.testedAt = tested ? new Date().toISOString() : null;
+  line.tested = tested;
+  return line;
+}
+
+function collectForwardingLinesFromCards() {
+  for (const card of el.forwardingLineList?.querySelectorAll("[data-forwarding-line-id]") || []) {
+    updateForwardingLineFromCard(card);
+  }
+  return state.forwardingLines;
+}
+
+function forwardingField(labelText, control) {
+  const label = forwardingElement("label", "forwarding-field");
+  label.append(forwardingElement("span", "", labelText), control);
+  return label;
+}
+
+function forwardingSelect(field, options, value) {
+  const select = document.createElement("select");
+  select.dataset.forwardingField = field;
+  for (const optionData of options) {
+    const option = document.createElement("option");
+    option.value = optionData.id ?? optionData.value;
+    option.textContent = optionData.label;
+    select.appendChild(option);
+  }
+  select.value = value;
+  return select;
+}
+
+function forwardingGuideAction(action, line, destinationAvailable) {
+  const item = forwardingElement("div", action.value ? "forwarding-command" : "forwarding-instruction");
+  if (action.value) {
+    const copy = forwardingElement("div", "forwarding-command-copy");
+    copy.append(forwardingElement("strong", "", action.label || "Dial command"));
+    if (action.detail) copy.append(forwardingElement("small", "", renderForwardingTemplate(action.detail, line)));
+    const command = renderForwardingTemplate(action.value, line);
+    const commandReady = Boolean(destinationAvailable);
+    const code = forwardingElement("code", "", commandReady ? command : "Assign a number to generate this command");
+    const actions = forwardingElement("div", "forwarding-command-actions");
+    const copyButton = forwardingElement("button", "", "Copy command");
+    copyButton.type = "button";
+    copyButton.dataset.forwardingCopy = command;
+    copyButton.disabled = !commandReady;
+    const dialLink = forwardingElement("a", "button-link", "Dial now");
+    dialLink.href = command ? `tel:${command.replaceAll("#", "%23")}` : "#";
+    dialLink.dataset.forwardingDial = "true";
+    if (!commandReady) {
+      dialLink.classList.add("is-disabled");
+      dialLink.setAttribute("aria-disabled", "true");
+      dialLink.removeAttribute("href");
+    }
+    actions.append(copyButton, dialLink);
+    item.append(copy, code, actions);
+  } else {
+    const icon = document.createElement("i");
+    icon.setAttribute("data-lucide", "list-checks");
+    item.append(icon, forwardingElement("p", "", renderForwardingTemplate(action.instruction, line)));
+  }
+  return item;
+}
+
+function forwardingGuideSection(title, actions, line, destinationAvailable) {
+  if (!actions?.length) return null;
+  const section = forwardingElement("section", "forwarding-guide-section");
+  section.append(forwardingElement("h5", "", title));
+  for (const action of actions) section.append(forwardingGuideAction(action, line, destinationAvailable));
+  return section;
+}
+
+function filteredDisableActions(provider, line) {
+  return (provider.disable || []).filter((action) => {
+    if (action.trigger === "busy") return line.busy || provider.includedTriggers?.includes("busy");
+    if (action.trigger === "unreachable") return line.unreachable || provider.includedTriggers?.includes("unreachable");
+    return true;
+  });
+}
+
+function renderForwardingLineCard(line) {
+  const numbers = activeRingPortNumbers();
+  if (!numbers.some((number) => number.phoneNumber === line.destinationNumber)) {
+    line.destinationNumber = numbers[0]?.phoneNumber || "";
+  }
+  const availableProviders = callForwardingProvidersForType(line.lineType);
+  const provider = availableProviders.find((item) => item.id === line.providerId) || availableProviders[0] || callForwardingProvider("other");
+  line.providerId = provider.id;
+  const destinationAvailable = numbers.some((number) => number.phoneNumber === line.destinationNumber);
+  const card = forwardingElement("article", "forwarding-line-card");
+  card.dataset.forwardingLineId = line.id;
+
+  const header = forwardingElement("header", "forwarding-line-header");
+  const headerCopy = forwardingElement("div");
+  headerCopy.append(forwardingElement("h4", "", line.label || "Phone line"));
+  headerCopy.append(
+    forwardingElement(
+      "p",
+      "",
+      line.sourcePhone ? `${line.sourcePhone} · ${provider?.name || "Choose a provider"}` : provider?.name || "Choose a provider",
+    ),
+  );
+  const status = forwardingElement("span", `status-pill ${line.tested ? "active" : "warning"}`, line.tested ? "Tested" : "Not tested");
+  header.append(headerCopy, status);
+
+  const fields = forwardingElement("div", "forwarding-fields");
+  const labelInput = document.createElement("input");
+  labelInput.dataset.forwardingField = "label";
+  labelInput.value = line.label || "";
+  labelInput.placeholder = "Main mobile";
+  const sourceInput = document.createElement("input");
+  sourceInput.dataset.forwardingField = "sourcePhone";
+  sourceInput.type = "tel";
+  sourceInput.value = line.sourcePhone || "";
+  sourceInput.placeholder = "+1 555 123 4567";
+  const typeSelect = forwardingSelect("lineType", CALL_FORWARDING_LINE_TYPES, line.lineType);
+  const providerOptions = callForwardingProvidersForType(line.lineType).map((item) => ({ id: item.id, label: item.name }));
+  const providerSelect = forwardingSelect("providerId", providerOptions, provider.id);
+  const numberOptions = numbers.length
+    ? numbers.map((number) => ({ id: number.phoneNumber, label: [number.label, number.phoneNumber].filter(Boolean).join(" · ") }))
+    : [{ id: "", label: "No active RingPort number assigned" }];
+  const destinationSelect = forwardingSelect("destinationNumber", numberOptions, destinationAvailable ? line.destinationNumber : numbers[0]?.phoneNumber || "");
+  destinationSelect.disabled = numbers.length === 0;
+  fields.append(
+    forwardingField("Line label", labelInput),
+    forwardingField("Existing phone number (optional)", sourceInput),
+    forwardingField("Line type", typeSelect),
+    forwardingField("Provider and service", providerSelect),
+    forwardingField("Forward missed calls to", destinationSelect),
+  );
+  if (provider.delayOptions?.length) {
+    fields.append(
+      forwardingField(
+        "Answer after",
+        forwardingSelect(
+          "delaySeconds",
+          provider.delayOptions.map((seconds) => ({ id: String(seconds), label: `${seconds} seconds${seconds === 20 ? " · recommended" : ""}` })),
+          String(line.delaySeconds || 20),
+        ),
+      ),
+    );
+  }
+  if (provider.ringCountOptions?.length) {
+    fields.append(
+      forwardingField(
+        "Answer after",
+        forwardingSelect(
+          "ringCount",
+          provider.ringCountOptions.map((count) => ({ id: String(count), label: `${count} rings${count === 4 ? " · recommended" : ""}` })),
+          String(line.ringCount || 4),
+        ),
+      ),
+    );
+  }
+
+  const advanced = forwardingElement("details", "forwarding-advanced");
+  advanced.append(forwardingElement("summary", "", "Advanced missed-call conditions"));
+  const toggles = forwardingElement("div", "forwarding-trigger-options");
+  if (provider.includedTriggers?.includes("busy")) {
+    toggles.append(forwardingElement("p", "field-help", "This provider's main command also includes busy calls."));
+  } else if (provider.busy?.length) {
+    const busyLabel = forwardingElement("label", "check-label");
+    const busy = document.createElement("input");
+    busy.type = "checkbox";
+    busy.dataset.forwardingField = "busy";
+    busy.checked = Boolean(line.busy);
+    busyLabel.append(busy, "Also forward when the line is busy");
+    toggles.append(busyLabel);
+  }
+  if (provider.unreachable?.length) {
+    const unavailableLabel = forwardingElement("label", "check-label");
+    const unreachable = document.createElement("input");
+    unreachable.type = "checkbox";
+    unreachable.dataset.forwardingField = "unreachable";
+    unreachable.checked = Boolean(line.unreachable);
+    unavailableLabel.append(unreachable, "Also forward when the phone is unreachable");
+    toggles.append(unavailableLabel);
+  }
+  if (!toggles.children.length) toggles.append(forwardingElement("p", "field-help", "This provider does not publish additional conditional options."));
+  advanced.append(toggles);
+
+  const guide = forwardingElement("div", "forwarding-guide");
+  const guideHeading = forwardingElement("div", "forwarding-guide-heading");
+  const guideTitle = forwardingElement("div");
+  guideTitle.append(forwardingElement("span", `status-pill ${provider.status === "supported" ? "active" : "warning"}`, provider.status === "supported" ? "Copyable setup" : provider.status === "unsupported" ? "Missed-only unavailable" : "Provider steps"));
+  guideTitle.append(forwardingElement("h4", "", `Set up ${provider.name}`));
+  guideHeading.append(guideTitle);
+  if (provider.sourceUrl) {
+    const source = forwardingElement("a", "button-link forwarding-source-link", "Official instructions");
+    source.href = provider.sourceUrl;
+    source.target = "_blank";
+    source.rel = "noreferrer";
+    guideHeading.append(source);
+  }
+  guide.append(guideHeading);
+  if (provider.note) guide.append(forwardingElement("p", `forwarding-provider-note ${provider.status === "unsupported" ? "warning" : ""}`, provider.note));
+  if (numbers.length === 0) {
+    guide.append(forwardingElement("p", "forwarding-provider-note warning", "Assign an active RingPort phone number before copying a destination-specific command."));
+  } else {
+    const destination = forwardingElement("div", "forwarding-destination-row");
+    const destinationCopy = forwardingElement("div");
+    destinationCopy.append(forwardingElement("small", "", "RingPort destination"), forwardingElement("strong", "", line.destinationNumber || numbers[0].phoneNumber));
+    const copyNumber = forwardingElement("button", "", "Copy number");
+    copyNumber.type = "button";
+    copyNumber.dataset.forwardingCopy = line.destinationNumber || numbers[0].phoneNumber;
+    destination.append(destinationCopy, copyNumber);
+    guide.append(destination);
+  }
+  const noAnswerSection = forwardingGuideSection("1 · Enable no-answer forwarding", provider.noAnswer, line, destinationAvailable);
+  if (noAnswerSection) guide.append(noAnswerSection);
+  if (line.busy && provider.busy?.length && !provider.includedTriggers?.includes("busy")) {
+    guide.append(forwardingGuideSection("Optional · Forward busy calls", provider.busy, line, destinationAvailable));
+  }
+  if (line.unreachable && provider.unreachable?.length) {
+    guide.append(forwardingGuideSection("Optional · Forward unreachable calls", provider.unreachable, line, destinationAvailable));
+  }
+
+  const test = forwardingElement("section", "forwarding-test-step");
+  const testCopy = forwardingElement("div");
+  testCopy.append(forwardingElement("h5", "", "2 · Test before you rely on it"));
+  testCopy.append(forwardingElement("p", "", "Call your existing number from another phone, do not answer, and confirm the RingPort receptionist picks up."));
+  const testedLabel = forwardingElement("label", "check-label forwarding-tested-label");
+  const tested = document.createElement("input");
+  tested.type = "checkbox";
+  tested.dataset.forwardingField = "tested";
+  tested.checked = Boolean(line.tested);
+  testedLabel.append(tested, line.testedAt ? `I tested it successfully · ${new Date(line.testedAt).toLocaleDateString()}` : "I tested it successfully");
+  test.append(testCopy, testedLabel);
+  guide.append(test);
+
+  const undoActions = filteredDisableActions(provider, line);
+  const undoSection = forwardingGuideSection("3 · Turn it off or undo", undoActions, line, true);
+  if (undoSection) guide.append(undoSection);
+  const verified = forwardingElement("p", "forwarding-verified", `Instructions verified ${provider.verifiedOn}. Carrier features can vary by plan and region.`);
+  guide.append(verified);
+
+  const footer = forwardingElement("footer", "forwarding-line-actions");
+  const save = forwardingElement("button", "primary", "Save setup");
+  save.type = "button";
+  save.dataset.forwardingAction = "save";
+  save.disabled = numbers.length === 0;
+  const remove = forwardingElement("button", "forwarding-remove", "Remove line");
+  remove.type = "button";
+  remove.dataset.forwardingAction = "remove";
+  footer.append(save, remove);
+
+  card.append(header, fields, advanced, guide, footer);
+  return card;
+}
+
+function renderForwardingLines(lines = state.forwardingLines) {
+  if (!el.forwardingLineList) return;
+  state.forwardingLines = Array.isArray(lines) ? lines.map((line) => ({ ...line })) : [];
+  const numbers = activeRingPortNumbers();
+  if (el.forwardingDestinationSummary) {
+    el.forwardingDestinationSummary.textContent = numbers.length
+      ? numbers.length === 1
+        ? numbers[0].phoneNumber
+        : `${numbers.length} RingPort numbers available`
+      : "No active RingPort number is assigned yet";
+  }
+  el.forwardingLineList.replaceChildren();
+  if (!state.forwardingLines.length) {
+    const empty = forwardingElement("div", "empty-guidance forwarding-empty");
+    empty.append(
+      forwardingElement("strong", "", "No existing phone lines added"),
+      forwardingElement("p", "", "Add the mobile, home, or business number your customers already call. We will guide you without changing that number."),
+    );
+    el.forwardingLineList.append(empty);
+  } else {
+    for (const line of state.forwardingLines) el.forwardingLineList.append(renderForwardingLineCard(line));
+  }
+  if (el.addForwardingLineButton) {
+    const icon = document.createElement("i");
+    icon.setAttribute("data-lucide", numbers.length ? "plus" : "phone-forwarded");
+    el.addForwardingLineButton.dataset.forwardingMode = numbers.length ? "add" : "setup-number";
+    el.addForwardingLineButton.replaceChildren(icon, numbers.length ? "Add a phone line" : "Set up a RingPort number");
+    el.addForwardingLineButton.disabled = false;
+  }
+  window.lucide?.createIcons();
+}
+
+async function saveForwardingLines() {
+  collectForwardingLinesFromCards();
+  setAdminStatus("Saving forwarding setup");
+  const data = await apiJson("/api/business-admin/forwarding-lines", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...adminIdentity(), lines: state.forwardingLines }),
+  });
+  applyAdminData(data);
+  setAdminStatus("Forwarding setup saved");
+}
+
 function applyAdminData(data) {
   state.admin = data.config;
   state.entitlements = data.entitlements || null;
@@ -2015,6 +2369,7 @@ function applyAdminData(data) {
   el.voiceName.value = data.config.voiceName || el.voiceName.value || "Puck";
   el.language.value = languageParam || data.config.language || el.language.value || "English";
   el.agentName.value = agentNameParam || data.config.agentName || el.agentName.value || "Alex";
+  renderForwardingLines(data.config.missedCallForwardingLines || []);
   el.extraInstructions.value = data.config.extraInstructions || "";
   el.qualificationEnabled.checked = data.config.qualificationEnabled !== false;
   el.qualificationLaunchMode.value = data.config.qualificationLaunchMode || "approval";
@@ -5494,6 +5849,65 @@ el.importPricesButton.addEventListener("click", () => {
 
 el.saveInstructionsButton.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.saveFollowupHoursButton?.addEventListener("click", () => runAdmin(saveBusinessConfig));
+el.addForwardingLineButton?.addEventListener("click", () => {
+  if (el.addForwardingLineButton.dataset.forwardingMode === "setup-number") {
+    selectOwnerPage("settings", "billing");
+    return;
+  }
+  state.forwardingLines.push(createForwardingLine());
+  renderForwardingLines();
+  el.forwardingLineList?.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+el.forwardingLineList?.addEventListener("change", (event) => {
+  const field = event.target.closest("[data-forwarding-field]");
+  const card = event.target.closest("[data-forwarding-line-id]");
+  if (!field || !card) return;
+  const line = updateForwardingLineFromCard(card);
+  if (!line) return;
+  if (field.dataset.forwardingField === "lineType") {
+    line.providerId = defaultForwardingProvider(line.lineType);
+    line.tested = false;
+    line.testedAt = null;
+    renderForwardingLines();
+    return;
+  }
+  if (field.dataset.forwardingField === "providerId" || field.dataset.forwardingField === "destinationNumber") {
+    line.tested = false;
+    line.testedAt = null;
+  }
+  if (["providerId", "destinationNumber", "delaySeconds", "ringCount", "busy", "unreachable"].includes(field.dataset.forwardingField)) {
+    renderForwardingLines();
+  }
+});
+el.forwardingLineList?.addEventListener("click", (event) => {
+  const copyButton = event.target.closest("button[data-forwarding-copy]");
+  if (copyButton) {
+    runAdmin(() => copyText(copyButton.dataset.forwardingCopy, "Forwarding instruction copied"));
+    return;
+  }
+  const disabledDial = event.target.closest("[data-forwarding-dial][aria-disabled='true']");
+  if (disabledDial) {
+    event.preventDefault();
+    return;
+  }
+  const actionButton = event.target.closest("button[data-forwarding-action]");
+  if (!actionButton) return;
+  const card = actionButton.closest("[data-forwarding-line-id]");
+  if (actionButton.dataset.forwardingAction === "save") {
+    runAdmin(saveForwardingLines);
+    return;
+  }
+  if (actionButton.dataset.forwardingAction === "remove") {
+    const confirmed = window.confirm(
+      "Remove this saved guide? This does not turn off forwarding at your carrier. Use the Turn it off instructions first if forwarding is active.",
+    );
+    if (!confirmed) return;
+    collectForwardingLinesFromCards();
+    state.forwardingLines = state.forwardingLines.filter((line) => line.id !== card?.dataset.forwardingLineId);
+    renderForwardingLines();
+    runAdmin(saveForwardingLines);
+  }
+});
 el.saveSpamSettingsButton?.addEventListener("click", () => runAdmin(saveBusinessConfig));
 el.addReviewLinkButton.addEventListener("click", () => runAdmin(addReviewLink));
 el.reviewLinkList.addEventListener("click", (event) => {

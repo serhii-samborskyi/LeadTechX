@@ -40,6 +40,7 @@ for (const file of jsFiles) {
 
 run("npx", ["prisma", "validate"]);
 run(process.execPath, ["scripts/test-call-silence-guard.js"]);
+run(process.execPath, ["scripts/test-call-forwarding-catalog.js"]);
 run(process.execPath, ["scripts/test-meta-platform.js"]);
 run(process.execPath, ["scripts/test-booking-prefill.js"]);
 run(process.execPath, ["scripts/test-custom-booking-provider.js"]);
