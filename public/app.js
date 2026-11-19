@@ -326,6 +326,8 @@ const el = {
   followupTextEndTime: document.querySelector("#followupTextEndTime"),
   saveFollowupHoursButton: document.querySelector("#saveFollowupHoursButton"),
   forwardingDestinationSummary: document.querySelector("#forwardingDestinationSummary"),
+  forwardingIntroDescription: document.querySelector("#forwardingIntroDescription"),
+  forwardingSafetyNote: document.querySelector("#forwardingSafetyNote"),
   forwardingLineList: document.querySelector("#forwardingLineList"),
   addForwardingLineButton: document.querySelector("#addForwardingLineButton"),
   spamProtectionEnabled: document.querySelector("#spamProtectionEnabled"),
@@ -2054,9 +2056,12 @@ function updateForwardingLineFromCard(card) {
   line.ringCount = Number(card.querySelector("[data-forwarding-field='ringCount']")?.value || line.ringCount || 4);
   line.busy = Boolean(card.querySelector("[data-forwarding-field='busy']")?.checked);
   line.unreachable = Boolean(card.querySelector("[data-forwarding-field='unreachable']")?.checked);
-  const tested = Boolean(card.querySelector("[data-forwarding-field='tested']")?.checked);
-  if (tested !== line.tested) line.testedAt = tested ? new Date().toISOString() : null;
-  line.tested = tested;
+  const testedControl = card.querySelector("[data-forwarding-field='tested']");
+  if (testedControl) {
+    const tested = Boolean(testedControl.checked);
+    if (tested !== line.tested) line.testedAt = tested ? new Date().toISOString() : null;
+    line.tested = tested;
+  }
   return line;
 }
 
@@ -2096,7 +2101,7 @@ function forwardingGuideAction(action, line, destinationAvailable) {
     const commandReady = Boolean(destinationAvailable);
     const code = forwardingElement("code", "", commandReady ? command : "Assign a number to generate this command");
     const actions = forwardingElement("div", "forwarding-command-actions");
-    const copyButton = forwardingElement("button", "", "Copy command");
+    const copyButton = forwardingElement("button", "primary", "Copy command");
     copyButton.type = "button";
     copyButton.dataset.forwardingCopy = command;
     copyButton.disabled = !commandReady;
@@ -2143,23 +2148,55 @@ function renderForwardingLineCard(line) {
   const provider = availableProviders.find((item) => item.id === line.providerId) || availableProviders[0] || callForwardingProvider("other");
   line.providerId = provider.id;
   const destinationAvailable = numbers.some((number) => number.phoneNumber === line.destinationNumber);
-  const card = forwardingElement("article", "forwarding-line-card");
+  const card = forwardingElement("details", `forwarding-line-card${line.tested ? " is-complete" : ""}`);
   card.dataset.forwardingLineId = line.id;
+  card.open = !line.tested;
 
-  const header = forwardingElement("header", "forwarding-line-header");
+  const header = forwardingElement("summary", "forwarding-line-header");
   const headerCopy = forwardingElement("div");
-  headerCopy.append(forwardingElement("h4", "", line.label || "Phone line"));
+  headerCopy.append(forwardingElement("h4", "", line.tested ? `${line.label || "Phone line"} is ready` : line.label || "Set up this phone line"));
   headerCopy.append(
     forwardingElement(
       "p",
       "",
-      line.sourcePhone ? `${line.sourcePhone} · ${provider?.name || "Choose a provider"}` : provider?.name || "Choose a provider",
+      [line.sourcePhone, provider?.name || "Choose a provider", line.destinationNumber ? `to ${line.destinationNumber}` : ""].filter(Boolean).join(" · "),
     ),
   );
-  const status = forwardingElement("span", `status-pill ${line.tested ? "active" : "warning"}`, line.tested ? "Tested" : "Not tested");
+  const status = forwardingElement("span", `status-pill ${line.tested ? "active" : "warning"}`, line.tested ? "Working" : "Setup needed");
   header.append(headerCopy, status);
 
-  const fields = forwardingElement("div", "forwarding-fields");
+  const body = forwardingElement("div", "forwarding-line-body");
+  const providerStep = forwardingElement("section", "forwarding-setup-step");
+  const providerStepHeading = forwardingElement("div", "forwarding-step-heading");
+  providerStepHeading.append(
+    forwardingElement("h5", "", "1 · Choose your phone service"),
+    forwardingElement("p", "", "This lets RingPort show the correct carrier instructions."),
+  );
+  const fields = forwardingElement("div", "forwarding-fields forwarding-core-fields");
+  const typeSelect = forwardingSelect("lineType", CALL_FORWARDING_LINE_TYPES, line.lineType);
+  const providerOptions = callForwardingProvidersForType(line.lineType).map((item) => ({ id: item.id, label: item.name }));
+  const providerSelect = forwardingSelect("providerId", providerOptions, provider.id);
+  fields.append(
+    forwardingField("What kind of phone is it?", typeSelect),
+    forwardingField("Who provides the service?", providerSelect),
+  );
+  if (numbers.length > 1) {
+    const numberOptions = numbers.map((number) => ({
+      id: number.phoneNumber,
+      label: [number.label, number.phoneNumber].filter(Boolean).join(" · "),
+    }));
+    const destinationSelect = forwardingSelect(
+      "destinationNumber",
+      numberOptions,
+      destinationAvailable ? line.destinationNumber : numbers[0]?.phoneNumber || "",
+    );
+    fields.append(forwardingField("Which RingPort number should answer?", destinationSelect));
+  }
+  providerStep.append(providerStepHeading, fields);
+
+  const lineOptions = forwardingElement("details", "forwarding-line-options");
+  lineOptions.append(forwardingElement("summary", "", "Line details and timing"));
+  const detailFields = forwardingElement("div", "forwarding-fields");
   const labelInput = document.createElement("input");
   labelInput.dataset.forwardingField = "label";
   labelInput.value = line.label || "";
@@ -2169,23 +2206,12 @@ function renderForwardingLineCard(line) {
   sourceInput.type = "tel";
   sourceInput.value = line.sourcePhone || "";
   sourceInput.placeholder = "+1 555 123 4567";
-  const typeSelect = forwardingSelect("lineType", CALL_FORWARDING_LINE_TYPES, line.lineType);
-  const providerOptions = callForwardingProvidersForType(line.lineType).map((item) => ({ id: item.id, label: item.name }));
-  const providerSelect = forwardingSelect("providerId", providerOptions, provider.id);
-  const numberOptions = numbers.length
-    ? numbers.map((number) => ({ id: number.phoneNumber, label: [number.label, number.phoneNumber].filter(Boolean).join(" · ") }))
-    : [{ id: "", label: "No active RingPort number assigned" }];
-  const destinationSelect = forwardingSelect("destinationNumber", numberOptions, destinationAvailable ? line.destinationNumber : numbers[0]?.phoneNumber || "");
-  destinationSelect.disabled = numbers.length === 0;
-  fields.append(
-    forwardingField("Line label", labelInput),
+  detailFields.append(
+    forwardingField("Line name", labelInput),
     forwardingField("Existing phone number (optional)", sourceInput),
-    forwardingField("Line type", typeSelect),
-    forwardingField("Provider and service", providerSelect),
-    forwardingField("Forward missed calls to", destinationSelect),
   );
   if (provider.delayOptions?.length) {
-    fields.append(
+    detailFields.append(
       forwardingField(
         "Answer after",
         forwardingSelect(
@@ -2197,7 +2223,7 @@ function renderForwardingLineCard(line) {
     );
   }
   if (provider.ringCountOptions?.length) {
-    fields.append(
+    detailFields.append(
       forwardingField(
         "Answer after",
         forwardingSelect(
@@ -2208,9 +2234,7 @@ function renderForwardingLineCard(line) {
       ),
     );
   }
-
-  const advanced = forwardingElement("details", "forwarding-advanced");
-  advanced.append(forwardingElement("summary", "", "Advanced missed-call conditions"));
+  lineOptions.append(detailFields);
   const toggles = forwardingElement("div", "forwarding-trigger-options");
   if (provider.includedTriggers?.includes("busy")) {
     toggles.append(forwardingElement("p", "field-help", "This provider's main command also includes busy calls."));
@@ -2232,17 +2256,19 @@ function renderForwardingLineCard(line) {
     unavailableLabel.append(unreachable, "Also forward when the phone is unreachable");
     toggles.append(unavailableLabel);
   }
-  if (!toggles.children.length) toggles.append(forwardingElement("p", "field-help", "This provider does not publish additional conditional options."));
-  advanced.append(toggles);
+  if (toggles.children.length) lineOptions.append(toggles);
+  providerStep.append(lineOptions);
 
-  const guide = forwardingElement("div", "forwarding-guide");
+  const guide = forwardingElement("section", "forwarding-guide forwarding-setup-step");
   const guideHeading = forwardingElement("div", "forwarding-guide-heading");
   const guideTitle = forwardingElement("div");
-  guideTitle.append(forwardingElement("span", `status-pill ${provider.status === "supported" ? "active" : "warning"}`, provider.status === "supported" ? "Copyable setup" : provider.status === "unsupported" ? "Missed-only unavailable" : "Provider steps"));
-  guideTitle.append(forwardingElement("h4", "", `Set up ${provider.name}`));
+  guideTitle.append(
+    forwardingElement("h5", "", "2 · Forward missed calls"),
+    forwardingElement("p", "", `Use the recommended ${provider.name} setup below.`),
+  );
   guideHeading.append(guideTitle);
   if (provider.sourceUrl) {
-    const source = forwardingElement("a", "button-link forwarding-source-link", "Official instructions");
+    const source = forwardingElement("a", "button-link forwarding-source-link", "Carrier help");
     source.href = provider.sourceUrl;
     source.target = "_blank";
     source.rel = "noreferrer";
@@ -2250,19 +2276,17 @@ function renderForwardingLineCard(line) {
   }
   guide.append(guideHeading);
   if (provider.note) guide.append(forwardingElement("p", `forwarding-provider-note ${provider.status === "unsupported" ? "warning" : ""}`, provider.note));
-  if (numbers.length === 0) {
-    guide.append(forwardingElement("p", "forwarding-provider-note warning", "Assign an active RingPort phone number before copying a destination-specific command."));
-  } else {
+  if (destinationAvailable) {
     const destination = forwardingElement("div", "forwarding-destination-row");
     const destinationCopy = forwardingElement("div");
-    destinationCopy.append(forwardingElement("small", "", "RingPort destination"), forwardingElement("strong", "", line.destinationNumber || numbers[0].phoneNumber));
+    destinationCopy.append(forwardingElement("small", "", "Calls will go to"), forwardingElement("strong", "", line.destinationNumber || numbers[0].phoneNumber));
     const copyNumber = forwardingElement("button", "", "Copy number");
     copyNumber.type = "button";
     copyNumber.dataset.forwardingCopy = line.destinationNumber || numbers[0].phoneNumber;
     destination.append(destinationCopy, copyNumber);
     guide.append(destination);
   }
-  const noAnswerSection = forwardingGuideSection("1 · Enable no-answer forwarding", provider.noAnswer, line, destinationAvailable);
+  const noAnswerSection = forwardingGuideSection("Recommended · Forward when you do not answer", provider.noAnswer, line, destinationAvailable);
   if (noAnswerSection) guide.append(noAnswerSection);
   if (line.busy && provider.busy?.length && !provider.includedTriggers?.includes("busy")) {
     guide.append(forwardingGuideSection("Optional · Forward busy calls", provider.busy, line, destinationAvailable));
@@ -2273,34 +2297,40 @@ function renderForwardingLineCard(line) {
 
   const test = forwardingElement("section", "forwarding-test-step");
   const testCopy = forwardingElement("div");
-  testCopy.append(forwardingElement("h5", "", "2 · Test before you rely on it"));
-  testCopy.append(forwardingElement("p", "", "Call your existing number from another phone, do not answer, and confirm the RingPort receptionist picks up."));
-  const testedLabel = forwardingElement("label", "check-label forwarding-tested-label");
-  const tested = document.createElement("input");
-  tested.type = "checkbox";
-  tested.dataset.forwardingField = "tested";
-  tested.checked = Boolean(line.tested);
-  testedLabel.append(tested, line.testedAt ? `I tested it successfully · ${new Date(line.testedAt).toLocaleDateString()}` : "I tested it successfully");
-  test.append(testCopy, testedLabel);
-  guide.append(test);
+  testCopy.append(forwardingElement("h5", "", "3 · Test it"));
+  testCopy.append(
+    forwardingElement(
+      "p",
+      "",
+      line.tested
+        ? `Marked working${line.testedAt ? ` on ${new Date(line.testedAt).toLocaleDateString()}` : ""}.`
+        : "Call your existing number from another phone, do not answer, and confirm the RingPort receptionist picks up.",
+    ),
+  );
+  const testedButton = forwardingElement("button", line.tested ? "" : "primary", line.tested ? "Test again" : "It worked — mark as tested");
+  testedButton.type = "button";
+  testedButton.dataset.forwardingAction = "toggle-tested";
+  test.append(testCopy, testedButton);
 
   const undoActions = filteredDisableActions(provider, line);
-  const undoSection = forwardingGuideSection("3 · Turn it off or undo", undoActions, line, true);
-  if (undoSection) guide.append(undoSection);
-  const verified = forwardingElement("p", "forwarding-verified", `Instructions verified ${provider.verifiedOn}. Carrier features can vary by plan and region.`);
-  guide.append(verified);
-
+  const support = forwardingElement("details", "forwarding-support");
+  support.append(forwardingElement("summary", "", "Troubleshooting and turn off forwarding"));
+  const supportBody = forwardingElement("div", "forwarding-support-body");
+  const undoSection = forwardingGuideSection("Turn off forwarding", undoActions, line, true);
+  if (undoSection) supportBody.append(undoSection);
+  supportBody.append(
+    forwardingElement("p", "forwarding-verified", `Instructions verified ${provider.verifiedOn}. Carrier features can vary by plan and region.`),
+  );
   const footer = forwardingElement("footer", "forwarding-line-actions");
-  const save = forwardingElement("button", "primary", "Save setup");
-  save.type = "button";
-  save.dataset.forwardingAction = "save";
-  save.disabled = numbers.length === 0;
   const remove = forwardingElement("button", "forwarding-remove", "Remove line");
   remove.type = "button";
   remove.dataset.forwardingAction = "remove";
-  footer.append(save, remove);
+  footer.append(remove);
+  supportBody.append(footer);
+  support.append(supportBody);
 
-  card.append(header, fields, advanced, guide, footer);
+  body.append(providerStep, guide, test, support);
+  card.append(header, body);
   return card;
 }
 
@@ -2316,21 +2346,31 @@ function renderForwardingLines(lines = state.forwardingLines) {
       : "No active RingPort number is assigned yet";
   }
   el.forwardingLineList.replaceChildren();
-  if (!state.forwardingLines.length) {
+  if (el.forwardingSafetyNote) el.forwardingSafetyNote.hidden = numbers.length === 0;
+  if (el.forwardingIntroDescription) {
+    el.forwardingIntroDescription.textContent = numbers.length
+      ? "Choose the phone service customers already call. RingPort will guide you through the rest."
+      : "Connect a RingPort number first. Your saved phone-line details will remain here and appear when the number is ready.";
+  }
+  if (numbers.length && !state.forwardingLines.length) {
     const empty = forwardingElement("div", "empty-guidance forwarding-empty");
     empty.append(
-      forwardingElement("strong", "", "No existing phone lines added"),
-      forwardingElement("p", "", "Add the mobile, home, or business number your customers already call. We will guide you without changing that number."),
+      forwardingElement("strong", "", "Keep your current business number"),
+      forwardingElement("p", "", "Tell us which phone service customers already call, then follow one short setup instruction."),
     );
     el.forwardingLineList.append(empty);
-  } else {
+  } else if (numbers.length) {
     for (const line of state.forwardingLines) el.forwardingLineList.append(renderForwardingLineCard(line));
   }
   if (el.addForwardingLineButton) {
     const icon = document.createElement("i");
     icon.setAttribute("data-lucide", numbers.length ? "plus" : "phone-forwarded");
     el.addForwardingLineButton.dataset.forwardingMode = numbers.length ? "add" : "setup-number";
-    el.addForwardingLineButton.replaceChildren(icon, numbers.length ? "Add a phone line" : "Set up a RingPort number");
+    el.addForwardingLineButton.hidden = numbers.length > 0 && state.forwardingLines.some((line) => !line.tested);
+    el.addForwardingLineButton.replaceChildren(
+      icon,
+      numbers.length ? (state.forwardingLines.length ? "Add another phone line" : "Set up forwarding") : "Set up a RingPort number",
+    );
     el.addForwardingLineButton.disabled = false;
   }
   window.lucide?.createIcons();
@@ -5869,6 +5909,7 @@ el.forwardingLineList?.addEventListener("change", (event) => {
     line.tested = false;
     line.testedAt = null;
     renderForwardingLines();
+    runAdmin(saveForwardingLines);
     return;
   }
   if (field.dataset.forwardingField === "providerId" || field.dataset.forwardingField === "destinationNumber") {
@@ -5878,6 +5919,7 @@ el.forwardingLineList?.addEventListener("change", (event) => {
   if (["providerId", "destinationNumber", "delaySeconds", "ringCount", "busy", "unreachable"].includes(field.dataset.forwardingField)) {
     renderForwardingLines();
   }
+  runAdmin(saveForwardingLines);
 });
 el.forwardingLineList?.addEventListener("click", (event) => {
   const copyButton = event.target.closest("button[data-forwarding-copy]");
@@ -5893,7 +5935,12 @@ el.forwardingLineList?.addEventListener("click", (event) => {
   const actionButton = event.target.closest("button[data-forwarding-action]");
   if (!actionButton) return;
   const card = actionButton.closest("[data-forwarding-line-id]");
-  if (actionButton.dataset.forwardingAction === "save") {
+  if (actionButton.dataset.forwardingAction === "toggle-tested") {
+    const line = updateForwardingLineFromCard(card);
+    if (!line) return;
+    line.tested = !line.tested;
+    line.testedAt = line.tested ? new Date().toISOString() : null;
+    renderForwardingLines();
     runAdmin(saveForwardingLines);
     return;
   }

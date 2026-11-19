@@ -3623,6 +3623,20 @@ dd {
   padding: 14px 16px;
   border-bottom: 1px solid var(--line);
   background: #fbfdfc;
+  cursor: pointer;
+  list-style: none;
+}
+
+.forwarding-line-header::-webkit-details-marker {
+  display: none;
+}
+
+.forwarding-line-card:not([open]) .forwarding-line-header {
+  border-bottom-color: transparent;
+}
+
+.forwarding-line-card.is-complete:not([open]) .forwarding-line-header {
+  background: #f3faf6;
 }
 
 .forwarding-line-header > div {
@@ -3640,11 +3654,51 @@ dd {
   font-size: 0.8rem;
 }
 
+.forwarding-line-body {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.forwarding-setup-step {
+  display: grid;
+  gap: 12px;
+}
+
+.forwarding-step-heading,
+.forwarding-guide-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.forwarding-step-heading h5,
+.forwarding-step-heading p,
+.forwarding-guide-heading h5,
+.forwarding-guide-heading p {
+  margin: 0;
+}
+
+.forwarding-step-heading h5,
+.forwarding-guide-heading h5 {
+  font-size: 0.9rem;
+}
+
+.forwarding-step-heading p,
+.forwarding-guide-heading p {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
 .forwarding-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  padding: 16px;
+  padding: 0;
+}
+
+.forwarding-core-fields {
+  max-width: 980px;
 }
 
 .forwarding-field {
@@ -3658,18 +3712,24 @@ dd {
   font-weight: 750;
 }
 
-.forwarding-advanced {
-  margin: 0 16px 16px;
+.forwarding-line-options,
+.forwarding-support {
   border: 1px solid var(--line);
   border-radius: 8px;
 }
 
-.forwarding-advanced > summary {
+.forwarding-line-options > summary,
+.forwarding-support > summary {
   padding: 11px 12px;
   cursor: pointer;
   color: var(--muted);
   font-size: 0.82rem;
   font-weight: 800;
+  list-style-position: inside;
+}
+
+.forwarding-line-options > .forwarding-fields {
+  padding: 2px 12px 12px;
 }
 
 .forwarding-trigger-options {
@@ -3682,7 +3742,6 @@ dd {
 .forwarding-guide {
   display: grid;
   gap: 12px;
-  margin: 0 16px;
   padding: 16px;
   border: 1px solid #cfe5d9;
   border-radius: 9px;
@@ -3691,11 +3750,6 @@ dd {
 
 .forwarding-guide-heading {
   align-items: flex-start;
-}
-
-.forwarding-guide-heading > div {
-  display: grid;
-  gap: 7px;
 }
 
 .forwarding-source-link {
@@ -3822,7 +3876,7 @@ dd {
 
 .forwarding-test-step {
   align-items: flex-start;
-  padding: 12px;
+  padding: 14px 16px;
   border: 1px dashed #a8cbb9;
   border-radius: 8px;
   background: #fff;
@@ -3840,7 +3894,7 @@ dd {
   line-height: 1.4;
 }
 
-.forwarding-tested-label {
+.forwarding-test-step > button {
   flex: 0 0 auto;
 }
 
@@ -3851,11 +3905,30 @@ dd {
 
 .forwarding-line-actions {
   justify-content: flex-start;
-  padding: 14px 16px 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 
 .forwarding-remove {
   color: var(--danger);
+}
+
+.forwarding-support-body {
+  display: grid;
+  gap: 12px;
+  padding: 2px 12px 12px;
+}
+
+.forwarding-shell button,
+.forwarding-shell .button-link,
+.forwarding-line-header {
+  transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), background-color 160ms ease, border-color 160ms ease;
+}
+
+.forwarding-shell button:active:not(:disabled),
+.forwarding-shell .button-link:active,
+.forwarding-line-header:active {
+  transform: scale(0.98);
 }
 
 .admin-view-heading {
@@ -6787,8 +6860,8 @@ a.appointment-field-value {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .forwarding-tested-label {
-    flex: auto;
+  .forwarding-test-step > button {
+    width: 100%;
   }
 
   .forwarding-line-actions {
