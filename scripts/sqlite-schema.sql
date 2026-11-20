@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS "TransferMessage" (
 CREATE TABLE IF NOT EXISTS "AppSettings" (
   "id" INTEGER NOT NULL PRIMARY KEY DEFAULT 1,
   "researchModel" TEXT NOT NULL DEFAULT 'gemini-3.1-pro-preview',
-  "liveModel" TEXT NOT NULL DEFAULT 'models/gemini-3.1-flash-live-preview',
+  "liveModel" TEXT NOT NULL DEFAULT 'models/gemini-3.8-live',
   "voiceName" TEXT NOT NULL DEFAULT 'Puck',
   "language" TEXT NOT NULL DEFAULT 'English',
   "agentName" TEXT NOT NULL DEFAULT 'Alex',

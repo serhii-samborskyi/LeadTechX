@@ -763,7 +763,7 @@ model TransferMessage {
 model AppSettings {
   id                          Int      @id @default(1)
   researchModel               String   @default("gemini-3.1-pro-preview")
-  liveModel                   String   @default("models/gemini-3.1-flash-live-preview")
+  liveModel                   String   @default("models/gemini-3.8-live")
   voiceName                   String   @default("Puck")
   language                    String   @default("English")
   agentName                   String   @default("Alex")

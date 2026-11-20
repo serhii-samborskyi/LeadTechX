@@ -61,6 +61,7 @@ const SSL_CERT = process.env.SSL_CERT || path.join(__dirname, "certs/local-cert.
 const SSL_KEY = process.env.SSL_KEY || path.join(__dirname, "certs/local-key.pem");
 const GEMINI_WS_URL =
   "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+const GEMINI_SETUP_TIMEOUT_MS = Math.max(5000, Number(process.env.GEMINI_SETUP_TIMEOUT_MS) || 12000);
 const FALLBACK_RESEARCH_MODELS = [
   { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview" },
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
@@ -68,8 +69,9 @@ const FALLBACK_RESEARCH_MODELS = [
   { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
 ];
 const FALLBACK_LIVE_MODELS = [
-  { id: "models/gemini-3.1-flash-live-preview", label: "Gemini 3.1 Flash Live Preview" },
-  { id: "models/gemini-2.5-flash-native-audio-preview-09-2025", label: "Gemini 2.5 Flash Native Audio Preview" },
+  { id: "models/gemini-3.8-live", label: "Gemini 3.8 Live" },
+  { id: "models/gemini-2.5-flash-native-audio-latest", label: "Gemini 2.5 Flash Native Audio Latest" },
+  { id: "models/gemini-2.5-flash-native-audio-preview-12-2025", label: "Gemini 2.5 Flash Native Audio Preview 12-2025" },
 ];
 const AD_EVENT_DEFINITIONS = [
   {
@@ -5572,7 +5574,7 @@ async function getSettings() {
     create: {
       id: 1,
       researchModel: "gemini-3.1-pro-preview",
-      liveModel: "models/gemini-3.1-flash-live-preview",
+      liveModel: "models/gemini-3.8-live",
       voiceName: "Puck",
       language: "English",
       agentName: "Alex",
@@ -11871,7 +11873,7 @@ function extractOnboardingBusinessDetailsFast({ transcript, sourceText }) {
 
 function liveModelPath(model) {
   const trimmed = String(model || "").trim();
-  if (!trimmed) return "models/gemini-3.1-flash-live-preview";
+  if (!trimmed) return "models/gemini-3.8-live";
   return trimmed.startsWith("models/") ? trimmed : `models/${trimmed}`;
 }
 
@@ -21993,6 +21995,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
   let callerVoicedFrameRun = 0;
   let silenceGuard = null;
   let mediaStartTimer = null;
+  let geminiSetupTimer = null;
   let onboardingTranscript = onboardingSession?.transcript || "";
   let onboardingRealtimeTranscript = onboardingTranscript;
   let qualificationTranscript = qualificationAttempt?.transcript || "";
@@ -22238,6 +22241,10 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
     pendingAgentHangup = null;
     closing = true;
     silenceGuard?.stop();
+    if (geminiSetupTimer) {
+      clearTimeout(geminiSetupTimer);
+      geminiSetupTimer = null;
+    }
     await logVoiceCallEvent(callControlId, "hangup.requested", { reason });
     try {
       await telnyxRequest(`/calls/${encodeURIComponent(callControlId)}/actions/hangup`, {
@@ -22310,6 +22317,10 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
     pendingAgentHangup = null;
     closing = true;
     silenceGuard?.stop();
+    if (geminiSetupTimer) {
+      clearTimeout(geminiSetupTimer);
+      geminiSetupTimer = null;
+    }
     clearTelnyxPlayback("call_transfer_detach", 0);
     geminiReady = false;
     await logVoiceCallEvent(callControlId, "call.transfer_bridge_detached", transferDetachDetail);
@@ -23025,6 +23036,24 @@ Live session identity and language:
       geminiWs.send(
         JSON.stringify(setup),
       );
+      if (geminiSetupTimer) clearTimeout(geminiSetupTimer);
+      geminiSetupTimer = setTimeout(() => {
+        if (closing || bridgeDetachedForTransfer || geminiReady) return;
+        geminiSetupTimer = null;
+        const message = `Live voice provider did not complete setup within ${GEMINI_SETUP_TIMEOUT_MS}ms`;
+        console.error(`[telnyx] ${message} (${phoneLiveModel})`);
+        runBackground("log gemini setup timeout", () =>
+          logVoiceCallEvent(callControlId, "error", {
+            stage: "gemini_setup_timeout",
+            message,
+            model: phoneLiveModel,
+          }),
+        );
+        if (geminiWs?.readyState === WebSocket.OPEN) {
+          geminiWs.close(1013, "Live voice setup timed out");
+        }
+        hangup("gemini_setup_timeout");
+      }, GEMINI_SETUP_TIMEOUT_MS);
     });
 
     geminiWs.on("message", async (raw) => {
@@ -23034,7 +23063,35 @@ Live session identity and language:
       } catch {
         return;
       }
+      if (message.error) {
+        if (geminiSetupTimer) {
+          clearTimeout(geminiSetupTimer);
+          geminiSetupTimer = null;
+        }
+        const providerError = message.error || {};
+        const providerMessage = String(providerError.message || providerError.status || "Live voice provider rejected the session");
+        const providerCode = providerError.code ?? null;
+        console.error(`[telnyx] live voice provider rejected session: ${providerMessage}`);
+        recordAiRateLimit({
+          model: phoneLiveModel,
+          operation: geminiReady ? "phone_live_session" : "phone_live_setup",
+          error: { code: providerCode, message: providerMessage },
+        });
+        await logVoiceCallEvent(callControlId, "error", {
+          stage: geminiReady ? "gemini" : "gemini_setup",
+          message: providerMessage.slice(0, 500),
+          code: providerCode,
+          status: providerError.status || null,
+          model: phoneLiveModel,
+        });
+        if (!bridgeDetachedForTransfer) await hangup(geminiReady ? "gemini_error" : "gemini_setup_error");
+        return;
+      }
       if (message.setupComplete && !greeted) {
+        if (geminiSetupTimer) {
+          clearTimeout(geminiSetupTimer);
+          geminiSetupTimer = null;
+        }
         greeted = true;
         geminiReady = true;
         runBackground("log gemini.ready", () => logVoiceCallEvent(callControlId, "gemini.ready"));
@@ -23266,12 +23323,20 @@ Live session identity and language:
     });
 
     geminiWs.on("error", async (error) => {
+      if (geminiSetupTimer) {
+        clearTimeout(geminiSetupTimer);
+        geminiSetupTimer = null;
+      }
       console.error("[telnyx] live voice provider error", error.message);
       recordAiRateLimit({ model: phoneLiveModel, operation: "phone_live_socket", error });
       await logVoiceCallEvent(callControlId, "error", { stage: "gemini", message: error.message });
       if (!bridgeDetachedForTransfer) hangup("gemini_error");
     });
     geminiWs.on("close", async (code, reason) => {
+      if (geminiSetupTimer) {
+        clearTimeout(geminiSetupTimer);
+        geminiSetupTimer = null;
+      }
       recordAiRateLimit({
         model: phoneLiveModel,
         operation: "phone_live_socket",
@@ -23350,6 +23415,10 @@ Live session identity and language:
         await logVoiceCallEvent(callControlId, "media.stopped", { reason: message.stop?.reason || null });
         closing = true;
         silenceGuard?.stop();
+        if (geminiSetupTimer) {
+          clearTimeout(geminiSetupTimer);
+          geminiSetupTimer = null;
+        }
         if (geminiWs?.readyState === WebSocket.OPEN) geminiWs.close(1000, "Telnyx stream stopped");
       } else if (message.event === "error") {
         await logVoiceCallEvent(callControlId, "media.provider_error", message.error || message);
@@ -23378,6 +23447,7 @@ Live session identity and language:
 
   telnyxWs.on("close", async (code, reason) => {
       if (mediaStartTimer) clearTimeout(mediaStartTimer);
+      if (geminiSetupTimer) clearTimeout(geminiSetupTimer);
       silenceGuard?.stop();
       clearOutboundAudioQueue();
       if (onboardingTextSessionKey) {
