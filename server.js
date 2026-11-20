@@ -50,6 +50,7 @@ import {
   onboardingBuildClosingMessage,
   phoneOnboardingLinkMessage,
 } from "./onboarding-conversation.js";
+import { inboundDiscoveryPlaybook, inboundOpeningInstruction } from "./inbound-discovery.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -5642,7 +5643,7 @@ Receptionist behavior:
 - Speak naturally, briefly, and warmly.
 - Answer questions using only the business profile above and the caller's conversation.
 - If a fact is unknown, say you do not have that detail and offer to take a message.
-- Collect name, phone, and email whenever booking an appointment, capturing a lead, or escalating.
+- Collect only information needed for the caller's requested action. Reuse known information, never ask for the inbound phone number unless the caller wants a different contact number, and ask for email only when the configured action requires it.
 - Use schedule_appointment when the caller wants an appointment, reservation, consultation, demo, or callback at a specific time.
 - Use capture_lead when the caller is interested but not ready to schedule.
 - Use transfer_message when the caller asks for a person, wants a transfer, has a complaint, needs human follow-up, or asks you to pass along an operational update such as running late, cancelling, rescheduling, or access instructions.
@@ -22989,6 +22990,8 @@ Outbound qualification call:
 ${platformBusinessRulesPrompt(settings)}
 ${config ? runtimeBusinessInstructions(config) : ""}
 
+${inboundDiscoveryPlaybook()}
+
 Live session identity and language:
 - Your receptionist name is ${identity.agentName}.
 - Speak in ${identity.language}.
@@ -23039,7 +23042,11 @@ Live session identity and language:
           ? ONBOARDING_OPENING_INSTRUCTION
           : isQualification
             ? `Start the outbound qualification call. Ask for ${qualificationLead?.name || "the lead"} if appropriate, identify yourself as ${config.agentName || settings.agentName} calling for ${profile.businessName}, and ask if now is a good time for a quick follow-up.`
-          : `Greet the caller briefly as ${config.agentName || settings.agentName}, the receptionist for ${profile.businessName}.`;
+          : inboundOpeningInstruction({
+              businessName: profile.businessName,
+              agentName: config.agentName || settings.agentName,
+              hasCallerHistory: /Known caller name:/i.test(callerHistory),
+            });
         geminiWs.send(
           JSON.stringify({
             clientContent: {
@@ -23539,6 +23546,8 @@ wss.on("connection", (clientWs, request) => {
 ${platformBusinessRulesPrompt(settings)}
 ${runtimeBusinessInstructions(businessConfig)}
 
+${inboundDiscoveryPlaybook()}
+
 Live session identity and language:
 - Your receptionist name is ${identity.agentName}.
 - Speak in ${identity.language}.
@@ -23592,7 +23601,10 @@ Live session identity and language:
                       role: "user",
                       parts: [
                         {
-                          text: `Start the call with a short greeting in ${identity.language}. Introduce yourself as ${identity.agentName}, the receptionist for ${profile.businessName}.`,
+                          text: inboundOpeningInstruction({
+                            businessName: profile.businessName,
+                            agentName: identity.agentName,
+                          }),
                         },
                       ],
                     },

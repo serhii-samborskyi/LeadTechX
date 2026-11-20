@@ -3,7 +3,17 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
-const jsRoots = ["server.js", "booking-prefill.js", "call-silence-guard.js", "crm-grouping.js", "meta-platform.js", "public", "scripts", "calendar"];
+const jsRoots = [
+  "server.js",
+  "booking-prefill.js",
+  "call-silence-guard.js",
+  "crm-grouping.js",
+  "inbound-discovery.js",
+  "meta-platform.js",
+  "public",
+  "scripts",
+  "calendar",
+];
 
 function run(command, args, options = {}) {
   const label = [command, ...args].join(" ");
@@ -46,6 +56,7 @@ run(process.execPath, ["scripts/test-booking-prefill.js"]);
 run(process.execPath, ["scripts/test-custom-booking-provider.js"]);
 run(process.execPath, ["scripts/test-crm-grouping.js"]);
 run(process.execPath, ["scripts/test-onboarding-conversation.js"]);
+run(process.execPath, ["scripts/test-inbound-discovery.js"]);
 
 if (process.env.RUN_INTEGRATION === "1" || process.env.RUN_BOOKING_TEST === "1") {
   run("npm", ["run", "test:booking"]);
