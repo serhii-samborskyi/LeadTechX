@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { inboundDiscoveryPlaybook, inboundOpeningInstruction } from "../inbound-discovery.js";
 
@@ -29,5 +30,23 @@ assert.match(playbook, /ask for email only when/i);
 assert.match(playbook, /complaint.*switch out of sales discovery/i);
 assert.match(playbook, /potentially dangerous or urgent/i);
 assert.ok((playbook.match(/^\d+\./gm) || []).length >= 4, "The playbook should include at least four examples");
+
+// The regular phone greeting is prepared in the Gemini connection callback and
+// consumed later in the provider message callback. Keep provider-message code
+// from reaching back into connection-local caller history: that caused regular
+// calls to become silent while onboarding and browser tests still worked.
+const serverSource = readFileSync(new URL("../server.js", import.meta.url), "utf8");
+const setupCompleteStart = serverSource.indexOf("if (message.setupComplete && !greeted)");
+const setupCompleteEnd = serverSource.indexOf("const serverContent = message.serverContent;", setupCompleteStart);
+assert.ok(setupCompleteStart >= 0 && setupCompleteEnd > setupCompleteStart, "Phone setup-complete handler should exist");
+const setupCompleteHandler = serverSource.slice(setupCompleteStart, setupCompleteEnd);
+assert.match(setupCompleteHandler, /const greeting = initialGreetingInstruction;/);
+assert.doesNotMatch(
+  setupCompleteHandler,
+  /\bcallerHistory\b/,
+  "The provider message callback must not reference connection-local caller history",
+);
+assert.match(serverSource, /let initialGreetingInstruction = "";/);
+assert.match(serverSource, /initialGreetingInstruction = isOnboarding[\s\S]*?hasCallerHistory: \/Known caller name:\/i\.test\(callerHistory\)/);
 
 console.log("Inbound discovery playbook checks passed");

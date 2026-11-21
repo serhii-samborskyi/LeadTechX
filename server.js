@@ -22963,6 +22963,7 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
             .then((history) => ({ history, error: "", timedOut: false }))
             .catch((error) => ({ history: "", error: error.message, timedOut: false }))
         : Promise.resolve({ history: "", error: "", timedOut: false });
+    let initialGreetingInstruction = "";
     geminiWs = new WebSocket(`${GEMINI_WS_URL}?key=${encodeURIComponent(geminiApiKey)}`);
     const maybeEndPhoneCallFromCallerText = (text) => {
       if (!callerRequestedHangup(text)) return false;
@@ -23010,6 +23011,15 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
           }),
         );
       }
+      initialGreetingInstruction = isOnboarding
+        ? ONBOARDING_OPENING_INSTRUCTION
+        : isQualification
+          ? `Start the outbound qualification call. Ask for ${qualificationLead?.name || "the lead"} if appropriate, identify yourself as ${config.agentName || settings.agentName} calling for ${profile.businessName}, and ask if now is a good time for a quick follow-up.`
+          : inboundOpeningInstruction({
+              businessName: profile.businessName,
+              agentName: config.agentName || settings.agentName,
+              hasCallerHistory: /Known caller name:/i.test(callerHistory),
+            });
       const onboardingPrompt = `${onboardingInstructionsForPrompt(settings.onboardingInstructions)}
 
 Phone onboarding context:
@@ -23134,15 +23144,15 @@ Live session identity and language:
         greeted = true;
         geminiReady = true;
         runBackground("log gemini.ready", () => logVoiceCallEvent(callControlId, "gemini.ready"));
-        const greeting = isOnboarding
-          ? ONBOARDING_OPENING_INSTRUCTION
-          : isQualification
-            ? `Start the outbound qualification call. Ask for ${qualificationLead?.name || "the lead"} if appropriate, identify yourself as ${config.agentName || settings.agentName} calling for ${profile.businessName}, and ask if now is a good time for a quick follow-up.`
-          : inboundOpeningInstruction({
-              businessName: profile.businessName,
-              agentName: config.agentName || settings.agentName,
-              hasCallerHistory: /Known caller name:/i.test(callerHistory),
-            });
+        const greeting = initialGreetingInstruction;
+        if (!greeting) {
+          await logVoiceCallEvent(callControlId, "error", {
+            stage: "initial_greeting",
+            message: "Live voice setup completed before the initial greeting was prepared",
+          });
+          await hangup("initial_greeting_missing");
+          return;
+        }
         geminiWs.send(
           JSON.stringify({
             clientContent: {
