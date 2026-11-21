@@ -62,6 +62,7 @@ const SSL_KEY = process.env.SSL_KEY || path.join(__dirname, "certs/local-key.pem
 const GEMINI_WS_URL =
   "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const GEMINI_SETUP_TIMEOUT_MS = Math.max(5000, Number(process.env.GEMINI_SETUP_TIMEOUT_MS) || 12000);
+const PHONE_CALLER_HISTORY_TIMEOUT_MS = Math.max(250, Number(process.env.PHONE_CALLER_HISTORY_TIMEOUT_MS) || 1200);
 const FALLBACK_RESEARCH_MODELS = [
   { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview" },
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
@@ -10151,31 +10152,50 @@ async function knownCallerLeadByPhone(profile, callerPhone, options = {}) {
 async function callerHistoryPrompt(profile, callerPhone) {
   const phone = normalizeE164Phone(callerPhone);
   if (!profile?.id || !phone) return "";
-  const [leads, knownLead, calls, appointments, feedback] = await Promise.all([
+  const [leads, calls, appointments, feedback] = await Promise.all([
     prisma.lead.findMany({
       where: { AND: [leadWhereForProfile(profile), { phone }] },
       orderBy: { updatedAt: "desc" },
-      take: 10,
+      take: 50,
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        email: true,
+        need: true,
+        status: true,
+        summary: true,
+        updatedAt: true,
+      },
     }),
-    knownCallerLeadByPhone(profile, phone),
     prisma.voiceCall.findMany({
       where: { businessProfileId: profile.id, fromNumber: phone, callMode: "business" },
       orderBy: { startedAt: "desc" },
       take: 3,
-      select: { id: true, status: true, startedAt: true, endedAt: true, transcript: true, hangupCause: true },
+      select: { id: true, status: true, startedAt: true, endedAt: true, hangupCause: true },
     }),
     prisma.appointment.findMany({
       where: { businessName: profile.businessName, website: profile.website, phone },
       orderBy: { createdAt: "desc" },
       take: 3,
+      select: {
+        id: true,
+        customerName: true,
+        requestedAt: true,
+        scheduledStart: true,
+        timezone: true,
+        reason: true,
+        status: true,
+      },
     }),
     prisma.customerFeedback.findMany({
       where: { businessProfileId: profile.id, phone },
       orderBy: { updatedAt: "desc" },
       take: 2,
+      select: { id: true, sentiment: true, feedbackText: true, updatedAt: true },
     }),
   ]);
-  const namedLead = leads.find((lead) => friendlyKnownName(lead.name)) || knownLead;
+  const namedLead = leads.find((lead) => friendlyKnownName(lead.name)) || null;
   const knownName = friendlyKnownName(namedLead?.name || appointments.find((item) => friendlyKnownName(item.customerName))?.customerName);
   const latestLead = leads[0];
   const memoryLead = namedLead || latestLead;
@@ -22937,6 +22957,12 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
           ? "appSettings.liveModel_env_override_ignored"
           : "appSettings.liveModel",
     });
+    const callerHistoryLookup =
+      !isOnboarding && !isQualification && profile
+        ? callerHistoryPrompt(profile, call.fromNumber)
+            .then((history) => ({ history, error: "", timedOut: false }))
+            .catch((error) => ({ history: "", error: error.message, timedOut: false }))
+        : Promise.resolve({ history: "", error: "", timedOut: false });
     geminiWs = new WebSocket(`${GEMINI_WS_URL}?key=${encodeURIComponent(geminiApiKey)}`);
     const maybeEndPhoneCallFromCallerText = (text) => {
       if (!callerRequestedHangup(text)) return false;
@@ -22950,9 +22976,40 @@ async function handleTelnyxMediaConnection(telnyxWs, request) {
       return true;
     };
     geminiWs.on("open", async () => {
+      if (geminiSetupTimer) clearTimeout(geminiSetupTimer);
+      geminiSetupTimer = setTimeout(() => {
+        if (closing || bridgeDetachedForTransfer || geminiReady) return;
+        geminiSetupTimer = null;
+        const message = `Live voice provider did not complete setup within ${GEMINI_SETUP_TIMEOUT_MS}ms`;
+        console.error(`[telnyx] ${message} (${phoneLiveModel})`);
+        runBackground("log gemini setup timeout", () =>
+          logVoiceCallEvent(callControlId, "error", {
+            stage: "gemini_setup_timeout",
+            message,
+            model: phoneLiveModel,
+          }),
+        );
+        if (geminiWs?.readyState === WebSocket.OPEN) {
+          geminiWs.close(1013, "Live voice setup timed out");
+        }
+        hangup("gemini_setup_timeout");
+      }, GEMINI_SETUP_TIMEOUT_MS);
       await logVoiceCallEvent(callControlId, "gemini.connected");
       const identity = sessionIdentity(config?.agentName || settings.agentName, config?.language || settings.language);
-      const callerHistory = !isOnboarding && profile ? await callerHistoryPrompt(profile, call.fromNumber) : "";
+      const callerHistoryResult = await Promise.race([
+        callerHistoryLookup,
+        sleep(PHONE_CALLER_HISTORY_TIMEOUT_MS).then(() => ({ history: "", error: "", timedOut: true })),
+      ]);
+      const callerHistory = callerHistoryResult.history || "";
+      if (callerHistoryResult.timedOut || callerHistoryResult.error) {
+        runBackground("log caller history unavailable", () =>
+          logVoiceCallEvent(callControlId, "caller.history_unavailable", {
+            reason: callerHistoryResult.timedOut ? "timeout" : "query_error",
+            timeoutMs: callerHistoryResult.timedOut ? PHONE_CALLER_HISTORY_TIMEOUT_MS : null,
+            message: callerHistoryResult.error ? String(callerHistoryResult.error).slice(0, 300) : null,
+          }),
+        );
+      }
       const onboardingPrompt = `${onboardingInstructionsForPrompt(settings.onboardingInstructions)}
 
 Phone onboarding context:
@@ -23036,24 +23093,6 @@ Live session identity and language:
       geminiWs.send(
         JSON.stringify(setup),
       );
-      if (geminiSetupTimer) clearTimeout(geminiSetupTimer);
-      geminiSetupTimer = setTimeout(() => {
-        if (closing || bridgeDetachedForTransfer || geminiReady) return;
-        geminiSetupTimer = null;
-        const message = `Live voice provider did not complete setup within ${GEMINI_SETUP_TIMEOUT_MS}ms`;
-        console.error(`[telnyx] ${message} (${phoneLiveModel})`);
-        runBackground("log gemini setup timeout", () =>
-          logVoiceCallEvent(callControlId, "error", {
-            stage: "gemini_setup_timeout",
-            message,
-            model: phoneLiveModel,
-          }),
-        );
-        if (geminiWs?.readyState === WebSocket.OPEN) {
-          geminiWs.close(1013, "Live voice setup timed out");
-        }
-        hangup("gemini_setup_timeout");
-      }, GEMINI_SETUP_TIMEOUT_MS);
     });
 
     geminiWs.on("message", async (raw) => {

@@ -310,6 +310,8 @@ model Appointment {
   messageDeliveries MessageDelivery[]
   inboundMessages   MessageInbound[]
   attachments       AppointmentAttachment[]
+
+  @@index([businessName, website, phone, createdAt], map: "Appointment_caller_history_idx")
 }
 
 model AppointmentAttachment {
@@ -744,6 +746,7 @@ model Lead {
   goalLinkClicks      GoalLinkClick[]
 
   @@index([businessProfileId, createdAt])
+  @@index([businessProfileId, phone, updatedAt], map: "Lead_caller_history_idx")
   @@index([phone, createdAt])
   @@index([status, createdAt])
 }
@@ -1136,6 +1139,8 @@ model VoiceCall {
   usageEvents               UsageEvent[]
   bookingLinkSends          BookingLinkSend[]
   goalLinkSends             GoalLinkSend[]
+
+  @@index([businessProfileId, fromNumber, callMode, startedAt], map: "VoiceCall_caller_history_idx")
 }
 
 model OutboundQualificationCall {
@@ -1320,6 +1325,7 @@ model CustomerFeedback {
   updatedAt            DateTime          @updatedAt
 
   @@index([businessProfileId, createdAt])
+  @@index([businessProfileId, phone, updatedAt], map: "CustomerFeedback_caller_history_idx")
   @@index([leadId, createdAt])
   @@index([status, createdAt])
 }
