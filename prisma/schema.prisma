@@ -787,6 +787,7 @@ model AppSettings {
   demoNumberCapacity          Int      @default(10)
   demoCallerLimit             Int      @default(3)
   fastAgentBuildsPerIpPerHour Int      @default(5)
+  fastAgentWizardPercent      Int      @default(50)
   autoBuyTrialPhoneNumber     Boolean  @default(false)
   trialPhoneNumberGraceDays   Int      @default(7)
   callSilenceWarningSeconds   Int      @default(20)

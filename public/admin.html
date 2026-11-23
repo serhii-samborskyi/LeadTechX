@@ -123,6 +123,7 @@
               <label>Businesses per demo number<input id="demoNumberCapacity" type="number" min="1" required /></label>
               <label>Caller numbers per trial<input id="demoCallerLimit" type="number" min="1" required /></label>
               <label>Agent builds per IP/hour<input id="fastAgentBuildsPerIpPerHour" type="number" min="0" required /><small>Set 0 to disable while testing.</small></label>
+              <label>New Fast Agent wizard traffic (%)<input id="fastAgentWizardPercent" type="number" min="0" max="100" step="1" required /><small>Send 0% to the new wizard to disable it, or 100% to use it for every eligible visitor.</small></label>
               <label>Expired trial number grace (days)<input id="trialPhoneNumberGraceDays" type="number" min="0" required /><small>Release auto-bought numbers after this delay unless the business subscribes.</small></label>
               <label class="check-label"><input id="autoBuyTrialPhoneNumber" type="checkbox" /> Auto-buy phone number after confirmed trial claim</label>
             </div>
@@ -452,6 +453,8 @@
             </div>
           </div>
           <div class="traffic-summary" id="trafficSummary"></div>
+          <h3>Fast Agent wizard flow conversion</h3>
+          <div class="traffic-summary" id="trafficExperiment"></div>
           <div class="traffic-breakdowns">
             <div><h3>Registrations by date</h3><div id="trafficByDate" class="traffic-mini-list"></div></div>
             <div><h3>Lead source</h3><div id="trafficByPlatform" class="traffic-mini-list"></div></div>

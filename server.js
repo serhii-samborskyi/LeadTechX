@@ -43,6 +43,7 @@ import {
 import { crmGroupMatchesSearch, groupCrmContactRows, standaloneCrmContact } from "./crm-grouping.js";
 import { registerMetaPlatform } from "./meta-platform.js";
 import { CALL_FORWARDING_PROVIDERS } from "./public/call-forwarding-catalog.js";
+import { FAST_AGENT_SENSITIVE_URL_KEYS, clampRolloutPercent, fastAgentVariant } from "./public/fastagent/wizard-state.js";
 import {
   DEFAULT_ONBOARDING_INSTRUCTIONS,
   ONBOARDING_CONVERSATION_RULES,
@@ -63,6 +64,17 @@ const GEMINI_WS_URL =
   "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const GEMINI_SETUP_TIMEOUT_MS = Math.max(5000, Number(process.env.GEMINI_SETUP_TIMEOUT_MS) || 12000);
 const PHONE_CALLER_HISTORY_TIMEOUT_MS = Math.max(250, Number(process.env.PHONE_CALLER_HISTORY_TIMEOUT_MS) || 1200);
+const FAST_AGENT_EXPERIMENT_VERSION = "fastagent-wizard-v1";
+const FAST_AGENT_VISITOR_COOKIE = "rp_fastagent_visitor";
+const FAST_AGENT_ASSIGNMENT_COOKIE = "rp_fastagent_assignment";
+const FAST_AGENT_FUNNEL_EVENTS = new Set([
+  "fastagent_experiment_exposed",
+  "fastagent_business_confirmed",
+  "fastagent_website_step_viewed",
+  "fastagent_website_completed",
+  "fastagent_build_started",
+  "fastagent_build_failed",
+]);
 const FALLBACK_RESEARCH_MODELS = [
   { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview" },
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
@@ -215,6 +227,8 @@ app.get(["/schedule/:token", "/schedule/:token/"], (_req, res) => {
 const SESSION_COOKIE = "receptionist_session";
 const SESSION_DAYS = 14;
 const onboardingAttempts = new Map();
+const placesLookupAttempts = new Map();
+const fastAgentFunnelAttempts = new Map();
 const activeOnboardingTextSessions = new Map();
 const blueBubblesPreferredModes = new Map();
 const blueBubblesDeliveryRetryLocks = new Set();
@@ -951,6 +965,21 @@ function trafficQueryParams(sourceUrl = "") {
   }
 }
 
+function sanitizedTrafficUrl(value = "") {
+  const supplied = String(value || "").trim();
+  if (!/^https?:\/\//i.test(supplied)) return supplied.slice(0, 2048);
+  try {
+    const parsed = new URL(supplied);
+    for (const key of FAST_AGENT_SENSITIVE_URL_KEYS) {
+      parsed.searchParams.delete(key);
+    }
+    parsed.hash = "";
+    return parsed.toString().slice(0, 2048);
+  } catch {
+    return "";
+  }
+}
+
 function trafficHost(value = "") {
   const supplied = String(value || "").trim();
   if (!/^https?:\/\//i.test(supplied)) return "";
@@ -1270,8 +1299,8 @@ async function recordTrafficEvent({ req, eventKey, eventId, sourceUrl = "", refe
   const cleanEventKey = String(eventKey || "").trim();
   if (!cleanEventKey) return null;
   const cleanEventId = String(eventId || "").trim() || null;
-  const cleanSourceUrl = String(sourceUrl || req.body?.sourceUrl || "").trim().slice(0, 2048);
-  const cleanReferrer = String(referrer || req.body?.referrer || req.headers.referer || "").trim().slice(0, 2048);
+  const cleanSourceUrl = sanitizedTrafficUrl(sourceUrl || req.body?.sourceUrl || "");
+  const cleanReferrer = sanitizedTrafficUrl(referrer || req.body?.referrer || req.headers.referer || "");
   const { landingPath, queryParams, trackingTags } = trafficQueryParams(cleanSourceUrl);
   const data = {
     eventKey: cleanEventKey,
@@ -5316,8 +5345,8 @@ async function sendBlueBubblesAttempt({ settings, configuredUrl, attempt, messag
   };
 }
 
-function businessCacheKey(businessName, website) {
-  const base = `${businessName.toLowerCase()}|${website || ""}`;
+function businessCacheKey(businessName, website, locationHint = "") {
+  const base = `${businessName.toLowerCase()}|${website || ""}|${String(locationHint || "").trim().toLowerCase()}`;
   return crypto.createHash("sha256").update(base).digest("hex");
 }
 
@@ -5335,6 +5364,21 @@ function cleanGooglePlaceId(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   return raw.startsWith("places/") ? raw.split("/").pop() : raw;
+}
+
+function cleanPlacesSessionToken(value) {
+  const token = String(value || "").trim();
+  return /^[A-Za-z0-9_-]{1,36}$/.test(token) ? token : "";
+}
+
+const GOOGLE_BUSINESS_PLACE_TYPES = new Set(["establishment", "point_of_interest"]);
+const GOOGLE_ADDRESS_PLACE_TYPES = new Set(["street_address", "premise", "subpremise", "street_number", "route"]);
+
+function googlePlaceKind(types = []) {
+  const cleanTypes = Array.isArray(types) ? types : [];
+  if (cleanTypes.some((type) => GOOGLE_BUSINESS_PLACE_TYPES.has(type))) return "business";
+  if (cleanTypes.some((type) => GOOGLE_ADDRESS_PLACE_TYPES.has(type))) return "address";
+  return "place";
 }
 
 function googlePlaceCacheIdentity(placeId) {
@@ -5355,28 +5399,11 @@ function placePredictionToSuggestion(suggestion) {
     mainText: mainText || text,
     secondaryText,
     types: Array.isArray(prediction.types) ? prediction.types : [],
+    kind: googlePlaceKind(prediction.types),
   };
 }
 
-function isBusinessLikePlaceSuggestion(suggestion) {
-  const types = Array.isArray(suggestion?.types) ? suggestion.types : [];
-  if (types.includes("establishment") || types.includes("point_of_interest")) return true;
-  const regionOnlyTypes = new Set([
-    "geocode",
-    "political",
-    "neighborhood",
-    "locality",
-    "sublocality",
-    "administrative_area_level_1",
-    "administrative_area_level_2",
-    "country",
-    "postal_code",
-    "route",
-  ]);
-  return types.length > 0 && types.some((type) => !regionOnlyTypes.has(type));
-}
-
-async function fetchPlacesAutocomplete(input) {
+async function fetchPlacesAutocomplete(input, { sessionToken = "" } = {}) {
   const query = String(input || "").trim();
   if (query.length < 2) return [];
   const apiKey = await placesApiKey();
@@ -5395,19 +5422,23 @@ async function fetchPlacesAutocomplete(input) {
       includeQueryPredictions: false,
       includePureServiceAreaBusinesses: true,
       languageCode: "en",
+      regionCode: "us",
+      ...(cleanPlacesSessionToken(sessionToken) ? { sessionToken: cleanPlacesSessionToken(sessionToken) } : {}),
     }),
+    signal: AbortSignal.timeout(10000),
   });
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(data.error?.message || `Places autocomplete failed with HTTP ${response.status}`);
   }
-  const suggestions = (data.suggestions || []).map(placePredictionToSuggestion).filter(Boolean);
-  const businessSuggestions = suggestions.filter(isBusinessLikePlaceSuggestion);
-  return (businessSuggestions.length ? businessSuggestions : suggestions).slice(0, 6);
+  return (data.suggestions || [])
+    .map(placePredictionToSuggestion)
+    .filter((suggestion) => suggestion && ["business", "address"].includes(suggestion.kind))
+    .slice(0, 6);
 }
 
-async function fetchPlaceDetails(placeId) {
+async function fetchPlaceDetails(placeId, sessionToken = "") {
   const normalizedPlaceId = cleanGooglePlaceId(placeId);
   if (!normalizedPlaceId) throw new Error("Place ID is required");
   const apiKey = await placesApiKey();
@@ -5417,24 +5448,131 @@ async function fetchPlaceDetails(placeId) {
     "id",
     "displayName",
     "formattedAddress",
+    "addressComponents",
+    "location",
     "nationalPhoneNumber",
     "internationalPhoneNumber",
     "websiteUri",
     "regularOpeningHours",
     "businessStatus",
     "types",
+    "primaryType",
     "primaryTypeDisplayName",
+    "pureServiceAreaBusiness",
     "googleMapsUri",
   ].join(",");
   const url = new URL(`https://places.googleapis.com/v1/places/${encodeURIComponent(normalizedPlaceId)}`);
   url.searchParams.set("fields", fields);
   url.searchParams.set("key", apiKey);
-  const response = await fetch(url);
+  if (cleanPlacesSessionToken(sessionToken)) url.searchParams.set("sessionToken", cleanPlacesSessionToken(sessionToken));
+  const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(data.error?.message || `Places details failed with HTTP ${response.status}`);
   }
   return data;
+}
+
+function googleAddressComponents(place) {
+  const result = {};
+  for (const component of Array.isArray(place?.addressComponents) ? place.addressComponents : []) {
+    for (const type of Array.isArray(component.types) ? component.types : []) {
+      const value = String(type === "country" ? component.shortText || component.longText || "" : component.longText || component.shortText || "").trim();
+      if (value && result[type] === undefined) result[type] = value;
+    }
+  }
+  return result;
+}
+
+function normalizedAddressPart(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function distanceMeters(left, right) {
+  const lat1 = Number(left?.latitude);
+  const lon1 = Number(left?.longitude);
+  const lat2 = Number(right?.latitude);
+  const lon2 = Number(right?.longitude);
+  if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) return Number.POSITIVE_INFINITY;
+  const radians = (degrees) => (degrees * Math.PI) / 180;
+  const deltaLat = radians(lat2 - lat1);
+  const deltaLon = radians(lon2 - lon1);
+  const a =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(radians(lat1)) * Math.cos(radians(lat2)) * Math.sin(deltaLon / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function businessMatchesSelectedAddress(business, address) {
+  const businessTypes = Array.isArray(business?.types) ? business.types : [];
+  if (!businessTypes.some((type) => GOOGLE_BUSINESS_PLACE_TYPES.has(type))) return false;
+  if (business.businessStatus === "CLOSED_PERMANENTLY") return false;
+  const expected = googleAddressComponents(address);
+  const candidate = googleAddressComponents(business);
+  for (const key of ["country", "postal_code"]) {
+    if (expected[key] && candidate[key] && normalizedAddressPart(expected[key]) !== normalizedAddressPart(candidate[key])) return false;
+  }
+  for (const key of ["street_number", "route"]) {
+    if (expected[key] && (!candidate[key] || normalizedAddressPart(expected[key]) !== normalizedAddressPart(candidate[key]))) return false;
+  }
+  return distanceMeters(address.location, business.location) <= 100;
+}
+
+function googleCountryRegionCode(place) {
+  const country = googleAddressComponents(place).country;
+  return /^[A-Za-z]{2}$/.test(country) ? country.toLowerCase() : "us";
+}
+
+function publicPlaceCandidate(place) {
+  const data = businessDataFromPlace(place, { placeId: place.id });
+  return {
+    placeId: data.googlePlaceId,
+    businessName: data.businessName,
+    website: data.website,
+    address: data.address === "unknown" ? "" : data.address,
+    types: data.googleTypes,
+  };
+}
+
+async function findBusinessesAtAddress(addressPlace) {
+  const formattedAddress = String(addressPlace?.formattedAddress || "").trim();
+  if (!formattedAddress || !addressPlace?.location) return [];
+  const apiKey = await placesApiKey();
+  if (!apiKey) throw new Error("Places API key is not configured");
+  const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask":
+        "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.websiteUri,places.businessStatus,places.types,places.primaryType,places.primaryTypeDisplayName,places.googleMapsUri",
+    },
+    body: JSON.stringify({
+      textQuery: `businesses at ${formattedAddress}`,
+      languageCode: "en",
+      regionCode: googleCountryRegionCode(addressPlace),
+      maxResultCount: 10,
+      includePureServiceAreaBusinesses: false,
+      locationBias: { circle: { center: addressPlace.location, radius: 75 } },
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error?.message || `Places text search failed with HTTP ${response.status}`);
+  const seen = new Set();
+  return (data.places || [])
+    .filter((place) => businessMatchesSelectedAddress(place, addressPlace))
+    .filter((place) => {
+      const placeId = cleanGooglePlaceId(place.id);
+      if (!placeId || seen.has(placeId)) return false;
+      seen.add(placeId);
+      return true;
+    })
+    .slice(0, 6)
+    .map(publicPlaceCandidate);
 }
 
 function placeTypeLabel(place) {
@@ -5450,7 +5588,8 @@ function placeTypeLabel(place) {
 
 function businessDataFromPlace(place, fallback = {}) {
   const businessName = normalizeBusinessName(localizedText(place.displayName) || fallback.businessName);
-  const website = normalizeWebsite(place.websiteUri || fallback.website);
+  const hasWebsiteOverride = Object.prototype.hasOwnProperty.call(fallback, "websiteOverride");
+  const website = normalizeWebsite(hasWebsiteOverride ? fallback.websiteOverride : place.websiteUri || fallback.website);
   const address = String(place.formattedAddress || "unknown").trim() || "unknown";
   const phone = String(place.nationalPhoneNumber || place.internationalPhoneNumber || "unknown").trim() || "unknown";
   const hours = Array.isArray(place.regularOpeningHours?.weekdayDescriptions)
@@ -5461,7 +5600,7 @@ function businessDataFromPlace(place, fallback = {}) {
   if (businessName) summaryParts.push(`${businessName} is listed as ${services === "unknown" ? "a local business" : services}.`);
   if (address !== "unknown") summaryParts.push(`Address: ${address}.`);
   if (phone !== "unknown") summaryParts.push(`Phone: ${phone}.`);
-  const sourceUrls = [place.websiteUri, place.googleMapsUri].filter(Boolean);
+  const sourceUrls = [website, place.googleMapsUri].filter(Boolean);
   return {
     businessName,
     website,
@@ -5486,25 +5625,238 @@ function businessDataFromPlace(place, fallback = {}) {
 async function findBusinessByGooglePlaceId(placeId) {
   const normalizedPlaceId = cleanGooglePlaceId(placeId);
   if (!normalizedPlaceId) return null;
-  return prisma.businessProfile.findFirst({
+  const matches = await prisma.businessProfile.findMany({
     where: { rawData: { path: ["googlePlaceId"], equals: normalizedPlaceId } },
     include: { users: { select: { id: true } } },
     orderBy: { updatedAt: "desc" },
+    take: 10,
   });
+  if (matches.length <= 1) return matches[0] || null;
+  const active = matches.find((profile) => profile.users.length || profile.accountStatus === "paid");
+  if (active) return active;
+  const error = new Error("Multiple business records use this Google listing. Contact support to reconcile them.");
+  error.statusCode = 409;
+  error.code = "DUPLICATE_GOOGLE_PLACE";
+  throw error;
 }
 
-async function createOrUpdateBusinessFromPlace({ placeId, businessName, website, researchModel, forceRefresh = false }) {
+function comparableAddress(value) {
+  return normalizedAddressPart(value)
+    .replace(/\b(?:united states of america|united states|usa|us)\b/g, " ")
+    .replace(/\b(?:suite|ste|unit|apt|apartment)\s+[a-z0-9-]+\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function comparableAddressUnit(value) {
+  const match = normalizedAddressPart(value).match(/\b(?:suite|ste|unit|apt|apartment)\s*#?\s*([a-z0-9-]+)\b/);
+  return match?.[1] || "";
+}
+
+function addressesStronglyMatch(left, right) {
+  const firstUnit = comparableAddressUnit(left);
+  const secondUnit = comparableAddressUnit(right);
+  if (firstUnit && secondUnit && firstUnit !== secondUnit) return false;
+  const first = comparableAddress(left);
+  const second = comparableAddress(right);
+  if (!first || !second) return false;
+  if (first === second || (Math.min(first.length, second.length) >= 12 && (first.includes(second) || second.includes(first)))) {
+    return true;
+  }
+  const firstTokens = first.split(" ");
+  const secondTokens = second.split(" ");
+  const firstStreetNumber = firstTokens.find((token) => /^\d+[a-z]?$/.test(token));
+  const secondStreetNumber = secondTokens.find((token) => /^\d+[a-z]?$/.test(token));
+  if (!firstStreetNumber || firstStreetNumber !== secondStreetNumber) return false;
+  const secondSet = new Set(secondTokens);
+  return firstTokens.filter((token) => token.length > 1 && secondSet.has(token)).length >= 3;
+}
+
+function manualProfileMatchesGooglePlace(profile, placeData) {
+  if (!profile || !placeData) return false;
+  const rawData = jsonObject(profile.rawData);
+  if (cleanGooglePlaceId(rawData.googlePlaceId)) return false;
+  if (normalizeBusinessName(profile.businessName).toLowerCase() !== normalizeBusinessName(placeData.businessName).toLowerCase()) {
+    return false;
+  }
+  const profileWebsite = websiteIdentity(profile.website);
+  const placeWebsite = websiteIdentity(placeData.website);
+  if (profileWebsite && placeWebsite && profileWebsite !== placeWebsite) return false;
+  const addressCandidates = [
+    rawData.address,
+    profile.serviceArea,
+    ...String(profile.contact || "").split("|"),
+  ].filter(Boolean);
+  return addressCandidates.some((candidate) => addressesStronglyMatch(candidate, placeData.address));
+}
+
+async function findManualBusinessMatchesForPlace(placeData) {
+  if (!placeData?.businessName || !placeData?.address || placeData.address === "unknown") return [];
+  const candidates = await prisma.businessProfile.findMany({
+    where: { businessName: { equals: placeData.businessName, mode: "insensitive" } },
+    include: { users: { select: { id: true } } },
+    orderBy: { updatedAt: "desc" },
+    take: 50,
+  });
+  return candidates.filter((profile) => manualProfileMatchesGooglePlace(profile, placeData));
+}
+
+async function createOrUpdateBusinessFromPlace({
+  placeId,
+  businessName,
+  website,
+  websiteDecisionProvided = false,
+  noWebsite = false,
+  researchModel,
+  forceRefresh = false,
+  existingProfile = null,
+}) {
   const normalizedPlaceId = cleanGooglePlaceId(placeId);
   if (!normalizedPlaceId) throw new Error("Place ID is required");
+  const websiteOverride = noWebsite ? "" : normalizeWebsite(website) || "";
+  let existing = existingProfile || await findBusinessByGooglePlaceId(normalizedPlaceId);
   if (!forceRefresh) {
-    const cached = await findBusinessByGooglePlaceId(normalizedPlaceId);
-    if (cached) return { profile: cached, cached: true };
+    const cachedWebsite = normalizeWebsite(existing?.website) || "";
+    const expectedWebsite = websiteDecisionProvided ? websiteOverride : cachedWebsite;
+    const rawData = jsonObject(existing?.rawData);
+    const websiteResearch = jsonObject(rawData.websiteResearch);
+    const websiteDecision = noWebsite ? "none" : "confirmed";
+    const websiteDecisionCurrent = !websiteDecisionProvided || rawData.websiteDecision === websiteDecision;
+    const websiteResearchCurrent =
+      !expectedWebsite ||
+      (websiteResearch.status === "succeeded" && websiteResearch.websiteIdentity === websiteIdentity(expectedWebsite));
+    if (
+      existing &&
+      (!websiteDecisionProvided || cachedWebsite === websiteOverride) &&
+      websiteDecisionCurrent &&
+      websiteResearchCurrent
+    ) {
+      return { profile: existing, cached: true };
+    }
   }
 
   const place = await fetchPlaceDetails(normalizedPlaceId);
-  const data = businessDataFromPlace(place, { businessName, website, placeId: normalizedPlaceId });
+  if (googlePlaceKind(place.types) !== "business") {
+    const error = new Error("Choose a Google business listing, not a city, postal code, or general place.");
+    error.statusCode = 422;
+    error.code = "PLACE_IS_NOT_A_BUSINESS";
+    throw error;
+  }
+  let data = businessDataFromPlace(place, {
+    businessName,
+    website,
+    placeId: normalizedPlaceId,
+    ...(websiteDecisionProvided ? { websiteOverride } : {}),
+  });
   if (!data.businessName) throw new Error("Selected place did not include a business name");
-  const cacheKey = businessCacheKey(data.businessName, data.website || googlePlaceCacheIdentity(normalizedPlaceId));
+
+  const canonicalWebsite = normalizeWebsite(data.website) || "";
+  const manualMatches = await findManualBusinessMatchesForPlace(data);
+  const differentManualMatches = manualMatches.filter((profile) => profile.id !== existing?.id);
+  const activeManualMatch = differentManualMatches.find(
+    (profile) => profile.users.length || profile.accountStatus === "paid",
+  );
+  if (activeManualMatch) {
+    const error = new Error("This business location is already attached to an active account. Sign in or contact support.");
+    error.statusCode = 409;
+    error.code = "BUSINESS_PROFILE_CONFLICT";
+    throw error;
+  }
+  if ((existing && differentManualMatches.length) || (!existing && manualMatches.length > 1)) {
+    const error = new Error("Multiple business records match this location. Contact support to reconcile them.");
+    error.statusCode = 409;
+    error.code = "BUSINESS_PROFILE_CONFLICT";
+    throw error;
+  }
+  if (!existing && manualMatches.length === 1) {
+    existing = manualMatches[0];
+  }
+
+  const placeIdentity = {
+    googlePlaceId: data.googlePlaceId,
+    googleBusinessStatus: data.googleBusinessStatus,
+    googleTypes: data.googleTypes,
+  };
+  const websiteDecision = websiteDecisionProvided ? (noWebsite ? "none" : "confirmed") : "";
+  if (canonicalWebsite) {
+    const researchStartedAt = new Date().toISOString();
+    try {
+      const researched = await generateBusinessResearchData({
+        businessName: data.businessName,
+        website: canonicalWebsite,
+        serviceArea: data.serviceArea,
+        researchModel,
+      });
+      if (researched.parseError) throw new Error("Website research returned an incomplete structured result");
+      const researchedSummary = asText(researched.summary).trim();
+      const researchedServices = asText(researched.services).trim();
+      const researchedServiceArea = asText(researched.serviceArea).trim();
+      const researchedEmail = asText(researched.email).trim();
+      const googleHours = asText(data.hours).trim();
+      const googleAddress = asText(data.address).trim();
+      const googlePhone = asText(data.phone).trim();
+      const researchSourceUrls = Array.isArray(researched.sourceUrls) ? researched.sourceUrls : [];
+      data = {
+        ...researched,
+        businessName: data.businessName,
+        website: canonicalWebsite,
+        summary: researchedSummary && researchedSummary.toLowerCase() !== "unknown" ? researchedSummary : data.summary,
+        hours: googleHours && googleHours.toLowerCase() !== "unknown" ? googleHours : asText(researched.hours) || "unknown",
+        services: researchedServices && researchedServices.toLowerCase() !== "unknown" ? researchedServices : data.services,
+        serviceArea:
+          researchedServiceArea && researchedServiceArea.toLowerCase() !== "unknown"
+            ? researchedServiceArea
+            : data.serviceArea,
+        address: googleAddress && googleAddress.toLowerCase() !== "unknown" ? googleAddress : asText(researched.address) || "unknown",
+        phone: googlePhone && googlePhone.toLowerCase() !== "unknown" ? googlePhone : asText(researched.phone) || "unknown",
+        email: researchedEmail && researchedEmail.toLowerCase() !== "unknown" ? researchedEmail : "unknown",
+        faq: Array.isArray(researched.faq) ? researched.faq : [],
+        sourceUrls: [...new Set([canonicalWebsite, ...data.sourceUrls, ...researchSourceUrls].filter(Boolean))],
+        source: "google_places_website_research",
+        ...placeIdentity,
+        ...(websiteDecision ? { websiteDecision } : {}),
+        websiteResearch: {
+          version: 1,
+          status: "succeeded",
+          websiteIdentity: websiteIdentity(canonicalWebsite),
+          researchedAt: researchStartedAt,
+          model: researchModel,
+        },
+      };
+    } catch (error) {
+      data = {
+        ...data,
+        website: canonicalWebsite,
+        ...(websiteDecision ? { websiteDecision } : {}),
+        websiteResearch: {
+          version: 1,
+          status: "failed",
+          websiteIdentity: websiteIdentity(canonicalWebsite),
+          researchedAt: researchStartedAt,
+          model: researchModel,
+          error: String(error.message || "Website research failed").slice(0, 300),
+        },
+      };
+    }
+  } else if (websiteDecision) {
+    data = {
+      ...data,
+      website: null,
+      websiteDecision,
+      websiteResearch: {
+        version: 1,
+        status: "skipped",
+        reason: "no_website",
+      },
+    };
+  }
+
+  data = {
+    ...jsonObject(existing?.rawData),
+    ...data,
+  };
+
+  const cacheKey = existing?.cacheKey || businessCacheKey(data.businessName, googlePlaceCacheIdentity(normalizedPlaceId));
   const contactParts = [data.phone, data.email, data.address].filter((item) => item && item !== "unknown");
   const systemPrompt = buildSystemPrompt({
     businessName: data.businessName,
@@ -5517,13 +5869,11 @@ async function createOrUpdateBusinessFromPlace({ placeId, businessName, website,
     rawData: data,
   });
 
-  const profile = await prisma.businessProfile.upsert({
-    where: { cacheKey },
-    create: {
+  const createData = {
       cacheKey,
       businessName: data.businessName,
       website: data.website,
-      normalized: normalizeBusinessName(businessName || data.businessName),
+      normalized: normalizeBusinessName(data.businessName),
       summary: data.summary,
       hours: data.hours,
       services: data.services,
@@ -5533,8 +5883,8 @@ async function createOrUpdateBusinessFromPlace({ placeId, businessName, website,
       systemPrompt,
       researchModel,
       sourceUrls: data.sourceUrls,
-    },
-    update: {
+  };
+  const updateData = {
       businessName: data.businessName,
       website: data.website,
       summary: data.summary,
@@ -5546,9 +5896,61 @@ async function createOrUpdateBusinessFromPlace({ placeId, businessName, website,
       systemPrompt,
       researchModel,
       sourceUrls: data.sourceUrls,
-    },
-    include: { users: { select: { id: true } } },
-  });
+  };
+
+  let profile;
+  if (existing) {
+    const updated = await prisma.businessProfile.updateMany({
+      where: {
+        id: existing.id,
+        accountStatus: "unclaimed",
+        users: { none: {} },
+      },
+      data: updateData,
+    });
+    if (!updated.count) {
+      const error = new Error("This business already has an account. Sign in to access it.");
+      error.statusCode = 409;
+      error.code = "BUSINESS_ALREADY_ACTIVE";
+      throw error;
+    }
+    profile = await prisma.businessProfile.findUnique({
+      where: { id: existing.id },
+      include: { users: { select: { id: true } } },
+    });
+  } else {
+    try {
+      profile = await prisma.businessProfile.create({
+        data: createData,
+        include: { users: { select: { id: true } } },
+      });
+    } catch (error) {
+      if (error?.code !== "P2002") throw error;
+      const racedProfile = await prisma.businessProfile.findUnique({
+        where: { cacheKey },
+        include: { users: { select: { id: true } } },
+      });
+      if (!racedProfile) throw error;
+      const updated = await prisma.businessProfile.updateMany({
+        where: {
+          id: racedProfile.id,
+          accountStatus: "unclaimed",
+          users: { none: {} },
+        },
+        data: updateData,
+      });
+      if (!updated.count) {
+        const conflict = new Error("This business already has an account. Sign in to access it.");
+        conflict.statusCode = 409;
+        conflict.code = "BUSINESS_ALREADY_ACTIVE";
+        throw conflict;
+      }
+      profile = await prisma.businessProfile.findUnique({
+        where: { id: racedProfile.id },
+        include: { users: { select: { id: true } } },
+      });
+    }
+  }
 
   return { profile, cached: false };
 }
@@ -5586,6 +5988,7 @@ async function getSettings() {
       postbackParamKeys: DEFAULT_POSTBACK_PARAM_KEYS.join(","),
       annualPrepayDiscountPercent: 25,
       fastAgentBuildsPerIpPerHour: 5,
+      fastAgentWizardPercent: 50,
       autoBuyTrialPhoneNumber: false,
       trialPhoneNumberGraceDays: 7,
       callSilenceWarningSeconds: 20,
@@ -5596,12 +5999,13 @@ async function getSettings() {
   });
 }
 
-function buildResearchPrompt(businessName, website) {
+function buildResearchPrompt(businessName, website, serviceArea = "") {
   return `
 Research this business for RingPort.
 
 Business name: ${businessName}
 Website: ${website || "unknown"}
+Location or service area supplied by the owner: ${serviceArea || "unknown"}
 
 Use current public web information. If a website is supplied, inspect it with URL context and use Google Search for corroboration. Return only valid JSON with this exact shape:
 {
@@ -5736,25 +6140,17 @@ function toolWaitNoticeInstruction() {
   ].join(" ");
 }
 
-async function researchBusiness({ businessName, website, researchModel, forceRefresh = false }) {
+async function generateBusinessResearchData({ businessName, website, serviceArea = "", researchModel }) {
   const normalized = normalizeBusinessName(businessName);
   const normalizedWebsite = normalizeWebsite(website);
-  if (!normalized) {
-    throw new Error("business_name query parameter is required");
-  }
+  const normalizedServiceArea = String(serviceArea || "").trim();
+  if (!normalized) throw new Error("business_name query parameter is required");
 
-  const cacheKey = businessCacheKey(normalized, normalizedWebsite);
-  if (!forceRefresh) {
-    const cached = await prisma.businessProfile.findUnique({ where: { cacheKey } });
-    if (cached) return { profile: cached, cached: true };
-  }
-
-  const prompt = buildResearchPrompt(normalized, normalizedWebsite);
+  const prompt = buildResearchPrompt(normalized, normalizedWebsite, normalizedServiceArea);
   const tools = normalizedWebsite ? [{ urlContext: {} }, { googleSearch: {} }] : [{ googleSearch: {} }];
   const geminiApiKey = await systemSecret("gemini_api_key", "GEMINI_API_KEY");
   if (!geminiApiKey) throw new Error("AI provider API key is not configured");
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-
   const response = await generateAiContent(ai, {
     model: researchModel,
     contents: [prompt],
@@ -5765,17 +6161,16 @@ async function researchBusiness({ businessName, website, researchModel, forceRef
   }, "business_research");
 
   const text = response.text || "";
-  let data;
   try {
-    data = JSON.parse(stripJsonFence(text));
+    return JSON.parse(stripJsonFence(text));
   } catch (error) {
-    data = {
+    return {
       businessName: normalized,
       website: normalizedWebsite,
       summary: text.slice(0, 2000) || "Research completed, but JSON parsing failed.",
       hours: "unknown",
       services: [],
-      serviceArea: "unknown",
+      serviceArea: normalizedServiceArea || "unknown",
       address: "unknown",
       phone: "unknown",
       email: "unknown",
@@ -5786,9 +6181,72 @@ async function researchBusiness({ businessName, website, researchModel, forceRef
       parseError: error.message,
     };
   }
+}
+
+async function researchBusiness({
+  businessName,
+  website,
+  serviceArea = "",
+  researchModel,
+  forceRefresh = false,
+  websiteDecisionProvided = false,
+  noWebsite = false,
+  protectClaimed = false,
+}) {
+  const normalized = normalizeBusinessName(businessName);
+  const normalizedWebsite = normalizeWebsite(website);
+  const effectiveWebsite = websiteDecisionProvided && noWebsite ? "" : normalizedWebsite;
+  const normalizedServiceArea = String(serviceArea || "").trim();
+  if (!normalized) {
+    throw new Error("business_name query parameter is required");
+  }
+
+  const cacheKey = businessCacheKey(normalized, effectiveWebsite, effectiveWebsite ? "" : normalizedServiceArea);
+  if (!forceRefresh) {
+    const cached = await prisma.businessProfile.findUnique({ where: { cacheKey } });
+    const confirmedWebsite = noWebsite ? "" : normalizedWebsite;
+    if (cached && (!websiteDecisionProvided || (normalizeWebsite(cached.website) || "") === confirmedWebsite)) {
+      return { profile: cached, cached: true };
+    }
+  }
+
+  const data = await generateBusinessResearchData({
+    businessName: normalized,
+    website: effectiveWebsite,
+    serviceArea: normalizedServiceArea,
+    researchModel,
+  });
+  if (protectClaimed && data.parseError) {
+    const error = new Error("Business research returned an incomplete result. Please try again.");
+    error.statusCode = 502;
+    error.code = "BUSINESS_RESEARCH_FAILED";
+    throw error;
+  }
 
   const finalName = normalizeBusinessName(data.businessName || normalized);
-  const finalWebsite = normalizeWebsite(data.website) || normalizedWebsite;
+  const finalWebsite = websiteDecisionProvided
+    ? noWebsite
+      ? ""
+      : normalizedWebsite
+    : normalizeWebsite(data.website) || normalizedWebsite;
+  const discoveredWebsiteIdentity = websiteIdentity(data.website);
+  const finalSourceUrls = [...new Set([
+    finalWebsite,
+    ...(Array.isArray(data.sourceUrls) ? data.sourceUrls : []).filter(
+      (url) => !noWebsite || !discoveredWebsiteIdentity || websiteIdentity(url) !== discoveredWebsiteIdentity,
+    ),
+  ].filter(Boolean))];
+  const finalData = {
+    ...data,
+    website: finalWebsite,
+    sourceUrls: finalSourceUrls,
+    ...(websiteDecisionProvided ? { websiteDecision: noWebsite ? "none" : "confirmed" } : {}),
+  };
+  const researchedServiceArea = asText(data.serviceArea).trim();
+  const finalServiceArea =
+    normalizedServiceArea && (!researchedServiceArea || researchedServiceArea.toLowerCase() === "unknown")
+      ? normalizedServiceArea
+      : researchedServiceArea;
   const contactParts = [data.phone, data.email, data.address].filter((item) => item && item !== "unknown");
   const systemPrompt = buildSystemPrompt({
     businessName: finalName,
@@ -5796,14 +6254,12 @@ async function researchBusiness({ businessName, website, researchModel, forceRef
     summary: data.summary,
     hours: asText(data.hours),
     services: asText(data.services),
-    serviceArea: asText(data.serviceArea),
+    serviceArea: finalServiceArea,
     contact: contactParts.join(" | "),
-    rawData: data,
+    rawData: finalData,
   });
 
-  const profile = await prisma.businessProfile.upsert({
-    where: { cacheKey },
-    create: {
+  const createData = {
       cacheKey,
       businessName: finalName,
       website: finalWebsite,
@@ -5811,29 +6267,157 @@ async function researchBusiness({ businessName, website, researchModel, forceRef
       summary: asText(data.summary),
       hours: asText(data.hours),
       services: asText(data.services),
-      serviceArea: asText(data.serviceArea),
+      serviceArea: finalServiceArea,
       contact: contactParts.join(" | "),
-      rawData: data,
+      rawData: finalData,
       systemPrompt,
       researchModel,
-      sourceUrls: data.sourceUrls || [],
-    },
-    update: {
+      sourceUrls: finalSourceUrls,
+  };
+  const updateData = {
       businessName: finalName,
       website: finalWebsite,
       summary: asText(data.summary),
       hours: asText(data.hours),
       services: asText(data.services),
-      serviceArea: asText(data.serviceArea),
+      serviceArea: finalServiceArea,
       contact: contactParts.join(" | "),
-      rawData: data,
+      rawData: finalData,
       systemPrompt,
       researchModel,
-      sourceUrls: data.sourceUrls || [],
-    },
-  });
+      sourceUrls: finalSourceUrls,
+  };
+
+  let profile;
+  if (!protectClaimed) {
+    profile = await prisma.businessProfile.upsert({
+      where: { cacheKey },
+      create: createData,
+      update: updateData,
+    });
+  } else {
+    try {
+      profile = await prisma.businessProfile.create({
+        data: createData,
+        include: { users: { select: { id: true } } },
+      });
+    } catch (error) {
+      if (error?.code !== "P2002") throw error;
+      const racedProfile = await prisma.businessProfile.findUnique({
+        where: { cacheKey },
+        include: { users: { select: { id: true } } },
+      });
+      if (!racedProfile) throw error;
+      const updated = await prisma.businessProfile.updateMany({
+        where: {
+          id: racedProfile.id,
+          accountStatus: "unclaimed",
+          users: { none: {} },
+        },
+        data: updateData,
+      });
+      if (!updated.count) {
+        const conflict = new Error("This business already has an account. Sign in to access it.");
+        conflict.statusCode = 409;
+        conflict.code = "BUSINESS_ALREADY_ACTIVE";
+        throw conflict;
+      }
+      profile = await prisma.businessProfile.findUnique({
+        where: { id: racedProfile.id },
+        include: { users: { select: { id: true } } },
+      });
+    }
+  }
 
   return { profile, cached: false };
+}
+
+async function applyConfirmedWebsiteDecision(profile, { website = "", noWebsite = false } = {}) {
+  if (!profile) return profile;
+  const confirmedWebsite = noWebsite ? null : normalizeWebsite(website);
+  const existingRawData = jsonObject(profile.rawData);
+  const expectedDecision = noWebsite ? "none" : "confirmed";
+  if ((normalizeWebsite(profile.website) || "") === (confirmedWebsite || "") && existingRawData.websiteDecision === expectedDecision) {
+    return profile;
+  }
+  const clearingManualWebsiteResearch = Boolean(
+    noWebsite && normalizeWebsite(profile.website) && !cleanGooglePlaceId(existingRawData.googlePlaceId),
+  );
+  const safeServiceArea = asText(profile.serviceArea).trim();
+  const safeSummary =
+    safeServiceArea && safeServiceArea.toLowerCase() !== "unknown"
+      ? `${profile.businessName} is a local business serving ${safeServiceArea}.`
+      : `${profile.businessName} is a local business.`;
+  const rawData = {
+    ...existingRawData,
+    website: confirmedWebsite,
+    websiteDecision: expectedDecision,
+    ...(clearingManualWebsiteResearch
+      ? {
+          summary: safeSummary,
+          hours: "unknown",
+          services: "unknown",
+          address: "unknown",
+          phone: "unknown",
+          email: "unknown",
+          pricing: "unknown",
+          bookingPolicy: "unknown",
+          faq: [],
+          source: "manual_no_website",
+          websiteResearch: { version: 1, status: "skipped", reason: "user_confirmed_no_website" },
+        }
+      : {}),
+  };
+  const previousWebsiteIdentity = websiteIdentity(profile.website);
+  const sourceUrls = clearingManualWebsiteResearch
+    ? []
+    : [...new Set([
+        confirmedWebsite,
+        ...(Array.isArray(profile.sourceUrls) ? profile.sourceUrls : []).filter(
+          (url) => !previousWebsiteIdentity || websiteIdentity(url) !== previousWebsiteIdentity,
+        ),
+      ].filter(Boolean))];
+  rawData.sourceUrls = sourceUrls;
+  const summary = clearingManualWebsiteResearch ? safeSummary : profile.summary;
+  const hours = clearingManualWebsiteResearch ? "unknown" : profile.hours;
+  const services = clearingManualWebsiteResearch ? "unknown" : profile.services;
+  const contact = clearingManualWebsiteResearch ? "" : profile.contact;
+  const updated = await prisma.businessProfile.updateMany({
+    where: {
+      id: profile.id,
+      accountStatus: "unclaimed",
+      users: { none: {} },
+    },
+    data: {
+      website: confirmedWebsite,
+      summary,
+      hours,
+      services,
+      contact,
+      rawData,
+      sourceUrls,
+      systemPrompt: buildSystemPrompt({
+        businessName: profile.businessName,
+        website: confirmedWebsite,
+        summary,
+        hours,
+        services,
+        serviceArea: profile.serviceArea,
+        contact,
+        rawData,
+      }),
+    },
+  });
+  if (!updated.count) {
+    const error = new Error("This business already has an account. Sign in to access it.");
+    error.statusCode = 409;
+    error.code = "BUSINESS_ALREADY_ACTIVE";
+    throw error;
+  }
+  return prisma.businessProfile.findUnique({
+    where: { id: profile.id },
+    include: { users: { select: { id: true } } },
+  });
 }
 
 function websiteIdentity(value) {
@@ -5847,7 +6431,7 @@ function websiteIdentity(value) {
   }
 }
 
-async function findBusinessMatch(businessName, website) {
+async function findBusinessMatch(businessName, website, serviceArea = "") {
   const name = normalizeBusinessName(businessName);
   const websiteKey = websiteIdentity(website);
   const candidates = await prisma.businessProfile.findMany({
@@ -5858,17 +6442,18 @@ async function findBusinessMatch(businessName, website) {
   });
   if (websiteKey) {
     const websiteMatch = candidates.find((profile) => websiteIdentity(profile.website) === websiteKey);
-    if (websiteMatch) return websiteMatch;
-    const allWebsiteCandidates = await prisma.businessProfile.findMany({
-      where: { website: { not: null } },
-      include: { users: { select: { id: true } } },
-      orderBy: { updatedAt: "desc" },
-      take: 200,
-    });
-    const match = allWebsiteCandidates.find((profile) => websiteIdentity(profile.website) === websiteKey);
-    if (match) return match;
+    return websiteMatch || null;
   }
-  return candidates[0] || null;
+  if (String(serviceArea || "").trim()) {
+    const locationKey = normalizedAddressPart(serviceArea);
+    return (
+      candidates.find((profile) => {
+        const searchable = normalizedAddressPart(`${profile.serviceArea || ""} ${profile.contact || ""} ${JSON.stringify(profile.rawData || {})}`);
+        return locationKey && searchable.includes(locationKey);
+      }) || null
+    );
+  }
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 function fastAgentBuildsPerIpLimit(value) {
@@ -5893,12 +6478,93 @@ function enforceOnboardingRateLimit(req, settings) {
   onboardingAttempts.set(key, recent);
 }
 
+function enforcePlacesLookupRateLimit(req, action) {
+  const now = Date.now();
+  const normalizedAction = action === "details" ? "details" : "autocomplete";
+  const limit = normalizedAction === "details" ? 30 : 120;
+  const key = `${String(req.ip || req.socket.remoteAddress || "unknown")}:${normalizedAction}`;
+  const recent = (placesLookupAttempts.get(key) || []).filter((timestamp) => now - timestamp < 60 * 1000);
+  if (recent.length >= limit) {
+    const error = new Error("Business lookup is temporarily busy. Please wait a minute and try again.");
+    error.statusCode = 429;
+    throw error;
+  }
+  recent.push(now);
+  placesLookupAttempts.set(key, recent);
+}
+
+function enforceFastAgentFunnelRateLimit(req) {
+  const now = Date.now();
+  const key = String(req.ip || req.socket.remoteAddress || "unknown");
+  const recent = (fastAgentFunnelAttempts.get(key) || []).filter((timestamp) => now - timestamp < 60 * 1000);
+  if (recent.length >= 60) {
+    const error = new Error("Too many Fast Agent activity events. Please wait a minute and try again.");
+    error.statusCode = 429;
+    throw error;
+  }
+  recent.push(now);
+  fastAgentFunnelAttempts.set(key, recent);
+}
+
+function cleanFastAgentFlowId(value) {
+  const flowId = String(value || "").trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(flowId) ? flowId : "";
+}
+
+function fastAgentExperimentAssignment(req, settings) {
+  const visitorId = String(cookieValue(req, FAST_AGENT_VISITOR_COOKIE) || "").trim();
+  if (!/^[0-9a-f-]{36}$/i.test(visitorId)) return null;
+  const percentage = clampRolloutPercent(settings.fastAgentWizardPercent);
+  const forcedVariant = percentage <= 0 ? "control" : percentage >= 100 ? "wizard" : "";
+  const savedAssignment = String(cookieValue(req, FAST_AGENT_ASSIGNMENT_COOKIE) || "").trim();
+  const savedMatch = new RegExp(`^${FAST_AGENT_EXPERIMENT_VERSION}:(wizard|control)$`).exec(savedAssignment);
+  if (forcedVariant) return { variant: forcedVariant, bucket: null, percentage };
+  if (savedMatch) return { variant: savedMatch[1], bucket: null, percentage };
+  return { ...fastAgentVariant(`${FAST_AGENT_EXPERIMENT_VERSION}:${visitorId}`, percentage), percentage };
+}
+
 function fastAgentAccessExpiresAt(profile, settings) {
   const now = Date.now();
   const trialEndsAt = profile?.trialEndsAt ? new Date(profile.trialEndsAt) : null;
   if (trialEndsAt && trialEndsAt.getTime() > now) return trialEndsAt;
   const fallbackDays = Math.max(1, Math.round(Number(settings?.claimLinkDays || settings?.trialDays || 7)));
   return new Date(now + fallbackDays * 86400000);
+}
+
+async function createFastAgentSessionForUnclaimedProfile(profileId, settings) {
+  const normalizedProfileId = Number(profileId);
+  if (!normalizedProfileId) throw new Error("Business profile was not found");
+  const access = issueToken();
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw`
+      SELECT "id"
+      FROM "BusinessProfile"
+      WHERE "id" = ${normalizedProfileId}
+      FOR UPDATE
+    `;
+    if (!Array.isArray(locked) || !locked.length) throw new Error("Business profile was not found");
+    const profile = await tx.businessProfile.findUnique({
+      where: { id: normalizedProfileId },
+      include: { users: { select: { id: true } } },
+    });
+    if (!profile || profile.archivedAt || profile.accountStatus !== "unclaimed" || profile.users.length) {
+      const error = new Error("This business already has an account. Sign in to access it.");
+      error.statusCode = 409;
+      error.code = "BUSINESS_ALREADY_ACTIVE";
+      throw error;
+    }
+    await tx.fastAgentSession.deleteMany({
+      where: { businessProfileId: normalizedProfileId, expiresAt: { lte: new Date() } },
+    });
+    const session = await tx.fastAgentSession.create({
+      data: {
+        tokenHash: access.tokenHash,
+        businessProfileId: normalizedProfileId,
+        expiresAt: fastAgentAccessExpiresAt(profile, settings),
+      },
+    });
+    return { access, session, profile };
+  });
 }
 
 async function startBusinessTrial({ businessProfileId, settings, source = "trial" }) {
@@ -13538,22 +14204,127 @@ async function handleToolCall(geminiWs, clientWs, profile, config, toolCall) {
   }
 }
 
-app.get("/api/places/autocomplete", async (req, res) => {
+app.get("/api/onboarding/fast-agent/experience", async (req, res) => {
   try {
-    const input = String(req.query.input || "").trim();
-    const suggestions = await fetchPlacesAutocomplete(input);
-    res.json({ suggestions });
+    res.set("Cache-Control", "private, no-store");
+    res.set("Vary", "Cookie");
+    const settings = await getSettings();
+    const percentage = clampRolloutPercent(settings.fastAgentWizardPercent);
+    const existingVisitorId = String(cookieValue(req, FAST_AGENT_VISITOR_COOKIE) || "").trim();
+    const visitorId = /^[0-9a-f-]{36}$/i.test(existingVisitorId) ? existingVisitorId : crypto.randomUUID();
+    const forwardedProtocol = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+    const secureCookie = req.secure || forwardedProtocol === "https";
+    if (visitorId !== existingVisitorId) {
+      res.cookie(FAST_AGENT_VISITOR_COOKIE, visitorId, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: secureCookie,
+        maxAge: 365 * 24 * 60 * 60 * 1000,
+        path: "/",
+      });
+    }
+    const savedAssignment = String(cookieValue(req, FAST_AGENT_ASSIGNMENT_COOKIE) || "").trim();
+    const savedMatch = new RegExp(`^${FAST_AGENT_EXPERIMENT_VERSION}:(wizard|control)$`).exec(savedAssignment);
+    const forcedVariant = percentage <= 0 ? "control" : percentage >= 100 ? "wizard" : "";
+    const assignment = forcedVariant
+      ? { variant: forcedVariant, bucket: null }
+      : savedMatch
+        ? { variant: savedMatch[1], bucket: null }
+        : fastAgentVariant(`${FAST_AGENT_EXPERIMENT_VERSION}:${visitorId}`, percentage);
+    if (!savedMatch || (forcedVariant && savedMatch[1] !== forcedVariant)) {
+      res.cookie(FAST_AGENT_ASSIGNMENT_COOKIE, `${FAST_AGENT_EXPERIMENT_VERSION}:${assignment.variant}`, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: secureCookie,
+        maxAge: 2 * 60 * 60 * 1000,
+        path: "/",
+      });
+    }
+    res.json({
+      variant: assignment.variant,
+      percentage,
+      bucket: assignment.bucket,
+      experimentVersion: FAST_AGENT_EXPERIMENT_VERSION,
+    });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
 });
 
+app.post("/api/onboarding/fast-agent/funnel", async (req, res) => {
+  try {
+    enforceFastAgentFunnelRateLimit(req);
+    const eventKey = String(req.body?.eventKey || "").trim();
+    if (!FAST_AGENT_FUNNEL_EVENTS.has(eventKey)) return res.status(400).json({ error: "Unknown Fast Agent funnel event" });
+    const flowId = cleanFastAgentFlowId(req.body?.customData?.fastagent_flow_id);
+    if (!flowId) return res.status(400).json({ error: "A valid Fast Agent flow is required" });
+    const settings = await getSettings();
+    const assignment = fastAgentExperimentAssignment(req, settings);
+    if (!assignment) return res.status(400).json({ error: "A Fast Agent experiment session is required" });
+    const suppliedCustomData = req.body?.customData && typeof req.body.customData === "object" ? req.body.customData : {};
+    const event = await recordTrafficEvent({
+      req,
+      eventKey,
+      eventId: `${flowId}_${eventKey}`,
+      sourceUrl: req.body?.sourceUrl,
+      referrer: req.body?.referrer,
+      customData: {
+        input_source: String(suppliedCustomData.input_source || "").slice(0, 64),
+        website_source: String(suppliedCustomData.website_source || "").slice(0, 64),
+        error_code: String(suppliedCustomData.error_code || "").slice(0, 120),
+        rollout_percent: Number.isFinite(Number(suppliedCustomData.rollout_percent))
+          ? clampRolloutPercent(suppliedCustomData.rollout_percent)
+          : undefined,
+        fastagent_variant: assignment.variant,
+        experiment_version: FAST_AGENT_EXPERIMENT_VERSION,
+        fastagent_flow_id: flowId,
+      },
+      source: "fastagent_funnel",
+    });
+    res.json({ ok: true, id: event?.id || null });
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+  }
+});
+
+app.get("/api/places/autocomplete", async (req, res) => {
+  try {
+    enforcePlacesLookupRateLimit(req, "autocomplete");
+    const input = String(req.query.input || "").trim();
+    const suggestions = await fetchPlacesAutocomplete(input, { sessionToken: req.query.session_token || req.query.sessionToken });
+    res.json({ suggestions });
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+  }
+});
+
 app.get("/api/places/details", async (req, res) => {
   try {
+    enforcePlacesLookupRateLimit(req, "details");
     const placeId = cleanGooglePlaceId(req.query.place_id || req.query.placeId);
-    const place = await fetchPlaceDetails(placeId);
+    const sessionToken = cleanPlacesSessionToken(req.query.session_token || req.query.sessionToken);
+    const place = await fetchPlaceDetails(placeId, sessionToken);
+    const kind = googlePlaceKind(place.types);
+    if (kind === "address") {
+      const businesses = await findBusinessesAtAddress(place);
+      return res.json({
+        kind: "address",
+        address: {
+          placeId: cleanGooglePlaceId(place.id || placeId),
+          formattedAddress: String(place.formattedAddress || localizedText(place.displayName) || "").trim(),
+        },
+        businesses,
+      });
+    }
+    if (kind !== "business") {
+      const error = new Error("Choose a Google business listing or street address.");
+      error.statusCode = 422;
+      error.code = "PLACE_TYPE_NOT_SUPPORTED";
+      throw error;
+    }
     const data = businessDataFromPlace(place, { placeId });
     res.json({
+      kind: "business",
       place: {
         placeId: data.googlePlaceId,
         businessName: data.businessName,
@@ -13567,7 +14338,7 @@ app.get("/api/places/details", async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(error.statusCode || 400).json({ error: error.message });
   }
 });
 
@@ -13576,52 +14347,73 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
     const placeId = cleanGooglePlaceId(req.body.placeId || req.body.place_id || req.query.place_id);
     const businessName = normalizeBusinessName(req.body.businessName || req.query.business_name);
     const website = normalizeWebsite(req.body.website || req.query.website);
+    const websiteDecisionProvided = typeof req.body.noWebsite === "boolean" || typeof req.body.no_website === "boolean";
+    const noWebsite = req.body.noWebsite === true || req.body.no_website === true;
+    const serviceArea = String(req.body.serviceArea || req.body.service_area || req.query.service_area || "").trim().slice(0, 300);
     const requestedPlan = await activeSubscriptionPlanFromParam(
       req.body.plan || req.body.planSlug || req.body.subscriptionPlan || req.query.plan,
     );
     if (!businessName && !placeId) throw new Error("Business name is required");
+    if (websiteDecisionProvided && !noWebsite && !website) {
+      const error = new Error("Enter the business website or choose that the business does not have one.");
+      error.statusCode = 422;
+      error.code = "WEBSITE_DECISION_REQUIRED";
+      throw error;
+    }
 
     const settings = await getSettings();
-    const existing = placeId ? await findBusinessByGooglePlaceId(placeId) : await findBusinessMatch(businessName, website);
-    const activeTrial = existing?.accountStatus === "trial" && existing.trialEndsAt > new Date();
-    if (existing && (existing.users.length || existing.accountStatus === "paid")) {
+    const placeExisting = placeId ? await findBusinessByGooglePlaceId(placeId) : null;
+    const existing = placeId ? placeExisting : await findBusinessMatch(businessName, website, serviceArea);
+    if (existing && (existing.users.length || existing.accountStatus !== "unclaimed" || existing.archivedAt)) {
       return res.status(409).json({
         error: "This business already has an account. Sign in to access it.",
         code: "BUSINESS_ALREADY_ACTIVE",
       });
     }
-    if (!activeTrial) enforceOnboardingRateLimit(req, settings);
+    enforceOnboardingRateLimit(req, settings);
 
-    const researched = existing
-      ? { profile: existing, cached: true }
-      : placeId
-        ? await createOrUpdateBusinessFromPlace({
-            placeId,
+    const researched = placeId
+      ? await createOrUpdateBusinessFromPlace({
+          placeId,
+          businessName,
+          website,
+          websiteDecisionProvided,
+          noWebsite,
+          researchModel: settings.researchModel,
+          existingProfile: existing,
+        })
+      : existing
+        ? { profile: existing, cached: true }
+        : await researchBusiness({
             businessName,
             website,
+            serviceArea,
             researchModel: settings.researchModel,
-        })
-        : await researchBusiness({ businessName, website, researchModel: settings.researchModel });
+            websiteDecisionProvided,
+            noWebsite,
+            protectClaimed: true,
+          });
     let profile = researched.profile;
-    if (!existing && (profile.users?.length || profile.accountStatus === "paid")) {
+    if (websiteDecisionProvided) {
+      profile = await applyConfirmedWebsiteDecision(profile, { website, noWebsite });
+    }
+    profile = await prisma.businessProfile.findUnique({
+      where: { id: profile.id },
+      include: { users: { select: { id: true } } },
+    });
+    if (profile.users.length || profile.accountStatus !== "unclaimed" || profile.archivedAt) {
       return res.status(409).json({
         error: "This business already has an account. Sign in to access it.",
         code: "BUSINESS_ALREADY_ACTIVE",
       });
     }
-    const profileActiveTrial = profile.accountStatus === "trial" && profile.trialEndsAt > new Date();
     const planAssignment = await assignRequestedPlanIfAvailable(profile, requestedPlan);
     profile = planAssignment.profile;
     const config = await ensureBusinessConfig(profile);
-    await prisma.fastAgentSession.deleteMany({ where: { businessProfileId: profile.id, expiresAt: { lte: new Date() } } });
-    const access = issueToken();
-    const fastAgentSessionRecord = await prisma.fastAgentSession.create({
-      data: {
-        tokenHash: access.tokenHash,
-        businessProfileId: profile.id,
-        expiresAt: fastAgentAccessExpiresAt(profile, settings),
-      },
-    });
+    const sessionGrant = await createFastAgentSessionForUnclaimedProfile(profile.id, settings);
+    profile = sessionGrant.profile;
+    const access = sessionGrant.access;
+    const fastAgentSessionRecord = sessionGrant.session;
     const shortCode = await ensureFastAgentShortCode(fastAgentSessionRecord);
     let demoAssignment = await prisma.demoNumberAssignment.findUnique({
       where: { businessProfileId: profile.id },
@@ -13630,13 +14422,33 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
     if (!demoAssignment || demoAssignment.expiresAt <= new Date()) {
       demoAssignment = await allocateDemoNumber(profile, settings);
     }
-    res.status(profileActiveTrial ? 200 : 201).json({
+    const flowId = cleanFastAgentFlowId(req.body.fastAgentFlowId || req.body.fastagent_flow_id);
+    const experimentAssignment = fastAgentExperimentAssignment(req, settings);
+    if (flowId && experimentAssignment) {
+      await recordTrafficEvent({
+        req,
+        eventKey: "fastagent_build_succeeded",
+        eventId: `${flowId}_fastagent_build_succeeded`,
+        sourceUrl: req.body.fastAgentSourceUrl,
+        referrer: req.body.fastAgentReferrer,
+        customData: {
+          fastagent_variant: experimentAssignment.variant,
+          experiment_version: FAST_AGENT_EXPERIMENT_VERSION,
+          fastagent_flow_id: flowId,
+          input_source: String(req.body.inputSource || "").slice(0, 64),
+          website_source: String(req.body.websiteSource || "").slice(0, 64),
+          business_profile_id: profile.id,
+        },
+        source: "fastagent_build",
+      }).catch(() => null);
+    }
+    res.status(201).json({
       accessToken: access.token,
       shortUrl: fastAgentShortUrl(req, settings, shortCode),
       cached: researched.cached,
       profile: publicBusinessProfile(profile, config),
       trial: {
-        started: profileActiveTrial,
+        started: false,
         days: settings.trialDays,
         endsAt: profile.trialEndsAt,
         credits: profile.creditBalance,
@@ -13648,7 +14460,7 @@ app.post("/api/onboarding/fast-agent", async (req, res) => {
       planUnavailable: planAssignment.planUnavailable,
     });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(error.statusCode || 400).json({ error: error.message, code: error.code || undefined });
   }
 });
 
@@ -16027,6 +16839,7 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
         demoNumberCapacity: Math.max(1, Number(req.body.demoNumberCapacity || 10)),
         demoCallerLimit: Math.max(1, Number(req.body.demoCallerLimit || 3)),
         fastAgentBuildsPerIpPerHour: fastAgentBuildsPerIpLimit(req.body.fastAgentBuildsPerIpPerHour ?? 5),
+        fastAgentWizardPercent: clampRolloutPercent(req.body.fastAgentWizardPercent ?? 50),
         autoBuyTrialPhoneNumber: Boolean(req.body.autoBuyTrialPhoneNumber),
         trialPhoneNumberGraceDays: normalizedTrialPhoneNumberGraceDays(req.body.trialPhoneNumberGraceDays),
         callSilenceWarningSeconds: normalizedCallSilenceWarningSeconds(req.body.callSilenceWarningSeconds),
@@ -16115,6 +16928,8 @@ app.put("/api/admin/settings", requireAuth, requireAdmin, async (req, res) => {
           req.body.fastAgentBuildsPerIpPerHour === undefined
             ? undefined
             : fastAgentBuildsPerIpLimit(req.body.fastAgentBuildsPerIpPerHour),
+        fastAgentWizardPercent:
+          req.body.fastAgentWizardPercent === undefined ? undefined : clampRolloutPercent(req.body.fastAgentWizardPercent),
         autoBuyTrialPhoneNumber:
           typeof req.body.autoBuyTrialPhoneNumber === "boolean" ? req.body.autoBuyTrialPhoneNumber : undefined,
         trialPhoneNumberGraceDays:
@@ -16513,16 +17328,37 @@ app.patch("/api/admin/users/:id", requireAuth, requireAdmin, async (req, res) =>
 app.get("/api/admin/traffic", requireAuth, requireAdmin, async (req, res) => {
   try {
     const { range, from, to } = adminTrafficRange(req.query);
-    const events = await prisma.trafficEvent.findMany({
-      where: { createdAt: { gte: from, lt: to } },
-      include: {
-        businessProfile: {
-          select: { id: true, businessName: true, website: true, accountStatus: true, archivedAt: true, createdAt: true },
+    const [events, experimentEvents] = await Promise.all([
+      prisma.trafficEvent.findMany({
+        where: { createdAt: { gte: from, lt: to } },
+        include: {
+          businessProfile: {
+            select: { id: true, businessName: true, website: true, accountStatus: true, archivedAt: true, createdAt: true },
+          },
         },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 1000,
-    });
+        orderBy: { createdAt: "desc" },
+        take: 1000,
+      }),
+      prisma.trafficEvent.findMany({
+        where: {
+          createdAt: { gte: from, lt: to },
+          eventKey: {
+            in: [
+              "fastagent_experiment_exposed",
+              "fastagent_business_confirmed",
+              "fastagent_website_step_viewed",
+              "fastagent_website_completed",
+              "fastagent_build_started",
+              "fastagent_build_failed",
+              "fastagent_build_succeeded",
+            ],
+          },
+        },
+        select: { eventKey: true, eventId: true, customData: true },
+        orderBy: { createdAt: "desc" },
+        take: 100000,
+      }),
+    ]);
     const registrationKeys = new Set(["trial_started", "fastagent_agent_built"]);
     const registrationRows = [];
     const seenRegistrations = new Set();
@@ -16543,6 +17379,58 @@ app.get("/api/admin/traffic", requireAuth, requireAdmin, async (req, res) => {
     }
     const eventCounts = {};
     for (const event of events) eventCounts[event.eventKey] = (eventCounts[event.eventKey] || 0) + 1;
+    const experimentSets = { wizard: {}, control: {} };
+    for (const variant of Object.keys(experimentSets)) {
+      for (const key of [
+        "exposed",
+        "businessConfirmed",
+        "websiteStepViewed",
+        "websiteCompleted",
+        "buildStarted",
+        "buildFailed",
+        "agentBuilt",
+      ]) {
+        experimentSets[variant][key] = new Set();
+      }
+    }
+    const experimentMetric = {
+      fastagent_experiment_exposed: "exposed",
+      fastagent_business_confirmed: "businessConfirmed",
+      fastagent_website_step_viewed: "websiteStepViewed",
+      fastagent_website_completed: "websiteCompleted",
+      fastagent_build_started: "buildStarted",
+      fastagent_build_failed: "buildFailed",
+      fastagent_build_succeeded: "agentBuilt",
+    };
+    for (const event of experimentEvents) {
+      const customData = jsonObject(event.customData);
+      if (customData.experiment_version !== FAST_AGENT_EXPERIMENT_VERSION) continue;
+      const variant = customData.fastagent_variant === "control" ? "control" : customData.fastagent_variant === "wizard" ? "wizard" : "";
+      const metric = experimentMetric[event.eventKey];
+      const flowId = String(customData.fastagent_flow_id || event.eventId || "").trim();
+      if (variant && metric && flowId) experimentSets[variant][metric].add(flowId);
+    }
+    const fastAgentExperiment = Object.fromEntries(
+      Object.entries(experimentSets).map(([variant, metrics]) => {
+        const exposedFlows = metrics.exposed;
+        const countExposedMetric = (metric) => [...metric].filter((flowId) => exposedFlows.has(flowId)).length;
+        const exposed = exposedFlows.size;
+        const agentBuilt = countExposedMetric(metrics.agentBuilt);
+        return [
+          variant,
+          {
+            exposed,
+            businessConfirmed: countExposedMetric(metrics.businessConfirmed),
+            websiteStepViewed: countExposedMetric(metrics.websiteStepViewed),
+            websiteCompleted: countExposedMetric(metrics.websiteCompleted),
+            buildStarted: countExposedMetric(metrics.buildStarted),
+            buildFailed: countExposedMetric(metrics.buildFailed),
+            agentBuilt,
+            conversionRate: exposed ? Number(((agentBuilt / exposed) * 100).toFixed(1)) : 0,
+          },
+        ];
+      }),
+    );
     res.json({
       range,
       from,
@@ -16560,6 +17448,7 @@ app.get("/api/admin/traffic", requireAuth, requireAdmin, async (req, res) => {
       byPlatform: Object.entries(byPlatform)
         .sort((a, b) => b[1] - a[1])
         .map(([platform, count]) => ({ platform, count })),
+      fastAgentExperiment,
       registrations: registrationRows.map(trafficPublicRow),
       events: events.slice(0, 200).map(trafficPublicRow),
     });

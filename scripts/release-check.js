@@ -57,6 +57,7 @@ run(process.execPath, ["scripts/test-custom-booking-provider.js"]);
 run(process.execPath, ["scripts/test-crm-grouping.js"]);
 run(process.execPath, ["scripts/test-onboarding-conversation.js"]);
 run(process.execPath, ["scripts/test-inbound-discovery.js"]);
+run(process.execPath, ["scripts/test-fastagent-wizard.js"]);
 
 if (process.env.RUN_INTEGRATION === "1" || process.env.RUN_BOOKING_TEST === "1") {
   run("npm", ["run", "test:booking"]);

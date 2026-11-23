@@ -1,0 +1,2 @@
+ALTER TABLE "AppSettings"
+ADD COLUMN "fastAgentWizardPercent" INTEGER NOT NULL DEFAULT 50;

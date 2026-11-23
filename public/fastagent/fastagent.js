@@ -1,5 +1,22 @@
 import { receiveLandingEmail } from "./landing-email.js";
+import {
+  FAST_AGENT_DRAFT_KEY,
+  FAST_AGENT_SENSITIVE_URL_KEYS,
+  createFastAgentDraft,
+  fastAgentBuildPayload,
+  fastAgentSessionPath,
+  fastAgentStorageKey,
+  firstFastAgentStep,
+  normalizeBillingPeriodInput,
+  normalizeWebsiteInput,
+  parseFastAgentEntry,
+  shouldAskServiceArea,
+  validateFastAgentDraft,
+  validBusinessUrl,
+} from "./wizard-state.js";
 
+const rawLandingUrl = window.location.href;
+const FAST_AGENT_PENDING_SESSION_KEY = "ringport:fastagent:pending-session:v1";
 const emailParam = receiveLandingEmail({
   location: window.location,
   history: window.history,
@@ -9,40 +26,56 @@ const emailParam = receiveLandingEmail({
     removeItem: (key) => window.sessionStorage.removeItem(key),
   },
 });
-const params = new URLSearchParams(window.location.search);
-function normalizeWebsiteInput(value) {
-  const trimmed = String(value || "").trim();
-  if (!trimmed) return "";
-  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+const entry = parseFastAgentEntry({ search: window.location.search, pathname: window.location.pathname });
+
+function sanitizedLandingUrl(value) {
+  if (!String(value || "").trim()) return "";
+  try {
+    const url = new URL(value, window.location.origin);
+    for (const key of FAST_AGENT_SENSITIVE_URL_KEYS) {
+      url.searchParams.delete(key);
+    }
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return window.location.origin + window.location.pathname;
+  }
 }
 
-function normalizeBillingPeriodInput(value) {
-  const normalized = String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[_\s]+/g, "-");
-  return ["12", "12-month", "12-months", "annual", "annually", "year", "yearly"].includes(normalized) ? 12 : 1;
+function restoredDraft() {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(FAST_AGENT_DRAFT_KEY) || "null");
+    if (!value || Date.now() - Number(value.updatedAt || 0) > 2 * 60 * 60 * 1000) return null;
+    return value;
+  } catch {
+    return null;
+  }
 }
 
-const businessName = (params.get("business_name") || "").trim();
-const website = normalizeWebsiteInput(params.get("website"));
-const placeId = (params.get("place_id") || "").trim();
-const accessTokenFromUrl = (params.get("token") || params.get("access_token") || "").trim();
-const mobileDeviceIdFromUrl = (params.get("mobile_device_id") || params.get("mobileDeviceId") || "").trim();
-const shortCodeFromPath = /^\/(\d{8})\/?$/.exec(window.location.pathname)?.[1] || "";
-const claimToken = (params.get("claim_token") || "").trim();
-const requestedPlan = (params.get("plan") || params.get("plan_slug") || params.get("subscription_plan") || "").trim();
-const requestedPeriod = normalizeBillingPeriodInput(params.get("period") || params.get("billing_period") || params.get("billingPeriod"));
-const storageKey = placeId
-  ? `fastagent:place:${placeId}`
-  : businessName || website
-    ? `fastagent:${businessName.toLowerCase()}|${website.toLowerCase()}`
-    : "";
+let businessName = entry.businessName;
+let website = entry.website;
+let placeId = entry.placeId;
+const serviceAreaFromUrl = entry.serviceArea;
+const accessTokenFromUrl = entry.accessToken;
+const mobileDeviceIdFromUrl = entry.mobileDeviceId;
+const shortCodeFromPath = entry.shortCode;
+const claimToken = entry.claimToken;
+const requestedPlan = entry.requestedPlan;
+const requestedPeriod = entry.requestedPeriod;
+const urlHasEntryPrefill = Boolean(businessName || website || placeId || serviceAreaFromUrl);
+const entryDraft = createFastAgentDraft(
+  { businessName, website, placeId, serviceArea: serviceAreaFromUrl },
+  urlHasEntryPrefill ? null : restoredDraft(),
+);
+let storageKey = fastAgentStorageKey(entryDraft);
+const flowId = entryDraft.flowId || crypto.randomUUID();
+entryDraft.flowId = flowId;
 
 const state = {
   accessToken:
     accessTokenFromUrl ||
     (shortCodeFromPath ? `short:${shortCodeFromPath}` : "") ||
+    claimToken ||
     (storageKey ? localStorage.getItem(storageKey) || "" : ""),
   shortUrl: "",
   claimToken,
@@ -74,6 +107,30 @@ const state = {
   trialDays: 0,
   trialCredits: 0,
   billingReady: false,
+  entryDraft,
+  entryStep:
+    !urlHasEntryPrefill && ["business", "website", "review"].includes(entryDraft.step)
+      ? entryDraft.step
+      : firstFastAgentStep(entryDraft),
+  entryVariant: "wizard",
+  experimentVersion: "fastagent-wizard-v1",
+  flowId,
+  originalLandingUrl: sanitizedLandingUrl(rawLandingUrl),
+  initialReferrer: sanitizedLandingUrl(document.referrer || ""),
+  buildInProgress: false,
+  lastBuildPayload: null,
+  placesSessionToken: "",
+  placeLookupInProgress: false,
+  activeSuggestionIndex: -1,
+  renderedSuggestions: [],
+  controlActiveSuggestionIndex: -1,
+  controlPlacesSessionToken: "",
+  controlPlaceLookupInProgress: false,
+  controlSelectedPlace: null,
+  visualizerFrame: null,
+  entryHistoryDepth: Number(history.state?.fastAgentDepth || 0),
+  pendingSessionPath: "",
+  sessionPath: "",
 };
 
 const el = Object.fromEntries(
@@ -82,17 +139,55 @@ const el = Object.fromEntries(
     "loadingTitle",
     "loadingMessage",
     "entryScreen",
+    "fastEntryForm",
+    "wizardProgress",
+    "businessStep",
+    "businessStepTitle",
+    "businessContinueButton",
     "businessNameInput",
     "websiteInput",
+    "websiteStep",
+    "websiteStepTitle",
+    "websiteStepHelp",
+    "websiteBackButton",
+    "websiteError",
+    "noWebsiteButton",
+    "buildAgentButton",
+    "serviceAreaField",
+    "serviceAreaInput",
     "placeIdInput",
     "planInput",
     "periodInput",
     "placesSuggestions",
     "placesAutocompleteStatus",
+    "selectedBusiness",
+    "selectedBusinessName",
+    "selectedBusinessAddress",
+    "changeBusinessButton",
+    "addressResolution",
+    "addressResolutionTitle",
+    "addressBusinessChoices",
+    "reviewStep",
+    "reviewStepTitle",
+    "reviewBusiness",
+    "reviewWebsite",
+    "editReviewBusiness",
+    "editReviewWebsite",
+    "reviewBuildButton",
+    "controlStep",
+    "controlStepTitle",
+    "controlBusinessNameInput",
+    "controlWebsiteInput",
+    "controlPlaceIdInput",
+    "controlPlacesSuggestions",
+    "controlPlacesStatus",
+    "controlBuildButton",
     "agentScreen",
     "errorScreen",
+    "errorTitle",
     "errorMessage",
-    "trialBadge",
+    "retryBuildButton",
+    "backToDetailsButton",
     "orb",
     "voiceVisualizer",
     "callStatus",
@@ -149,14 +244,6 @@ const el = Object.fromEntries(
 if (el.planInput) el.planInput.value = requestedPlan;
 if (el.periodInput) el.periodInput.value = String(state.billingPeriodMonths);
 if (el.claimEmail && emailParam) el.claimEmail.value = emailParam;
-if (emailParam) {
-  const entryForm = document.querySelector(".fast-entry-form");
-  if (entryForm) {
-    const next = new URL(entryForm.action, location.href);
-    next.hash = new URLSearchParams({ email: emailParam }).toString();
-    entryForm.action = next.href;
-  }
-}
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -362,9 +449,9 @@ async function trackAdEvent(eventKey, customData = {}, userData = {}) {
       body: JSON.stringify({
         eventKey,
         eventId,
-        sourceUrl: location.href,
-        referrer: document.referrer,
-        rdt_cid: new URLSearchParams(location.search).get("rdt_cid") || "",
+        sourceUrl: state.originalLandingUrl,
+        referrer: state.initialReferrer,
+        rdt_cid: new URL(state.originalLandingUrl).searchParams.get("rdt_cid") || "",
         customData: adPixelCustomData(meta || tiktok || reddit || openai, customData),
         userData,
       }),
@@ -376,9 +463,13 @@ async function trackAdEvent(eventKey, customData = {}, userData = {}) {
 
 function showError(message) {
   el.loadingScreen.hidden = true;
+  el.entryScreen.hidden = true;
   el.agentScreen.hidden = true;
   el.errorScreen.hidden = false;
   el.errorMessage.textContent = message;
+  el.retryBuildButton.hidden = !state.lastBuildPayload;
+  el.backToDetailsButton.hidden = !state.lastBuildPayload;
+  requestAnimationFrame(() => el.errorTitle?.focus());
 }
 
 function setCallStatus(text, live = false) {
@@ -445,6 +536,52 @@ function appendTranscript(speaker, text) {
 
 let placesSearchTimer = null;
 let placesSearchController = null;
+let controlPlacesSearchTimer = null;
+let controlPlacesSearchController = null;
+
+function persistEntryDraft() {
+  state.entryDraft.updatedAt = Date.now();
+  state.entryDraft.flowId = state.flowId;
+  try {
+    sessionStorage.setItem(FAST_AGENT_DRAFT_KEY, JSON.stringify(state.entryDraft));
+  } catch {
+    // The wizard still works when storage is unavailable.
+  }
+}
+
+async function trackFunnelEvent(eventKey, customData = {}) {
+  if (urlHasEntryPrefill) return;
+  try {
+    await fetch("/api/onboarding/fast-agent/funnel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      keepalive: true,
+      body: JSON.stringify({
+        eventKey,
+        eventId: `${state.flowId}_${eventKey}`,
+        sourceUrl: state.originalLandingUrl,
+        referrer: state.initialReferrer,
+        customData: {
+          fastagent_variant: state.entryVariant,
+          experiment_version: state.experimentVersion,
+          fastagent_flow_id: state.flowId,
+          ...customData,
+        },
+      }),
+    });
+  } catch {
+    // Funnel measurement never blocks the builder.
+  }
+}
+
+function freshPlacesSessionToken() {
+  state.placesSessionToken = crypto.randomUUID();
+  return state.placesSessionToken;
+}
+
+function placesSessionToken() {
+  return state.placesSessionToken || freshPlacesSessionToken();
+}
 
 function setPlacesStatus(message, isError = false) {
   if (!el.placesAutocompleteStatus) return;
@@ -456,6 +593,10 @@ function hidePlacesSuggestions() {
   if (!el.placesSuggestions) return;
   el.placesSuggestions.hidden = true;
   el.placesSuggestions.innerHTML = "";
+  el.businessNameInput?.setAttribute("aria-expanded", "false");
+  el.businessNameInput?.removeAttribute("aria-activedescendant");
+  state.activeSuggestionIndex = -1;
+  state.renderedSuggestions = [];
 }
 
 function placeSuggestionIcon(types = []) {
@@ -472,53 +613,203 @@ function placeSuggestionIcon(types = []) {
   if (typeSet.has("gym") || typeSet.has("fitness_center")) return "dumbbell";
   if (typeSet.has("bank") || typeSet.has("finance") || typeSet.has("accounting")) return "landmark";
   if (typeSet.has("beauty_salon") || typeSet.has("hair_care") || typeSet.has("spa")) return "scissors";
+  if (types.some((type) => ["street_address", "premise", "subpremise", "street_number", "route"].includes(type))) return "map-pin";
   return "building-2";
 }
 
-function renderPlacesSuggestions(suggestions = []) {
+function setActiveSuggestion(index) {
+  const buttons = [...el.placesSuggestions.querySelectorAll('[role="option"]')];
+  if (!buttons.length) return;
+  state.activeSuggestionIndex = (index + buttons.length) % buttons.length;
+  buttons.forEach((button, buttonIndex) => button.setAttribute("aria-selected", buttonIndex === state.activeSuggestionIndex ? "true" : "false"));
+  const active = buttons[state.activeSuggestionIndex];
+  el.businessNameInput.setAttribute("aria-activedescendant", active.id);
+  active.scrollIntoView({ block: "nearest" });
+}
+
+function renderPlacesSuggestions(suggestions = [], typedValue = "") {
   if (!el.placesSuggestions) return;
   el.placesSuggestions.innerHTML = "";
-  if (!suggestions.length) {
+  const entries = [...suggestions];
+  if (typedValue.trim()) {
+    entries.push({ kind: "manual", mainText: `Use “${typedValue.trim()}”`, secondaryText: "Enter this business manually", text: typedValue.trim() });
+  }
+  if (!entries.length) {
     hidePlacesSuggestions();
     return;
   }
-  for (const suggestion of suggestions) {
+  state.renderedSuggestions = entries;
+  entries.forEach((suggestion, index) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "places-suggestion";
+    button.id = `placesSuggestion${index}`;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", "false");
     button.innerHTML =
       `<span class="places-suggestion-icon"><i data-lucide="${placeSuggestionIcon(suggestion.types)}"></i></span>` +
-      '<span class="places-suggestion-copy"><strong></strong><span></span></span>';
+      '<span class="places-suggestion-copy"><strong></strong><span></span></span><span class="places-suggestion-kind"></span>';
     button.querySelector("strong").textContent = suggestion.mainText || suggestion.text;
     button.querySelector(".places-suggestion-copy > span").textContent = suggestion.secondaryText || suggestion.text;
+    button.querySelector(".places-suggestion-kind").textContent = suggestion.kind === "address" ? "Address" : suggestion.kind === "manual" ? "Manual" : "Business";
     button.addEventListener("click", () => selectPlaceSuggestion(suggestion));
     el.placesSuggestions.appendChild(button);
-  }
+  });
+  const attribution = document.createElement("div");
+  attribution.className = "places-attribution";
+  attribution.textContent = "Google Maps";
+  attribution.setAttribute("translate", "no");
+  el.placesSuggestions.appendChild(attribution);
   el.placesSuggestions.hidden = false;
+  el.businessNameInput.setAttribute("aria-expanded", "true");
   window.lucide?.createIcons();
 }
 
-async function selectPlaceSuggestion(suggestion) {
-  el.businessNameInput.value = suggestion.mainText || suggestion.text;
-  el.placeIdInput.value = suggestion.placeId;
+function websiteWasAutoDiscovered() {
+  return ["google", "prefilled_google"].includes(state.entryDraft.websiteSource);
+}
+
+function applySelectedBusiness(place, selectionKind = "business") {
+  state.entryDraft.businessName = String(place.businessName || "").trim();
+  state.entryDraft.placeId = String(place.placeId || "").trim();
+  state.entryDraft.selectionKind = selectionKind;
+  state.entryDraft.selectedPlace = place;
+  state.entryDraft.addressBusinesses = [];
+  if (place.address) state.entryDraft.serviceArea = place.address;
+  if (place.website && (!state.entryDraft.website || websiteWasAutoDiscovered())) {
+    state.entryDraft.website = normalizeWebsiteInput(place.website);
+    state.entryDraft.websiteSource = "google";
+    state.entryDraft.noWebsite = false;
+  }
+  el.businessNameInput.value = state.entryDraft.businessName;
+  el.placeIdInput.value = state.entryDraft.placeId;
+  el.selectedBusinessName.textContent = state.entryDraft.businessName;
+  el.selectedBusinessAddress.textContent = place.address || state.entryDraft.selectedAddress || "Google business profile";
+  el.selectedBusiness.hidden = false;
+  el.addressResolution.hidden = true;
+  el.businessNameInput.closest(".places-autocomplete-field").hidden = true;
+  setPlacesStatus("");
+  persistEntryDraft();
+}
+
+function chooseManualBusiness(value) {
+  state.entryDraft.businessName = String(value || el.businessNameInput.value || "").trim();
+  state.entryDraft.placeId = "";
+  state.entryDraft.selectionKind = "manual";
+  state.entryDraft.selectedPlace = null;
+  el.placeIdInput.value = "";
+  el.businessNameInput.value = state.entryDraft.businessName;
   hidePlacesSuggestions();
-  setPlacesStatus("Loading business details");
+  setPlacesStatus(state.entryDraft.selectedAddress ? `Using ${state.entryDraft.selectedAddress}` : "We’ll research this business by name.");
+  persistEntryDraft();
+}
+
+function renderAddressBusinessChoices(businesses = []) {
+  el.addressBusinessChoices.innerHTML = "";
+  for (const place of businesses) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.innerHTML = "<strong></strong><span></span>";
+    button.querySelector("strong").textContent = place.businessName;
+    button.querySelector("span").textContent = place.address || state.entryDraft.selectedAddress;
+    button.addEventListener("click", () => applySelectedBusiness(place, "address_resolved"));
+    el.addressBusinessChoices.appendChild(button);
+  }
+  el.addressResolution.hidden = false;
+}
+
+async function selectPlaceSuggestion(suggestion) {
+  if (suggestion.kind === "manual") {
+    chooseManualBusiness(suggestion.text);
+    return;
+  }
+  const selectedSessionToken = placesSessionToken();
+  state.placesSessionToken = "";
+  state.placeLookupInProgress = true;
+  el.businessContinueButton.disabled = true;
+  el.businessNameInput.readOnly = true;
+  el.businessNameInput.setAttribute("aria-disabled", "true");
+  el.businessStep.setAttribute("aria-busy", "true");
+  el.businessNameInput.value = suggestion.mainText || suggestion.text;
+  hidePlacesSuggestions();
+  setPlacesStatus(suggestion.kind === "address" ? "Looking for businesses at this address" : "Loading business details");
   try {
-    const data = await api(`/api/places/details?place_id=${encodeURIComponent(suggestion.placeId)}`);
-    const place = data.place || {};
-    if (place.businessName) el.businessNameInput.value = place.businessName;
-    if (place.website) el.websiteInput.value = place.website;
-    setPlacesStatus("Business selected");
-  } catch {
-    setPlacesStatus("Business selected. Details will load when you test the agent.");
+    const query = new URLSearchParams({ place_id: suggestion.placeId, kind: suggestion.kind, session_token: selectedSessionToken });
+    const data = await api(`/api/places/details?${query}`);
+    if (data.kind === "address") {
+      state.entryDraft.selectedAddress = data.address?.formattedAddress || suggestion.text;
+      state.entryDraft.addressPlaceId = data.address?.placeId || suggestion.placeId;
+      state.entryDraft.placeId = "";
+      state.entryDraft.businessName = "";
+      state.entryDraft.selectionKind = "address";
+      state.entryDraft.addressBusinesses = data.businesses || [];
+      el.placeIdInput.value = "";
+      const businesses = data.businesses || [];
+      if (businesses.length === 1) {
+        applySelectedBusiness(businesses[0], "address_resolved");
+        return;
+      }
+      el.addressResolutionTitle.textContent = businesses.length
+        ? "Which business is yours?"
+        : "What is the business name at this address?";
+      renderAddressBusinessChoices(businesses);
+      el.businessNameInput.value = "";
+      el.businessNameInput.placeholder = "Business name at this address";
+      if (!businesses.length) {
+        setPlacesStatus(`Address selected: ${state.entryDraft.selectedAddress}`);
+        el.businessNameInput.focus();
+      } else {
+        setPlacesStatus("Choose the matching business.");
+      }
+      persistEntryDraft();
+      return;
+    }
+    applySelectedBusiness(data.place || {}, "business");
+  } catch (error) {
+    state.entryDraft.placeId = "";
+    el.placeIdInput.value = "";
+    if (suggestion.kind === "address") {
+      state.entryDraft.selectedAddress = suggestion.text;
+      state.entryDraft.addressPlaceId = suggestion.placeId;
+      state.entryDraft.addressBusinesses = [];
+      state.entryDraft.businessName = "";
+      state.entryDraft.selectedPlace = null;
+      state.entryDraft.selectionKind = "address";
+      el.businessNameInput.value = "";
+      el.businessNameInput.placeholder = "Business name at this address";
+      el.addressResolutionTitle.textContent = "What is the business name at this address?";
+      renderAddressBusinessChoices([]);
+      setPlacesStatus(`Address selected: ${suggestion.text}. Enter the business name.`, true);
+      persistEntryDraft();
+      el.businessNameInput.focus();
+    } else {
+      setPlacesStatus("We couldn’t load that match. Enter the business name manually.", true);
+    }
+  } finally {
+    state.placeLookupInProgress = false;
+    el.businessContinueButton.disabled = false;
+    el.businessNameInput.readOnly = false;
+    el.businessNameInput.removeAttribute("aria-disabled");
+    el.businessStep.removeAttribute("aria-busy");
   }
 }
 
 function setupPlacesAutocomplete() {
   if (!el.businessNameInput || !el.placesSuggestions) return;
   el.businessNameInput.addEventListener("input", () => {
-    el.placeIdInput.value = "";
     const input = el.businessNameInput.value.trim();
+    if (input !== state.entryDraft.businessName && (state.entryDraft.selectedPlace || state.entryDraft.placeId)) {
+      state.entryDraft.placeId = "";
+      state.entryDraft.selectedPlace = null;
+      state.entryDraft.selectionKind = state.entryDraft.selectedAddress ? "address" : "manual";
+      el.placeIdInput.value = "";
+      if (websiteWasAutoDiscovered()) {
+        state.entryDraft.website = "";
+        state.entryDraft.websiteSource = "";
+      }
+    }
+    state.entryDraft.businessName = input;
+    persistEntryDraft();
     clearTimeout(placesSearchTimer);
     if (placesSearchController) placesSearchController.abort();
     if (input.length < 2) {
@@ -529,12 +820,14 @@ function setupPlacesAutocomplete() {
     placesSearchTimer = setTimeout(async () => {
       try {
         placesSearchController = new AbortController();
-        const data = await api(`/api/places/autocomplete?input=${encodeURIComponent(input)}`, {
+        const searchText = state.entryDraft.selectedAddress ? `${input}, ${state.entryDraft.selectedAddress}` : input;
+        const query = new URLSearchParams({ input: searchText, session_token: placesSessionToken() });
+        const data = await api(`/api/places/autocomplete?${query}`, {
           signal: placesSearchController.signal,
         });
         const suggestions = data.suggestions || [];
-        renderPlacesSuggestions(suggestions);
-        setPlacesStatus(suggestions.length ? "Select a matching business or continue typing." : "No matches found. You can enter it manually.");
+        renderPlacesSuggestions(suggestions, input);
+        setPlacesStatus(suggestions.length ? "Choose a match or use the name you typed." : "No matches found. You can use the name you typed.");
       } catch (error) {
         if (error.name === "AbortError") return;
         hidePlacesSuggestions();
@@ -548,12 +841,469 @@ function setupPlacesAutocomplete() {
     }, 220);
   });
   el.businessNameInput.addEventListener("focus", () => {
-    if (el.placesSuggestions.childElementCount) el.placesSuggestions.hidden = false;
+    if (el.placesSuggestions.querySelector('[role="option"]')) {
+      el.placesSuggestions.hidden = false;
+      el.businessNameInput.setAttribute("aria-expanded", "true");
+    }
+  });
+  el.businessNameInput.addEventListener("keydown", (event) => {
+    const options = [...el.placesSuggestions.querySelectorAll('[role="option"]')];
+    if (!options.length || el.placesSuggestions.hidden) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveSuggestion(state.activeSuggestionIndex + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveSuggestion(state.activeSuggestionIndex - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setActiveSuggestion(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setActiveSuggestion(options.length - 1);
+    } else if (event.key === "Enter" && state.activeSuggestionIndex >= 0) {
+      event.preventDefault();
+      options[state.activeSuggestionIndex].click();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      hidePlacesSuggestions();
+    }
   });
   document.addEventListener("click", (event) => {
     if (el.placesSuggestions.hidden) return;
     if (event.target === el.businessNameInput || el.placesSuggestions.contains(event.target)) return;
     hidePlacesSuggestions();
+  });
+}
+
+function setControlPlacesStatus(message, isError = false) {
+  el.controlPlacesStatus.textContent = message || "";
+  el.controlPlacesStatus.classList.toggle("error", Boolean(isError));
+}
+
+function hideControlPlacesSuggestions() {
+  el.controlPlacesSuggestions.hidden = true;
+  el.controlPlacesSuggestions.innerHTML = "";
+  el.controlBusinessNameInput.setAttribute("aria-expanded", "false");
+  el.controlBusinessNameInput.removeAttribute("aria-activedescendant");
+  state.controlActiveSuggestionIndex = -1;
+}
+
+function setActiveControlSuggestion(index) {
+  const buttons = [...el.controlPlacesSuggestions.querySelectorAll('[role="option"]')];
+  if (!buttons.length) return;
+  state.controlActiveSuggestionIndex = (index + buttons.length) % buttons.length;
+  for (const [buttonIndex, button] of buttons.entries()) {
+    button.setAttribute("aria-selected", buttonIndex === state.controlActiveSuggestionIndex ? "true" : "false");
+  }
+  const active = buttons[state.controlActiveSuggestionIndex];
+  el.controlBusinessNameInput.setAttribute("aria-activedescendant", active.id);
+  active.scrollIntoView({ block: "nearest" });
+}
+
+function renderControlPlacesSuggestions(suggestions = []) {
+  el.controlPlacesSuggestions.innerHTML = "";
+  const businessSuggestions = suggestions.filter((suggestion) => suggestion.kind === "business");
+  if (!businessSuggestions.length) {
+    hideControlPlacesSuggestions();
+    return;
+  }
+  businessSuggestions.forEach((suggestion, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "places-suggestion";
+    button.id = `controlPlacesSuggestion${index}`;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", "false");
+    button.innerHTML =
+      `<span class="places-suggestion-icon"><i data-lucide="${placeSuggestionIcon(suggestion.types)}"></i></span>` +
+      '<span class="places-suggestion-copy"><strong></strong><span></span></span><span class="places-suggestion-kind">Business</span>';
+    button.querySelector("strong").textContent = suggestion.mainText || suggestion.text;
+    button.querySelector(".places-suggestion-copy > span").textContent = suggestion.secondaryText || suggestion.text;
+    button.addEventListener("click", () => selectControlPlaceSuggestion(suggestion));
+    el.controlPlacesSuggestions.appendChild(button);
+  });
+  const attribution = document.createElement("div");
+  attribution.className = "places-attribution";
+  attribution.textContent = "Google Maps";
+  attribution.setAttribute("translate", "no");
+  el.controlPlacesSuggestions.appendChild(attribution);
+  el.controlPlacesSuggestions.hidden = false;
+  el.controlBusinessNameInput.setAttribute("aria-expanded", "true");
+  window.lucide?.createIcons();
+}
+
+async function selectControlPlaceSuggestion(suggestion) {
+  state.controlPlaceLookupInProgress = true;
+  el.controlBuildButton.disabled = true;
+  el.controlBusinessNameInput.readOnly = true;
+  el.controlBusinessNameInput.setAttribute("aria-disabled", "true");
+  el.controlStep.setAttribute("aria-busy", "true");
+  el.controlBusinessNameInput.value = suggestion.mainText || suggestion.text;
+  el.controlPlaceIdInput.value = suggestion.placeId;
+  hideControlPlacesSuggestions();
+  setControlPlacesStatus("Loading business details");
+  const sessionToken = state.controlPlacesSessionToken;
+  state.controlPlacesSessionToken = "";
+  try {
+    const query = new URLSearchParams({ place_id: suggestion.placeId, kind: "business" });
+    if (sessionToken) query.set("session_token", sessionToken);
+    const data = await api(`/api/places/details?${query}`);
+    const place = data.place || {};
+    state.controlSelectedPlace = place;
+    if (place.businessName) el.controlBusinessNameInput.value = place.businessName;
+    if (place.website) {
+      el.controlWebsiteInput.value = place.website;
+      el.controlWebsiteInput.dataset.autoWebsite = normalizeWebsiteInput(place.website);
+    } else {
+      delete el.controlWebsiteInput.dataset.autoWebsite;
+    }
+    setControlPlacesStatus("Business selected");
+  } catch {
+    state.controlSelectedPlace = null;
+    setControlPlacesStatus("Business selected. Details will load when you test the agent.");
+  } finally {
+    state.controlPlaceLookupInProgress = false;
+    el.controlBuildButton.disabled = false;
+    el.controlBusinessNameInput.readOnly = false;
+    el.controlBusinessNameInput.removeAttribute("aria-disabled");
+    el.controlStep.removeAttribute("aria-busy");
+  }
+}
+
+function setupControlPlacesAutocomplete() {
+  el.controlBusinessNameInput.addEventListener("input", () => {
+    const autoWebsite = normalizeWebsiteInput(el.controlWebsiteInput.dataset.autoWebsite);
+    if (autoWebsite && normalizeWebsiteInput(el.controlWebsiteInput.value) === autoWebsite) {
+      el.controlWebsiteInput.value = "";
+    }
+    delete el.controlWebsiteInput.dataset.autoWebsite;
+    el.controlPlaceIdInput.value = "";
+    state.controlSelectedPlace = null;
+    const input = el.controlBusinessNameInput.value.trim();
+    clearTimeout(controlPlacesSearchTimer);
+    controlPlacesSearchController?.abort();
+    if (input.length < 2) {
+      hideControlPlacesSuggestions();
+      setControlPlacesStatus("");
+      return;
+    }
+    controlPlacesSearchTimer = setTimeout(async () => {
+      try {
+        controlPlacesSearchController = new AbortController();
+        state.controlPlacesSessionToken ||= crypto.randomUUID();
+        const query = new URLSearchParams({ input, session_token: state.controlPlacesSessionToken });
+        const data = await api(`/api/places/autocomplete?${query}`, { signal: controlPlacesSearchController.signal });
+        const suggestions = (data.suggestions || []).filter((suggestion) => suggestion.kind === "business");
+        renderControlPlacesSuggestions(suggestions);
+        setControlPlacesStatus(suggestions.length ? "Select a matching business or continue typing." : "No matches found. You can enter it manually.");
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        hideControlPlacesSuggestions();
+        setControlPlacesStatus("Business lookup unavailable. You can enter it manually.", true);
+      }
+    }, 220);
+  });
+  el.controlBusinessNameInput.addEventListener("keydown", (event) => {
+    const options = [...el.controlPlacesSuggestions.querySelectorAll('[role="option"]')];
+    if (!options.length || el.controlPlacesSuggestions.hidden) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveControlSuggestion(state.controlActiveSuggestionIndex + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveControlSuggestion(state.controlActiveSuggestionIndex - 1);
+    } else if (event.key === "Enter" && state.controlActiveSuggestionIndex >= 0) {
+      event.preventDefault();
+      options[state.controlActiveSuggestionIndex].click();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      hideControlPlacesSuggestions();
+    }
+  });
+  el.controlWebsiteInput.addEventListener("input", () => {
+    delete el.controlWebsiteInput.dataset.autoWebsite;
+    el.controlWebsiteInput.setCustomValidity("");
+  });
+  el.controlBusinessNameInput.addEventListener("focus", () => {
+    if (el.controlPlacesSuggestions.querySelector('[role="option"]')) {
+      el.controlPlacesSuggestions.hidden = false;
+      el.controlBusinessNameInput.setAttribute("aria-expanded", "true");
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (el.controlPlacesSuggestions.hidden) return;
+    if (event.target === el.controlBusinessNameInput || el.controlPlacesSuggestions.contains(event.target)) return;
+    hideControlPlacesSuggestions();
+  });
+}
+
+function entryInputSource() {
+  if (state.entryDraft.selectionKind === "address_resolved") return "address_resolved";
+  if (state.entryDraft.selectionKind === "business") return "google_business";
+  if (urlHasEntryPrefill) return "prefilled";
+  return "manual";
+}
+
+function entryWebsiteSource() {
+  if (state.entryDraft.noWebsite) return "none";
+  if (state.entryDraft.websiteSource === "google") return "google";
+  if (/\b(facebook\.com|instagram\.com)\b/i.test(state.entryDraft.website || "")) return "social";
+  if (state.entryDraft.websiteSource === "prefilled") return "prefilled";
+  return state.entryDraft.website ? "entered" : "none";
+}
+
+function updateEntryProgress(step) {
+  if (!el.wizardProgress) return;
+  el.wizardProgress.hidden = step === "control";
+  for (const item of el.wizardProgress.querySelectorAll("li[data-stage]")) {
+    const stage = item.dataset.stage;
+    item.classList.toggle("complete", step === "review" || (stage === "business" && step === "website"));
+    if ((stage === "business" && step === "business") || (stage === "website" && ["website", "review"].includes(step))) {
+      item.setAttribute("aria-current", "step");
+    } else {
+      item.removeAttribute("aria-current");
+    }
+  }
+}
+
+function renderEntryStep(step, { focus = false, pushHistory = false, replaceHistory = false, track = true } = {}) {
+  const previousStep = state.entryStep;
+  state.entryStep = step;
+  state.entryDraft.step = step;
+  persistEntryDraft();
+  for (const section of [el.businessStep, el.websiteStep, el.reviewStep, el.controlStep]) {
+    if (section) section.hidden = true;
+  }
+  const activeSection = step === "website" ? el.websiteStep : step === "review" ? el.reviewStep : step === "control" ? el.controlStep : el.businessStep;
+  if (activeSection) activeSection.hidden = false;
+  updateEntryProgress(step);
+
+  if (step === "business") {
+    el.businessNameInput.value = state.entryDraft.businessName || "";
+    el.placeIdInput.value = state.entryDraft.placeId || "";
+    const hasSelectedBusiness = Boolean(state.entryDraft.selectedPlace && state.entryDraft.businessName);
+    el.selectedBusiness.hidden = !hasSelectedBusiness;
+    el.addressResolution.hidden = true;
+    el.businessNameInput.closest(".places-autocomplete-field").hidden = hasSelectedBusiness;
+    if (hasSelectedBusiness) {
+      el.selectedBusinessName.textContent = state.entryDraft.businessName;
+      el.selectedBusinessAddress.textContent = state.entryDraft.selectedPlace.address || state.entryDraft.selectedAddress || "Google business profile";
+    } else if (state.entryDraft.selectedAddress) {
+      const addressBusinesses = Array.isArray(state.entryDraft.addressBusinesses) ? state.entryDraft.addressBusinesses : [];
+      el.addressResolutionTitle.textContent = addressBusinesses.length ? "Which business is yours?" : "What is the business name at this address?";
+      renderAddressBusinessChoices(addressBusinesses);
+      setPlacesStatus(addressBusinesses.length ? "Choose the matching business." : `Address selected: ${state.entryDraft.selectedAddress}`);
+    }
+  }
+  if (step === "website") {
+    el.websiteInput.value = state.entryDraft.noWebsite ? "" : state.entryDraft.website || "";
+    el.websiteInput.disabled = state.entryDraft.noWebsite;
+    el.noWebsiteButton.textContent = state.entryDraft.noWebsite ? "Use a website instead" : "I don’t have a website";
+    el.websiteStepHelp.textContent = state.entryDraft.websiteSource === "google" && state.entryDraft.website
+      ? "We found this website on the selected Google business profile. You can edit it."
+      : "Confirm the website or public social page that belongs to this business.";
+    const showServiceArea = shouldAskServiceArea(state.entryDraft);
+    el.serviceAreaField.hidden = !showServiceArea;
+    el.serviceAreaInput.value = state.entryDraft.serviceArea || "";
+    if (track) trackFunnelEvent("fastagent_website_step_viewed", { input_source: entryInputSource() });
+  }
+  if (step === "review") {
+    el.reviewBusiness.textContent = state.entryDraft.businessName || "Not provided";
+    el.reviewWebsite.textContent = state.entryDraft.noWebsite ? "No website" : state.entryDraft.website || "Not provided";
+  }
+  if (step === "control") {
+    el.controlBusinessNameInput.value = state.entryDraft.businessName || "";
+    el.controlWebsiteInput.value = state.entryDraft.website || "";
+    el.controlPlaceIdInput.value = state.entryDraft.placeId || "";
+    state.controlSelectedPlace = state.entryDraft.selectedPlace || null;
+    if (
+      state.controlSelectedPlace?.website &&
+      normalizeWebsiteInput(state.entryDraft.website) === normalizeWebsiteInput(state.controlSelectedPlace.website)
+    ) {
+      el.controlWebsiteInput.dataset.autoWebsite = normalizeWebsiteInput(state.controlSelectedPlace.website);
+    } else {
+      delete el.controlWebsiteInput.dataset.autoWebsite;
+    }
+  }
+
+  if (pushHistory) {
+    state.entryHistoryDepth += 1;
+    history.pushState(
+      { ...(history.state || {}), fastAgentStep: step, fastAgentBackStep: previousStep, fastAgentDepth: state.entryHistoryDepth },
+      "",
+      location.href,
+    );
+  }
+  if (replaceHistory) {
+    history.replaceState(
+      { ...(history.state || {}), fastAgentStep: step, fastAgentBackStep: null, fastAgentDepth: state.entryHistoryDepth },
+      "",
+      location.href,
+    );
+  }
+  if (focus) requestAnimationFrame(() => activeSection?.querySelector('h1[tabindex="-1"]')?.focus());
+  window.lucide?.createIcons();
+}
+
+function showEntryScreen(step = state.entryStep, options = {}) {
+  el.loadingScreen.hidden = true;
+  el.agentScreen.hidden = true;
+  el.errorScreen.hidden = true;
+  el.entryScreen.hidden = false;
+  renderEntryStep(step, options);
+}
+
+function resetSelectedBusiness() {
+  const typedWebsite = !websiteWasAutoDiscovered() ? state.entryDraft.website : "";
+  const typedWebsiteSource = !websiteWasAutoDiscovered() ? state.entryDraft.websiteSource : "";
+  state.entryDraft.businessName = "";
+  state.entryDraft.placeId = "";
+  state.entryDraft.selectionKind = "";
+  state.entryDraft.selectedPlace = null;
+  state.entryDraft.selectedAddress = "";
+  state.entryDraft.addressPlaceId = "";
+  state.entryDraft.addressBusinesses = [];
+  state.entryDraft.serviceArea = "";
+  state.entryDraft.website = typedWebsite;
+  state.entryDraft.websiteSource = typedWebsiteSource;
+  state.entryDraft.noWebsite = false;
+  el.businessNameInput.value = "";
+  el.businessNameInput.placeholder = "Business name or address";
+  el.selectedBusiness.hidden = true;
+  el.addressResolution.hidden = true;
+  el.businessNameInput.closest(".places-autocomplete-field").hidden = false;
+  freshPlacesSessionToken();
+  persistEntryDraft();
+  el.businessNameInput.focus();
+}
+
+function completeBusinessStep() {
+  if (state.placeLookupInProgress) return;
+  if (!state.entryDraft.selectedPlace) chooseManualBusiness(el.businessNameInput.value);
+  if (!state.entryDraft.businessName) {
+    setPlacesStatus("Enter your business name or choose a match.", true);
+    el.businessNameInput.focus();
+    return;
+  }
+  trackFunnelEvent("fastagent_business_confirmed", { input_source: entryInputSource() });
+  const nextStep = state.entryDraft.websiteSource === "prefilled" && state.entryDraft.website ? "review" : "website";
+  renderEntryStep(nextStep, { focus: true, pushHistory: true });
+}
+
+function updateWebsiteDraft() {
+  const validation = validBusinessUrl(el.websiteInput.value);
+  if (!validation.valid) {
+    el.websiteError.textContent = "Enter a complete website or public Facebook or Instagram business page.";
+    el.websiteError.hidden = false;
+    el.websiteInput.focus();
+    return false;
+  }
+  el.websiteError.hidden = true;
+  const discoveredWebsite = validBusinessUrl(state.entryDraft.selectedPlace?.website).value;
+  state.entryDraft.website = validation.value;
+  state.entryDraft.websiteSource = state.entryDraft.websiteSource === "google" && validation.value === discoveredWebsite
+    ? "google"
+    : "typed";
+  state.entryDraft.noWebsite = false;
+  persistEntryDraft();
+  return true;
+}
+
+function completeWebsiteStep() {
+  if (state.entryDraft.noWebsite) {
+    if (shouldAskServiceArea(state.entryDraft)) {
+      state.entryDraft.serviceArea = el.serviceAreaInput.value.trim();
+      if (!state.entryDraft.serviceArea) {
+        el.serviceAreaInput.setCustomValidity("Enter the city or service area for this business.");
+        el.serviceAreaInput.reportValidity();
+        el.serviceAreaInput.focus();
+        return false;
+      }
+      el.serviceAreaInput.setCustomValidity("");
+    }
+  } else if (!updateWebsiteDraft()) {
+    return false;
+  }
+  trackFunnelEvent("fastagent_website_completed", {
+    input_source: entryInputSource(),
+    website_source: entryWebsiteSource(),
+  });
+  persistEntryDraft();
+  return true;
+}
+
+function validateWizardDraftForBuild() {
+  const validation = validateFastAgentDraft(state.entryDraft);
+  if (validation.valid) {
+    state.entryDraft.businessName = validation.businessName;
+    state.entryDraft.website = validation.website;
+    persistEntryDraft();
+    return true;
+  }
+  if (validation.step === "business") {
+    renderEntryStep("business", { focus: true, pushHistory: true, track: false });
+    setPlacesStatus("Enter your business name or choose a match.", true);
+    el.businessNameInput.focus();
+    return false;
+  }
+  renderEntryStep("website", { focus: true, pushHistory: true, track: false });
+  if (validation.field === "serviceArea") {
+    el.serviceAreaInput.setCustomValidity("Enter the city or service area for this business.");
+    el.serviceAreaInput.reportValidity();
+    el.serviceAreaInput.focus();
+  } else {
+    el.websiteError.textContent = "Enter a complete website or public Facebook or Instagram business page.";
+    el.websiteError.hidden = false;
+    el.websiteInput.focus();
+  }
+  return false;
+}
+
+function setupEntryWizard() {
+  el.businessContinueButton.addEventListener("click", completeBusinessStep);
+  el.changeBusinessButton.addEventListener("click", resetSelectedBusiness);
+  el.websiteBackButton.addEventListener("click", () => {
+    if (history.state?.fastAgentBackStep) history.back();
+    else renderEntryStep("business", { focus: true, replaceHistory: true, track: false });
+  });
+  el.noWebsiteButton.addEventListener("click", () => {
+    state.entryDraft.noWebsite = !state.entryDraft.noWebsite;
+    if (!state.entryDraft.noWebsite && !state.entryDraft.website && state.entryDraft.selectedPlace?.website) {
+      state.entryDraft.website = normalizeWebsiteInput(state.entryDraft.selectedPlace.website);
+      state.entryDraft.websiteSource = "google";
+    }
+    renderEntryStep("website", { track: false });
+    if (shouldAskServiceArea(state.entryDraft)) el.serviceAreaInput.focus();
+    else el.buildAgentButton.focus();
+  });
+  el.websiteInput.addEventListener("input", () => {
+    state.entryDraft.noWebsite = false;
+    state.entryDraft.website = el.websiteInput.value.trim();
+    if (state.entryDraft.websiteSource === "google" && normalizeWebsiteInput(el.websiteInput.value) !== normalizeWebsiteInput(state.entryDraft.selectedPlace?.website)) {
+      state.entryDraft.websiteSource = "typed";
+    }
+    el.websiteError.hidden = true;
+    persistEntryDraft();
+  });
+  el.serviceAreaInput.addEventListener("input", () => {
+    state.entryDraft.serviceArea = el.serviceAreaInput.value.trim();
+    el.serviceAreaInput.setCustomValidity("");
+    persistEntryDraft();
+  });
+  el.editReviewBusiness.addEventListener("click", () => renderEntryStep("business", { focus: true, pushHistory: true, track: false }));
+  el.editReviewWebsite.addEventListener("click", () => renderEntryStep("website", { focus: true, pushHistory: true, track: false }));
+  window.addEventListener("popstate", (event) => {
+    state.entryHistoryDepth = Math.max(0, Number(event.state?.fastAgentDepth || 0));
+    if (state.pendingSessionPath) {
+      const sessionPath = state.pendingSessionPath;
+      state.pendingSessionPath = "";
+      window.location.replace(sessionPath);
+      return;
+    }
+    const step = event.state?.fastAgentStep;
+    if (el.entryScreen.hidden || !["business", "website", "review", "control"].includes(step)) return;
+    renderEntryStep(step, { focus: true, track: false });
   });
 }
 
@@ -857,12 +1607,9 @@ async function saveProfile({ silent = false } = {}) {
 function renderTrialState(profile) {
   const isTrial = profile?.accountStatus === "trial" && profile.trialEndsAt;
   if (isTrial) {
-    const endsAt = new Date(profile.trialEndsAt);
-    el.trialBadge.textContent = `Trial until ${endsAt.toLocaleDateString()}`;
     el.credits.textContent = `${profile.creditBalance || 0} credits`;
     return;
   }
-  el.trialBadge.textContent = "Demo ready";
   el.credits.textContent = "Trial starts after email";
 }
 
@@ -876,8 +1623,10 @@ function renderAgent(data) {
     state.selectedPlanId = Number(data.selectedPlan.id);
   }
   el.loadingScreen.hidden = true;
+  el.entryScreen.hidden = true;
   el.errorScreen.hidden = true;
   el.agentScreen.hidden = false;
+  if (state.visualizerFrame === null) drawVisualizer();
   el.agentTitle.textContent = `RingPort for ${data.profile.businessName}`;
   renderProfileFields(data.profile);
   renderTrialState(data.profile);
@@ -1099,6 +1848,10 @@ async function startCall() {
 }
 
 function drawVisualizer() {
+  if (el.agentScreen.hidden) {
+    state.visualizerFrame = null;
+    return;
+  }
   const canvas = el.voiceVisualizer;
   const context = canvas.getContext("2d");
   const size = Math.min(canvas.clientWidth, canvas.clientHeight);
@@ -1126,69 +1879,239 @@ function drawVisualizer() {
     context.lineCap = "round";
     context.stroke();
   }
-  requestAnimationFrame(drawVisualizer);
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+    state.visualizerFrame = null;
+    return;
+  }
+  state.visualizerFrame = requestAnimationFrame(drawVisualizer);
+}
+
+async function openExistingAgent() {
+  const sessionUrl = new URL("/api/onboarding/fast-agent", window.location.origin);
+  sessionUrl.searchParams.set("token", state.accessToken);
+  if (state.requestedPlan) sessionUrl.searchParams.set("plan", state.requestedPlan);
+  const data = await api(`${sessionUrl.pathname}${sessionUrl.search}`);
+  renderAgent(data);
+  loadSubscriptionPlans();
+}
+
+async function buildAgent(payload = fastAgentBuildPayload(state.entryDraft, state.requestedPlan)) {
+  if (state.buildInProgress) return;
+  state.buildInProgress = true;
+  state.lastBuildPayload = payload;
+  businessName = payload.businessName;
+  website = payload.website;
+  placeId = payload.placeId;
+  storageKey = fastAgentStorageKey(payload);
+  el.entryScreen.hidden = true;
+  el.errorScreen.hidden = true;
+  el.agentScreen.hidden = true;
+  el.loadingScreen.hidden = false;
+  el.loadingTitle.textContent = "Building your agent";
+  el.loadingMessage.textContent = "Finding business details and preparing your live receptionist.";
+  requestAnimationFrame(() => el.loadingTitle.focus());
+  void trackFunnelEvent("fastagent_build_started", {
+    input_source: entryInputSource(),
+    website_source: entryWebsiteSource(),
+  });
+  try {
+    const data = await api("/api/onboarding/fast-agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...payload,
+        ...(!urlHasEntryPrefill
+          ? {
+              fastAgentFlowId: state.flowId,
+              fastAgentSourceUrl: state.originalLandingUrl,
+              fastAgentReferrer: state.initialReferrer,
+            }
+          : {}),
+        inputSource: entryInputSource(),
+        websiteSource: entryWebsiteSource(),
+      }),
+    });
+    state.accessToken = data.accessToken;
+    if (storageKey && state.accessToken) localStorage.setItem(storageKey, state.accessToken);
+    const sessionPath = fastAgentSessionPath(data.shortUrl, {
+      requestedPlan: state.requestedPlan,
+      requestedPeriod: state.billingPeriodMonths,
+    });
+    if (sessionPath) {
+      state.sessionPath = sessionPath;
+      sessionStorage.setItem(FAST_AGENT_PENDING_SESSION_KEY, sessionPath);
+      if (state.entryHistoryDepth > 0) {
+        state.pendingSessionPath = sessionPath;
+        history.go(-state.entryHistoryDepth);
+      } else {
+        window.location.replace(sessionPath);
+      }
+    }
+    sessionStorage.removeItem(FAST_AGENT_DRAFT_KEY);
+    renderAgent(data);
+    loadSubscriptionPlans();
+    const customData = {
+      content_name: data.profile?.businessName || payload.businessName,
+      business_profile_id: data.profile?.id,
+      website: data.profile?.website || payload.website || undefined,
+      plan: state.requestedPlan || undefined,
+      plan_id: data.profile?.subscriptionPlanId || data.selectedPlan?.id || undefined,
+      billing_period_months: state.billingPeriodMonths,
+      fastagent_variant: state.entryVariant,
+      experiment_version: state.experimentVersion,
+      fastagent_flow_id: state.flowId,
+      input_source: entryInputSource(),
+      website_source: entryWebsiteSource(),
+    };
+    const userData = data.profile?.id ? { externalId: `business:${data.profile.id}` } : {};
+    trackAdEvent("fastagent_agent_built", customData, userData);
+  } catch (error) {
+    void trackFunnelEvent("fastagent_build_failed", {
+      input_source: entryInputSource(),
+      website_source: entryWebsiteSource(),
+      error_code: String(error.message || "build_failed").slice(0, 120),
+    });
+    showError(error.message);
+  } finally {
+    state.buildInProgress = false;
+  }
+}
+
+async function loadEntryExperience() {
+  if (urlHasEntryPrefill) return { variant: "wizard", experimentVersion: state.experimentVersion };
+  try {
+    return await api("/api/onboarding/fast-agent/experience");
+  } catch {
+    return { variant: "control", experimentVersion: state.experimentVersion };
+  }
+}
+
+async function hydratePrefilledPlace() {
+  if (!state.entryDraft.placeId || state.entryDraft.selectedPlace) return;
+  try {
+    const data = await api(`/api/places/details?${new URLSearchParams({ place_id: state.entryDraft.placeId, kind: "business" })}`);
+    if (data.kind === "business" && data.place?.businessName) {
+      applySelectedBusiness(data.place, "business");
+      state.entryStep = firstFastAgentStep(state.entryDraft);
+      return;
+    }
+    if (data.kind === "address") {
+      const businesses = data.businesses || [];
+      state.entryDraft.selectedAddress = data.address?.formattedAddress || state.entryDraft.businessName;
+      state.entryDraft.addressPlaceId = data.address?.placeId || state.entryDraft.placeId;
+      state.entryDraft.placeId = "";
+      state.entryDraft.businessName = "";
+      state.entryDraft.selectedPlace = null;
+      state.entryDraft.selectionKind = "address";
+      state.entryDraft.addressBusinesses = businesses;
+      el.placeIdInput.value = "";
+      if (businesses.length === 1) {
+        applySelectedBusiness(businesses[0], "address_resolved");
+        state.entryStep = firstFastAgentStep(state.entryDraft);
+      } else {
+        state.entryStep = "business";
+      }
+      persistEntryDraft();
+    }
+  } catch {
+    // The visitor can still confirm or edit the supplied business details manually.
+  }
 }
 
 async function initialize() {
+  const pendingSessionPath = fastAgentSessionPath(sessionStorage.getItem(FAST_AGENT_PENDING_SESSION_KEY));
+  if (shortCodeFromPath) {
+    sessionStorage.removeItem(FAST_AGENT_PENDING_SESSION_KEY);
+  } else if (pendingSessionPath) {
+    window.location.replace(pendingSessionPath);
+    return;
+  }
   await loadAdTracking();
+  if (state.accessToken) {
+    trackAdEvent("fastagent_page_visit", {
+      page_type: "fastagent",
+      session_link: true,
+      plan: state.requestedPlan || undefined,
+      billing_period_months: state.billingPeriodMonths,
+    });
+    try {
+      await openExistingAgent();
+      return;
+    } catch (error) {
+      const explicitSessionLink = Boolean(accessTokenFromUrl || claimToken || shortCodeFromPath);
+      if (explicitSessionLink) {
+        showError(error.message);
+        return;
+      }
+      if (storageKey) localStorage.removeItem(storageKey);
+      state.accessToken = "";
+    }
+  }
+
+  await hydratePrefilledPlace();
+  const experience = await loadEntryExperience();
+  state.entryVariant = experience.variant === "control" ? "control" : "wizard";
+  state.experimentVersion = experience.experimentVersion || state.experimentVersion;
   trackAdEvent("fastagent_page_visit", {
     page_type: "fastagent",
+    fastagent_variant: state.entryVariant,
+    experiment_version: state.experimentVersion,
+    fastagent_flow_id: state.flowId,
     plan: state.requestedPlan || undefined,
     billing_period_months: state.billingPeriodMonths,
   });
-  if (!businessName && !state.accessToken) {
-    el.loadingScreen.hidden = true;
-    el.entryScreen.hidden = false;
-    el.trialBadge.textContent = "Live demo";
-    window.lucide?.createIcons();
+  if (!urlHasEntryPrefill) trackFunnelEvent("fastagent_experiment_exposed", { rollout_percent: experience.percentage });
+  const initialStep = state.entryVariant === "control" && !urlHasEntryPrefill ? "control" : state.entryStep;
+  showEntryScreen(initialStep, { focus: true, replaceHistory: true, track: true });
+}
+
+el.fastEntryForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (state.entryStep === "business") {
+    completeBusinessStep();
     return;
   }
-  try {
-    let data;
-    let createdAgent = false;
-    if (state.accessToken) {
-      try {
-        const sessionUrl = new URL("/api/onboarding/fast-agent", window.location.origin);
-        sessionUrl.searchParams.set("token", state.accessToken);
-        if (state.requestedPlan) sessionUrl.searchParams.set("plan", state.requestedPlan);
-        data = await api(`${sessionUrl.pathname}${sessionUrl.search}`);
-      } catch (error) {
-        if (accessTokenFromUrl || !businessName) throw error;
-        if (storageKey) localStorage.removeItem(storageKey);
-        state.accessToken = "";
-      }
+  if (state.entryStep === "control") {
+    if (state.controlPlaceLookupInProgress) return;
+    const controlName = el.controlBusinessNameInput.value.trim();
+    if (!controlName) {
+      el.controlBusinessNameInput.setCustomValidity("Enter your business name.");
+      el.controlBusinessNameInput.reportValidity();
+      el.controlBusinessNameInput.focus();
+      return;
     }
-    if (!data) {
-      if (!businessName) throw new Error("This setup link is invalid or expired");
-      data = await api("/api/onboarding/fast-agent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ businessName, website, placeId, plan: state.requestedPlan }),
-      });
-      state.accessToken = data.accessToken;
-      createdAgent = true;
+    el.controlBusinessNameInput.setCustomValidity("");
+    state.entryDraft.businessName = controlName;
+    const enteredWebsite = el.controlWebsiteInput.value.trim();
+    const websiteValidation = enteredWebsite ? validBusinessUrl(enteredWebsite) : { valid: true, value: "" };
+    if (!websiteValidation.valid) {
+      el.controlWebsiteInput.setCustomValidity("Enter a complete website address.");
+      el.controlWebsiteInput.reportValidity();
+      el.controlWebsiteInput.focus();
+      return;
     }
-    if (storageKey && state.accessToken) {
-      localStorage.setItem(storageKey, state.accessToken);
-    }
-    renderAgent(data);
-    loadSubscriptionPlans();
-    if (createdAgent) {
-      const customData = {
-        content_name: data.profile?.businessName || businessName,
-        business_profile_id: data.profile?.id,
-        website: data.profile?.website || website || undefined,
-        plan: state.requestedPlan || undefined,
-        plan_id: data.profile?.subscriptionPlanId || data.selectedPlan?.id || undefined,
-        billing_period_months: state.billingPeriodMonths,
-      };
-      const userData = data.profile?.id ? { externalId: `business:${data.profile.id}` } : {};
-      trackAdEvent("fastagent_agent_built", customData, userData);
-    }
-  } catch (error) {
-    showError(error.message);
+    el.controlWebsiteInput.setCustomValidity("");
+    state.entryDraft.placeId = el.controlPlaceIdInput.value.trim();
+    state.entryDraft.selectionKind = state.entryDraft.placeId ? "business" : "manual";
+    state.entryDraft.selectedPlace = state.controlSelectedPlace || null;
+    state.entryDraft.website = websiteValidation.value;
+    state.entryDraft.websiteSource = state.entryDraft.website ? "typed" : "";
+    state.entryDraft.noWebsite = false;
+    persistEntryDraft();
+  } else if (state.entryStep === "website") {
+    if (!completeWebsiteStep() || !validateWizardDraftForBuild()) return;
+  } else if (state.entryStep === "review" && !validateWizardDraftForBuild()) {
+    return;
   }
-}
+  buildAgent(fastAgentBuildPayload(state.entryDraft, state.requestedPlan, {
+    includeWebsiteDecision: state.entryVariant !== "control" || Boolean(state.entryDraft.website),
+  }));
+});
+el.retryBuildButton.addEventListener("click", () => buildAgent(state.lastBuildPayload));
+el.backToDetailsButton.addEventListener("click", () => {
+  const step = state.entryVariant === "control" ? "control" : state.entryDraft.website || state.entryDraft.noWebsite ? "review" : "website";
+  showEntryScreen(step, { focus: true, pushHistory: true, track: false });
+});
 
 el.talkButton.addEventListener("click", startCall);
 el.stopButton.addEventListener("click", () => stopCall());
@@ -1361,5 +2284,6 @@ el.finishSetupLink.addEventListener("click", async (event) => {
 
 window.lucide?.createIcons();
 setupPlacesAutocomplete();
-drawVisualizer();
+setupControlPlacesAutocomplete();
+setupEntryWizard();
 initialize();

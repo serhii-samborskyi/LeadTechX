@@ -110,6 +110,7 @@ const el = {
   demoNumberCapacity: document.querySelector("#demoNumberCapacity"),
   demoCallerLimit: document.querySelector("#demoCallerLimit"),
   fastAgentBuildsPerIpPerHour: document.querySelector("#fastAgentBuildsPerIpPerHour"),
+  fastAgentWizardPercent: document.querySelector("#fastAgentWizardPercent"),
   trialPhoneNumberGraceDays: document.querySelector("#trialPhoneNumberGraceDays"),
   callSilenceWarningSeconds: document.querySelector("#callSilenceWarningSeconds"),
   callSilenceHangupSeconds: document.querySelector("#callSilenceHangupSeconds"),
@@ -145,6 +146,7 @@ const el = {
   applyTrafficRange: document.querySelector("#applyTrafficRange"),
   refreshTraffic: document.querySelector("#refreshTraffic"),
   trafficSummary: document.querySelector("#trafficSummary"),
+  trafficExperiment: document.querySelector("#trafficExperiment"),
   trafficByDate: document.querySelector("#trafficByDate"),
   trafficByPlatform: document.querySelector("#trafficByPlatform"),
   trafficRegistrations: document.querySelector("#trafficRegistrations"),
@@ -758,6 +760,7 @@ async function loadSystem() {
     "demoNumberCapacity",
     "demoCallerLimit",
     "fastAgentBuildsPerIpPerHour",
+    "fastAgentWizardPercent",
     "trialPhoneNumberGraceDays",
     "callSilenceWarningSeconds",
     "callSilenceHangupSeconds",
@@ -1553,6 +1556,25 @@ function renderTraffic(data) {
     card.querySelector("span").textContent = label;
     card.querySelector("strong").textContent = String(value);
     el.trafficSummary.appendChild(card);
+  }
+  el.trafficExperiment.innerHTML = "";
+  for (const [variant, label] of [["wizard", "New wizard"], ["control", "Current form"]]) {
+    const metrics = data.fastAgentExperiment?.[variant] || {};
+    const card = document.createElement("div");
+    card.className = "traffic-stat-card";
+    card.innerHTML = "<span></span><strong></strong><small></small>";
+    card.querySelector("span").textContent = label;
+    card.querySelector("strong").textContent = `${Number(metrics.conversionRate || 0)}%`;
+    card.querySelector("small").textContent = [
+      `${metrics.exposed || 0} exposed`,
+      `${metrics.businessConfirmed || 0} business confirmed`,
+      `${metrics.websiteStepViewed || 0} website step`,
+      `${metrics.websiteCompleted || 0} website completed`,
+      `${metrics.buildStarted || 0} build started`,
+      `${metrics.agentBuilt || 0} built`,
+      `${metrics.buildFailed || 0} failed`,
+    ].join(" · ");
+    el.trafficExperiment.appendChild(card);
   }
   renderTrafficMiniList(el.trafficByDate, data.byDate || [], "No registrations in this range.");
   renderTrafficMiniList(el.trafficByPlatform, data.byPlatform || [], "No lead sources in this range.");
@@ -2399,6 +2421,7 @@ el.systemForm.addEventListener("submit", async (event) => {
         demoNumberCapacity: Number(el.demoNumberCapacity.value),
         demoCallerLimit: Number(el.demoCallerLimit.value),
         fastAgentBuildsPerIpPerHour: Number(el.fastAgentBuildsPerIpPerHour.value),
+        fastAgentWizardPercent: Number(el.fastAgentWizardPercent.value),
         trialPhoneNumberGraceDays: Number(el.trialPhoneNumberGraceDays.value),
         callSilenceWarningSeconds: Number(el.callSilenceWarningSeconds.value),
         callSilenceHangupSeconds: Number(el.callSilenceHangupSeconds.value),

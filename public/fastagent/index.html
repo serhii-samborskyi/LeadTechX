@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RingPort Fast Agent</title>
     <link rel="icon" type="image/png" href="/assets/ringport-icon.png" />
     <link rel="apple-touch-icon" href="/assets/ringport-icon.png" />
@@ -11,36 +11,129 @@
   <body class="fast-body">
     <main class="fast-shell">
       <header class="fast-header">
-        <div class="fast-brand">
+        <a class="fast-brand" href="/fastagent/" aria-label="RingPort Fast Agent home">
           <img class="brand-logo fast-logo" src="/assets/ringport-icon.png" alt="RingPort" />
-        </div>
-        <span class="fast-trial" id="trialBadge">Preparing trial</span>
+        </a>
+        <a class="fast-sign-in" href="/"><span>Already use RingPort? </span>Sign in</a>
       </header>
 
-      <section class="fast-loading" id="loadingScreen">
+      <section class="fast-loading" id="loadingScreen" role="status" aria-live="polite" aria-atomic="true">
         <div class="fast-loader" aria-hidden="true"></div>
-        <h1 id="loadingTitle">Building your receptionist</h1>
-        <p id="loadingMessage">Researching the business and preparing your live receptionist.</p>
+        <h1 id="loadingTitle" tabindex="-1">Preparing Fast Agent</h1>
+        <p id="loadingMessage">One moment while we open the builder.</p>
       </section>
 
       <section class="fast-entry" id="entryScreen" hidden>
-        <div class="fast-entry-icon"><i data-lucide="audio-lines"></i></div>
-        <p class="eyebrow">Your business, live in minutes</p>
-        <h1>Test your RingPort agent</h1>
-        <p>Enter the business details to prepare a live agent.</p>
-        <form action="/fastagent/" method="get" class="fast-entry-form">
+        <div class="fast-wizard">
+          <ol class="fast-progress" id="wizardProgress" aria-label="Agent setup progress">
+            <li data-stage="business">Business</li>
+            <li data-stage="website">Website</li>
+          </ol>
+        <form id="fastEntryForm" action="/fastagent/" method="get" class="fast-entry-form" novalidate>
           <input id="planInput" name="plan" type="hidden" />
           <input id="periodInput" name="period" type="hidden" />
-          <label class="places-autocomplete-field">
-            Business name
-            <input id="businessNameInput" name="business_name" autocomplete="off" placeholder="Your business name as it appears on Google Maps" required />
-            <input id="placeIdInput" name="place_id" type="hidden" />
-            <div id="placesSuggestions" class="places-suggestions" hidden></div>
-            <small id="placesAutocompleteStatus"></small>
-          </label>
-          <label>Website <span>optional</span><input id="websiteInput" name="website" type="text" autocomplete="url" inputmode="url" placeholder="example.com" /></label>
-          <button class="primary" type="submit"><i data-lucide="sparkles"></i> Test agent</button>
+          <input id="placeIdInput" name="place_id" type="hidden" />
+
+          <section class="fast-wizard-step" id="businessStep" aria-labelledby="businessStepTitle" hidden>
+            <h1 id="businessStepTitle" tabindex="-1">What’s your business called?</h1>
+            <p class="fast-step-help" id="businessStepHelp">Search by business name or street address.</p>
+            <div class="places-autocomplete-field">
+              <label for="businessNameInput">Business name or address</label>
+              <div class="fast-combobox-wrap">
+                <input
+                  id="businessNameInput"
+                  name="business_name"
+                  type="search"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-haspopup="listbox"
+                  aria-expanded="false"
+                  aria-controls="placesSuggestions"
+                  aria-describedby="businessStepHelp placesAutocompleteStatus"
+                  autocomplete="off"
+                  autocapitalize="words"
+                  spellcheck="false"
+                  placeholder="Business name or address"
+                  required
+                />
+                <div id="placesSuggestions" class="places-suggestions" role="listbox" aria-label="Business and address matches" hidden></div>
+              </div>
+              <small id="placesAutocompleteStatus" role="status" aria-live="polite" aria-atomic="true"></small>
+            </div>
+            <div class="fast-selected-business" id="selectedBusiness" hidden>
+              <span><strong id="selectedBusinessName"></strong><small id="selectedBusinessAddress"></small></span>
+              <button type="button" id="changeBusinessButton">Change</button>
+            </div>
+            <div class="fast-address-resolution" id="addressResolution" hidden>
+              <p id="addressResolutionTitle"></p>
+              <div id="addressBusinessChoices" class="fast-choice-list"></div>
+            </div>
+            <div class="fast-wizard-actions">
+              <button class="primary" id="businessContinueButton" type="button">Continue</button>
+            </div>
+          </section>
+
+          <section class="fast-wizard-step" id="websiteStep" aria-labelledby="websiteStepTitle" hidden>
+            <button class="fast-back" type="button" id="websiteBackButton"><i data-lucide="arrow-left"></i> Back</button>
+            <h1 id="websiteStepTitle" tabindex="-1">What’s your website?</h1>
+            <p class="fast-step-help" id="websiteStepHelp">Confirm the website or public social page that belongs to this business.</p>
+            <label for="websiteInput">
+              Website or social business page
+              <input id="websiteInput" name="website" type="text" autocomplete="url" inputmode="url" aria-describedby="websiteStepHelp websiteError" placeholder="yourbusiness.com" />
+            </label>
+            <p id="websiteError" class="fast-field-error" role="alert" hidden></p>
+            <label id="serviceAreaField" for="serviceAreaInput" hidden>
+              City or service area
+              <input id="serviceAreaInput" name="service_area" type="text" autocomplete="address-level2" placeholder="Chicago, IL" />
+              <small>We use this to find the correct local business.</small>
+            </label>
+            <div class="fast-wizard-actions">
+              <button class="primary" id="buildAgentButton" type="submit"><i data-lucide="sparkles"></i> Build my agent</button>
+              <button class="fast-text-action" id="noWebsiteButton" type="button">I don’t have a website</button>
+            </div>
+          </section>
+
+          <section class="fast-wizard-step fast-review" id="reviewStep" aria-labelledby="reviewStepTitle" hidden>
+            <h1 id="reviewStepTitle" tabindex="-1">Ready to build your agent?</h1>
+            <p class="fast-step-help">Check these details before RingPort researches your business.</p>
+            <dl class="fast-review-list">
+              <div><dt>Business</dt><dd id="reviewBusiness"></dd><button id="editReviewBusiness" type="button">Edit</button></div>
+              <div><dt>Website</dt><dd id="reviewWebsite"></dd><button id="editReviewWebsite" type="button">Edit</button></div>
+            </dl>
+            <div class="fast-wizard-actions">
+              <button class="primary" id="reviewBuildButton" type="submit"><i data-lucide="sparkles"></i> Build my agent</button>
+            </div>
+          </section>
+
+          <section class="fast-wizard-step fast-control-entry" id="controlStep" aria-labelledby="controlStepTitle" hidden>
+            <h1 id="controlStepTitle" tabindex="-1">Test your RingPort agent</h1>
+            <p class="fast-step-help">Enter your business details to prepare a live agent.</p>
+            <div class="places-autocomplete-field">
+              <label for="controlBusinessNameInput">Business name</label>
+              <div class="fast-combobox-wrap">
+                <input
+                  id="controlBusinessNameInput"
+                  type="search"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-haspopup="listbox"
+                  aria-expanded="false"
+                  aria-controls="controlPlacesSuggestions"
+                  aria-describedby="controlPlacesStatus"
+                  autocomplete="off"
+                  placeholder="Your business name as it appears on Google Maps"
+                  required
+                />
+                <div id="controlPlacesSuggestions" class="places-suggestions" role="listbox" aria-label="Business matches" hidden></div>
+              </div>
+              <input id="controlPlaceIdInput" type="hidden" />
+              <small id="controlPlacesStatus" role="status" aria-live="polite" aria-atomic="true"></small>
+            </div>
+            <label for="controlWebsiteInput">Website <span>optional</span><input id="controlWebsiteInput" type="text" autocomplete="url" inputmode="url" placeholder="example.com" /></label>
+            <div class="fast-wizard-actions"><button class="primary" id="controlBuildButton" type="submit"><i data-lucide="sparkles"></i> Test agent</button></div>
+          </section>
         </form>
+        </div>
       </section>
 
       <section id="agentScreen" hidden>
@@ -78,7 +171,7 @@
               <label><span>Service area <i data-lucide="pencil-line" aria-hidden="true"></i></span><textarea id="profileArea" rows="3" placeholder="Not found"></textarea></label>
               <label class="wide"><span>Services <i data-lucide="pencil-line" aria-hidden="true"></i></span><textarea id="profileServices" rows="4" placeholder="Not found"></textarea></label>
               <label class="compact"><span>Agent language <i data-lucide="pencil-line" aria-hidden="true"></i></span><select id="profileLanguage"><option selected>English</option><option>Spanish</option><option>French</option><option>German</option><option>Italian</option><option>Portuguese</option><option>Polish</option><option>Ukrainian</option><option>Russian</option><option>Arabic</option><option>Hindi</option><option>Japanese</option><option>Korean</option><option>Chinese</option></select></label>
-              <label class="compact"><span>Agent voice <i data-lucide="pencil-line" aria-hidden="true"></i></span><select id="profileVoiceName"><option value="Puck">Puck — Warm and upbeat</option><option value="Charon">Charon — Calm and steady</option><option value="Kore">Kore — Clear and professional</option><option value="Fenrir">Fenrir — Confident and direct</option><option value="Aoede">Aoede — Friendly and expressive</option><option value="Leda">Leda — Bright and polished</option><option value="Orus">Orus — Grounded and direct</option><option value="Zephyr">Zephyr — Smooth and relaxed</option></select></label>
+              <label class="compact"><span>Agent voice <i data-lucide="pencil-line" aria-hidden="true"></i></span><select id="profileVoiceName"><option value="Puck">Puck, warm and upbeat</option><option value="Charon">Charon, calm and steady</option><option value="Kore">Kore, clear and professional</option><option value="Fenrir">Fenrir, confident and direct</option><option value="Aoede">Aoede, friendly and expressive</option><option value="Leda">Leda, bright and polished</option><option value="Orus">Orus, grounded and direct</option><option value="Zephyr">Zephyr, smooth and relaxed</option></select></label>
               <label class="wide compact fast-booking-provider">
                 <span>Booking system <i data-lucide="pencil-line" aria-hidden="true"></i></span>
                 <select id="profileCalendarProvider" aria-describedby="profileCalendarHelp" aria-controls="profileVagaroField profileCustomBookingField">
@@ -148,11 +241,15 @@
         </details>
       </section>
 
-      <section class="fast-error" id="errorScreen" hidden>
+      <section class="fast-error" id="errorScreen" hidden role="alert">
         <i data-lucide="circle-alert"></i>
-        <h1>Agent unavailable</h1>
+        <h1 id="errorTitle" tabindex="-1">We couldn’t build your agent</h1>
         <p id="errorMessage"></p>
-        <a class="button-link" href="/">Business sign in</a>
+        <div class="fast-error-actions">
+          <button class="primary" id="retryBuildButton" type="button">Try again</button>
+          <button id="backToDetailsButton" type="button">Back to details</button>
+          <a href="/">Business sign in</a>
+        </div>
       </section>
     </main>
     <script src="/vendor/lucide/lucide.min.js"></script>
